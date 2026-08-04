@@ -261,7 +261,15 @@ impl DisplayState {
                     .copied()
                     .max()
                     .unwrap_or(1);
-                peak.max(self.baseline + 1)
+                let peak = peak.max(self.baseline + 1);
+                match self.vertical {
+                    // A logarithmic axis is read off its decade lines, so the
+                    // top belongs on one of them rather than on whatever the
+                    // tallest channel happens to be. Rounding up also stops the
+                    // peak being clipped flat against the top of the plot.
+                    VerticalScale::Logarithmic => logarithmic_ceiling(peak),
+                    _ => peak,
+                }
             }
         }
     }
@@ -401,9 +409,91 @@ impl DisplayState {
     }
 }
 
+/// The next 1, 2 or 5 times a power of ten strictly above `peak`.
+///
+/// This is the top of a logarithmic axis: a round number the eye can read off
+/// the gridlines, and far enough above the tallest channel that the peak has
+/// room to breathe instead of being pressed flat against the frame. Strictly
+/// above, because a peak landing exactly on the top line is the thing being
+/// fixed.
+fn logarithmic_ceiling(peak: u64) -> u64 {
+    let mut step = 1u64;
+    loop {
+        for multiple in [1u64, 2, 5] {
+            let Some(candidate) = step.checked_mul(multiple) else {
+                return u64::MAX;
+            };
+            if candidate > peak {
+                return candidate;
+            }
+        }
+        let Some(next) = step.checked_mul(10) else {
+            return u64::MAX;
+        };
+        step = next;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_logarithmic_axis_tops_out_above_the_tallest_channel() {
+        // The complaint this fixes: the peak drawn flush against the top of the
+        // plot, with no room above it.
+        for peak in [1u64, 9, 10, 99, 100, 1_234, 15_675, 3_558_911] {
+            let top = logarithmic_ceiling(peak);
+            assert!(top > peak, "{peak} needs headroom, got a top of {top}");
+        }
+    }
+
+    #[test]
+    fn a_logarithmic_top_is_a_round_number() {
+        // One, two or five times a power of ten, so the top lands on a
+        // gridline the axis already labels.
+        assert_eq!(logarithmic_ceiling(1), 2);
+        assert_eq!(logarithmic_ceiling(9), 10);
+        assert_eq!(logarithmic_ceiling(10), 20);
+        assert_eq!(logarithmic_ceiling(99), 100);
+        assert_eq!(logarithmic_ceiling(100), 200);
+        assert_eq!(logarithmic_ceiling(1_234), 2_000);
+        assert_eq!(logarithmic_ceiling(15_675), 20_000);
+        assert_eq!(logarithmic_ceiling(3_558_911), 5_000_000);
+    }
+
+    #[test]
+    fn only_the_logarithmic_axis_gains_headroom() {
+        // Automatic fills the window with the tallest channel on purpose;
+        // giving it headroom would be changing something nobody asked about.
+        let mut spectrum = Spectrum::new(64);
+        spectrum.channels[10] = 1_234;
+        let mut display = DisplayState::for_length(64);
+
+        display.vertical = VerticalScale::Automatic;
+        assert_eq!(display.full_scale(&spectrum), 1_234);
+
+        display.vertical = VerticalScale::Logarithmic;
+        assert_eq!(display.full_scale(&spectrum), 2_000);
+    }
+
+    #[test]
+    fn the_tallest_channel_no_longer_reaches_the_top_of_a_logarithmic_plot() {
+        let mut spectrum = Spectrum::new(64);
+        spectrum.channels[10] = 15_675;
+        let mut display = DisplayState::for_length(64);
+        display.vertical = VerticalScale::Logarithmic;
+        let full_scale = display.full_scale(&spectrum);
+        let fraction = display.height_fraction(15_675, full_scale);
+        assert!(
+            fraction < 0.99,
+            "the peak still touches the top: {fraction}"
+        );
+        assert!(
+            fraction > 0.80,
+            "the peak should still dominate the plot, not shrink: {fraction}"
+        );
+    }
 
     fn state() -> DisplayState {
         DisplayState::for_length(1024)

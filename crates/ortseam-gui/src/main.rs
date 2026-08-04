@@ -79,6 +79,10 @@ fn main() -> eframe::Result {
         .with_inner_size(pair_from_env("ORTSEAM_WINDOW_SIZE").unwrap_or([1360.0, 860.0]))
         .with_min_inner_size([900.0, 600.0])
         .with_icon(icon())
+        // Created hidden, and shown once there is something to look at. A
+        // window mapped before the first paint is an empty frame flashing on
+        // screen while start-up work happens behind it.
+        .with_visible(false)
         .with_title("ortseam");
     if let Some(position) = pair_from_env("ORTSEAM_WINDOW_POS") {
         viewport = viewport.with_position(position);

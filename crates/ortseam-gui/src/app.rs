@@ -532,6 +532,11 @@ pub struct App {
     /// Done on the first drawn frame rather than at startup, so the window is
     /// on screen while it happens rather than the program appearing to hang.
     pub looked_for_instruments: bool,
+    /// Whether the window has been shown yet.
+    ///
+    /// It is created hidden and revealed after the first frame is drawn, so
+    /// start-up does not flash an empty window while it loads.
+    pub shown: bool,
     /// Configured detectors. Simulated instruments stand in for hardware.
     pub detectors: Vec<AnyMcb>,
     /// The detector pick list.
@@ -719,6 +724,9 @@ impl App {
         let mut app = Self {
             instruments: InstrumentScan::default(),
             looked_for_instruments: false,
+            // Headless construction never shows a window, and revealing one
+            // that does not exist is harmless, so this starts false either way.
+            shown: false,
             detectors,
             detector_list,
             windows: Vec::new(),
@@ -1797,21 +1805,35 @@ impl App {
         self.status = format!("Sum of Counts from Channel {low} to {high} is: {sum}");
     }
 
-    fn add_calibration_point(&mut self, energy: f64) {
-        let Some(index) = self.active else { return };
+    /// The channel a calibration point would be entered at, and whether it came
+    /// from a region's peak rather than the marker itself.
+    ///
+    /// The manual (§4.3.2.2): "if no ROI is present at the marker, the marker
+    /// channel itself will be used. However, that is less accurate than using
+    /// the ROI method." The dialog shows what this returns, so what is
+    /// displayed and what is entered cannot drift apart.
+    pub fn calibration_channel(&self) -> Option<(f64, bool)> {
+        let index = self.active?;
         let marker = self.windows[index].display.marker;
         let settings = self.settings;
-        // Use the peak centroid when a region is marked, the marker otherwise.
-        let channel = Self::spectrum_of(&self.windows, &self.detectors, index)
-            .and_then(|spectrum| {
+        let centroid =
+            Self::spectrum_of(&self.windows, &self.detectors, index).and_then(|spectrum| {
                 spectrum
                     .rois
                     .at(marker)
                     .copied()
                     .and_then(|roi| peak_info(spectrum, roi, &settings).ok())
                     .map(|info| info.centroid)
-            })
-            .unwrap_or(marker as f64);
+            });
+        Some(match centroid {
+            Some(centroid) => (centroid, true),
+            None => (marker as f64, false),
+        })
+    }
+
+    fn add_calibration_point(&mut self, energy: f64) {
+        let Some(index) = self.active else { return };
+        let (channel, _from_roi) = self.calibration_channel().unwrap_or((0.0, false));
         self.windows[index]
             .calibration
             .add(CalibrationPoint::new(channel, energy));
@@ -1829,7 +1851,14 @@ impl App {
                 );
             }
             None => {
-                self.status = format!("Entering Calibration for point number {}...", points + 1);
+                // A line through one point is not a line. The manual is
+                // explicit - "if two points are entered, a linear calibration
+                // is done" - so say which one is missing rather than leaving
+                // the spectrum reading "uncalibrated" with no explanation.
+                self.status = format!(
+                    "point {points} entered at channel {channel:.2}; \
+                     mark a second peak and enter its energy to calibrate"
+                );
             }
         }
     }
@@ -3140,6 +3169,13 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.tick();
         self.draw(ui);
+        // The window is created hidden so that start-up does not flash an empty
+        // frame; now that one has been drawn, there is something worth showing.
+        if !self.shown {
+            self.shown = true;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

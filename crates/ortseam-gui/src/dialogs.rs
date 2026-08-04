@@ -1972,6 +1972,10 @@ fn dialog_window<R>(
         .open(&mut open)
         .resizable(true)
         .collapsible(false)
+        // Dialogs float above the spectrum windows. Without this they share a
+        // layer with them, so clicking a spectrum - which is exactly what
+        // calibrating asks you to do - buries the dialog behind it.
+        .order(egui::Order::Foreground)
         .default_pos(egui::Pos2::new(150.0 + offset, 100.0 + offset * 0.6))
         .show(ctx, |ui| {
             contents(app, ui);
@@ -2373,12 +2377,23 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
             ui.label("open a spectrum first");
             return;
         };
-        let marker = app.windows[index].display.marker;
         let points = app.windows[index].calibration.points().to_vec();
         let fit = app.windows[index].calibration.calibration().cloned();
+        // Exactly what pressing Enter will use, so there is no guessing at
+        // whether the region's peak or the bare marker is about to be entered.
+        let (channel, from_roi) = app.calibration_channel().unwrap_or((0.0, false));
 
         ui.horizontal(|ui| {
-            ui.label(format!("Peak in channel: {marker}"));
+            if from_roi {
+                ui.label(format!("Peak in channel: {channel:.2}"))
+                    .on_hover_text("the centroid of the region under the marker");
+            } else {
+                ui.label(format!("Marker channel: {channel:.0}"))
+                    .on_hover_text(
+                        "no region under the marker, so the marker channel itself \
+                         is used - mark the peak with a region for a better figure",
+                    );
+            }
             ui.label("Calibration (Energy):");
             ui.add(
                 egui::TextEdit::singleline(&mut app.dialogs.calibration_energy).desired_width(90.0),
@@ -2441,7 +2456,34 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
             }
         });
         ui.separator();
-        ui.label(format!("{} point(s) entered", points.len()));
+        // A line needs two points. Saying so here is the difference between
+        // "it did not work" and "it is not finished yet".
+        match (points.len(), fit.is_some()) {
+            (0, _) => {
+                ui.label("no points yet - put the marker on a peak and enter its energy");
+            }
+            (1, false) => {
+                ui.label(
+                    egui::RichText::new(
+                        "1 point entered - a second peak is needed before the \
+                         spectrum is calibrated",
+                    )
+                    .strong(),
+                );
+            }
+            (count, false) => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{count} points entered, but they do not fit - two \
+                         different channels are needed"
+                    ))
+                    .strong(),
+                );
+            }
+            (count, true) => {
+                ui.label(format!("{count} point(s) entered"));
+            }
+        }
         ui.label(
             egui::RichText::new(
                 "Type in a channel or an energy to correct it - the fit follows.                  The last column is how far the fit misses that point by; a number                  much larger than the others is the point to look at.",
