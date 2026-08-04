@@ -1,7 +1,8 @@
 //! The DPM-USB adapter over libusb, with no vendor driver at all.
 //!
 //! On Windows the adapter belongs to ORTEC's driver and is reached through its
-//! IOCTLs; see [`crate::usb`]. Everywhere else there is no driver to install:
+//! IOCTLs; see `usb.rs`, which exists only there. Everywhere else there is no
+//! driver to install:
 //! the kernel's own USB stack hands the interface over, and the same frames go
 //! down the same two bulk endpoints. That is the whole difference, which is why
 //! [`crate::dpm`] sits on a trait rather than on either one.
