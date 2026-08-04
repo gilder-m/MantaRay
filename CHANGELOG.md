@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+**Audit fixes (2026-08-04).** A five-pass review of the whole workspace; what
+it found and what was fixed:
+
+- *Energy and shape calibration fitting.* A duplicated calibration point no
+  longer breaks (or silently skews) the fit - repeated channels average, and
+  the fit is least-squares over every point. The quadratic fit is solved in a
+  centred, scaled coordinate, so 16k-channel spectra no longer shred the
+  curvature coefficient. Auto-calibration refits exactly-three matches as the
+  line the search validated instead of an exact parabola through
+  tolerance-sized misses, and one reference line can no longer be claimed by
+  two peaks (an unresolved doublet could previously stand in for two of the
+  required three agreeing lines).
+- *The uncertainty preset* now stops on the 1-sigma uncertainty of the **net
+  peak area**, as the manual defines it ("calculated in the same manner as
+  for the Peak Info command") - not on gross counts, which on a
+  continuum-dominated region would stop acquisition far too early.
+- *Quantitative analysis* reports why a requested thing could not be done
+  instead of silently omitting it: a decay correction with no recorded start
+  time, and each absent-nuclide MDA row that could not be built, now land in
+  the report's notes.
+- *QA control charts* flag a not-a-number measurement as Action instead of
+  letting it sail through as in-control.
+- *DPM protocol (in-house USB).* Partial frame sends, empty write
+  acknowledgements and replies whose length word promises more than arrived
+  are now errors instead of silent desynchronisation; `read_all` refuses
+  reads that would wrap the sixteen-bit address space and return duplicated
+  memory. The libusb backend uses cancel-on-timeout transfers throughout, so
+  a timed-out transfer can no longer hand its stale completion to the next
+  request as if it were the answer.
+- *Report output.* CSV fields are quoted when they need it (a comma in a
+  nuclide name no longer shifts every later column), and analysis notes are
+  printed with the nuclide report.
+- Half-life display no longer renders whole values with a trailing dot
+  ("1248000000. y"); FW(1/x)M clamps its `x` to the documented 2..=99 on
+  input as well as in the settings dialog.
+
+The findings not yet fixed - with file, line, failure scenario and suggested
+fix for each - are recorded in [TODO.md](TODO.md).
+
 ## 0.1.0
 
 The first release. Everything in the MAESTRO v7 (A65-B32) manual is

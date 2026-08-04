@@ -121,19 +121,27 @@ impl Device {
 }
 
 impl BulkDevice for Device {
+    // Every transfer goes through `transfer_blocking`, which cancels on
+    // timeout and does not return until the transfer has actually come back.
+    // The obvious `submit` + `wait_next_complete` pair is a trap: a timed-out
+    // transfer stays queued, its completion is handed to the *next* request as
+    // if it were the answer, and from then on every reply is one question
+    // late. nusb's own documentation warns of exactly this.
     fn bulk(&self, endpoint: u8, data: &mut [u8], milliseconds: u32) -> Result<usize, String> {
         let timeout = Duration::from_millis(u64::from(milliseconds));
+        use nusb::transfer::TransferError;
         // The top bit of an endpoint address is its direction, which decides
         // whether these bytes are being sent or are about to be filled in.
         if endpoint & 0x80 == 0 {
             let mut out = self.out.borrow_mut();
-            out.submit(data.to_vec().into());
-            let done = out.wait_next_complete(timeout).ok_or_else(|| {
-                format!("the adapter did not accept a frame within {milliseconds} ms")
-            })?;
-            done.status
-                .map_err(|error| format!("writing to endpoint {endpoint:#04x}: {error}"))?;
-            Ok(done.actual_len)
+            let done = out.transfer_blocking(data.to_vec().into(), timeout);
+            match done.status {
+                Ok(()) => Ok(done.actual_len),
+                Err(TransferError::Cancelled) => Err(format!(
+                    "the adapter did not accept a frame within {milliseconds} ms"
+                )),
+                Err(error) => Err(format!("writing to endpoint {endpoint:#04x}: {error}")),
+            }
         } else {
             let mut input = self.input.borrow_mut();
             // A read must be submitted in whole packets; the protocol layer
@@ -141,15 +149,18 @@ impl BulkDevice for Device {
             let packet = input.max_packet_size().max(1);
             let room = data.len().div_ceil(packet) * packet;
             let buffer = input.allocate(room);
-            input.submit(buffer);
-            let done = input
-                .wait_next_complete(timeout)
-                .ok_or_else(|| format!("the instrument did not answer within {milliseconds} ms"))?;
-            done.status
-                .map_err(|error| format!("reading from endpoint {endpoint:#04x}: {error}"))?;
-            let taken = done.actual_len.min(data.len());
-            data[..taken].copy_from_slice(&done.buffer[..taken]);
-            Ok(taken)
+            let done = input.transfer_blocking(buffer, timeout);
+            match done.status {
+                Ok(()) => {
+                    let taken = done.actual_len.min(data.len());
+                    data[..taken].copy_from_slice(&done.buffer[..taken]);
+                    Ok(taken)
+                }
+                Err(TransferError::Cancelled) => Err(format!(
+                    "the instrument did not answer within {milliseconds} ms"
+                )),
+                Err(error) => Err(format!("reading from endpoint {endpoint:#04x}: {error}")),
+            }
         }
     }
 }

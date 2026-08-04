@@ -361,7 +361,23 @@ pub fn nuclide_report(analysis: &QuantitativeReport) -> String {
     if total > 0.0 {
         out.push_str(&format!("\nTotal detected activity: {total:.3} {unit}\n"));
     }
+    if !analysis.notes.is_empty() {
+        out.push('\n');
+        for note in &analysis.notes {
+            out.push_str(&format!("Note: {note}\n"));
+        }
+    }
     out
+}
+
+/// Quotes a value for a CSV cell when it holds anything that would break the
+/// row - names come from user-written library files and may contain commas.
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 /// Exports the per-nuclide results as CSV.
@@ -369,23 +385,19 @@ pub fn results_csv(analysis: &QuantitativeReport) -> String {
     let mut out = String::from(
         "nuclide,activity,uncertainty,mda,unit,detected,energy_kev,net_area,net_uncertainty,count_rate,efficiency,yield_percent\n",
     );
-    let unit = analysis.activity_unit();
+    let unit = csv_field(&analysis.activity_unit());
     for nuclide in &analysis.nuclides {
+        let name = csv_field(&nuclide.nuclide);
         if nuclide.lines.is_empty() {
             out.push_str(&format!(
-                "{},{:.6},{:.6},{:.6},{unit},{},,,,,,\n",
-                nuclide.nuclide,
-                nuclide.activity,
-                nuclide.uncertainty,
-                nuclide.mda,
-                nuclide.detected
+                "{name},{:.6},{:.6},{:.6},{unit},{},,,,,,\n",
+                nuclide.activity, nuclide.uncertainty, nuclide.mda, nuclide.detected
             ));
             continue;
         }
         for line in &nuclide.lines {
             out.push_str(&format!(
-                "{},{:.6},{:.6},{:.6},{unit},{},{:.3},{:.1},{:.1},{:.4},{:.6},{:.4}\n",
-                nuclide.nuclide,
+                "{name},{:.6},{:.6},{:.6},{unit},{},{:.3},{:.1},{:.1},{:.4},{:.6},{:.4}\n",
                 nuclide.activity,
                 nuclide.uncertainty,
                 nuclide.mda,

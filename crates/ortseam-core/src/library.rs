@@ -215,13 +215,9 @@ impl Nuclide {
         } else {
             (seconds, "s")
         };
-        format!("{value:.4} {unit}")
-            .replace("0000 ", " ")
-            .replace("000 ", " ")
-            .replace("00 ", " ")
-            .replace(".0 ", " ")
-            .trim()
-            .to_string()
+        let value = format!("{value:.4}");
+        let value = value.trim_end_matches('0').trim_end_matches('.');
+        format!("{value} {unit}")
     }
 }
 

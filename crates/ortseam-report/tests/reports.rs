@@ -208,3 +208,38 @@ fn results_export_as_csv() {
         }
     }
 }
+
+#[test]
+fn a_comma_in_a_nuclide_name_does_not_shift_the_csv_columns() {
+    // Nuclide names come from user-written library files; a comma must be
+    // quoted, not silently push every later column over by one.
+    let s = spectrum();
+    let mut awkward = NuclideLibrary::standard()
+        .nuclide("Cs-137")
+        .expect("the standard library knows Cs-137")
+        .clone();
+    awkward.name = "Cs-137, fresh".to_string();
+    let mut library = NuclideLibrary::new("awkward");
+    library.push(awkward);
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&s, &library, &options);
+    let csv = results_csv(&analysis);
+    let mut lines = csv.lines();
+    let header = lines.next().expect("a header row");
+    let row = lines.next().expect("a data row");
+    assert!(row.starts_with("\"Cs-137, fresh\""), "{row}");
+    // Splitting outside quotes must give exactly the header's column count.
+    let mut fields = 1;
+    let mut quoted = false;
+    for c in row.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(fields, header.split(',').count(), "{row}");
+}

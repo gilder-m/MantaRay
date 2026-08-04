@@ -133,31 +133,36 @@ impl EnergyCalibration {
                 got: points.len(),
             });
         }
-        let distinct_channels = {
-            let mut chans: Vec<f64> = points.iter().map(|p| p.channel).collect();
-            chans.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            chans.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-            chans.len()
-        };
+        let distinct_channels = distinct_abscissae(points.iter().map(|p| p.channel));
         if distinct_channels < 2 {
             return Err(CalibrationError::Degenerate);
         }
 
-        if points.len() == 2 || distinct_channels == 2 {
-            let (p, q) = (points[0], points[1]);
-            let gain = (q.value - p.value) / (q.channel - p.channel);
-            if !gain.is_finite() {
-                return Err(CalibrationError::Degenerate);
-            }
-            let zero = p.value - gain * p.channel;
-            return Ok(Self::new([zero, gain, 0.0], units));
-        }
+        let pairs: Vec<(f64, f64)> = points.iter().map(|p| (p.channel, p.value)).collect();
+        let solution = if distinct_channels == 2 {
+            linear_fit(&pairs)
+        } else {
+            quadratic_fit(&pairs)
+        };
+        solution
+            .map(|coefficients| Self::new(coefficients, units))
+            .ok_or(CalibrationError::Degenerate)
+    }
 
-        let basis = |ch: f64| [1.0, ch, ch * ch];
-        let rows: Vec<([f64; 3], f64)> =
-            points.iter().map(|p| (basis(p.channel), p.value)).collect();
-        let solution = least_squares3(&rows).ok_or(CalibrationError::Degenerate)?;
-        Ok(Self::new(solution, units))
+    /// Least-squares straight line through the points, however many there are.
+    ///
+    /// Auto-calibration uses this when it has exactly three matches: the
+    /// candidate that won the search was a line, and an exact parabola through
+    /// three points would bend to fit misses the tolerance allowed, then
+    /// diverge wherever the spectrum extrapolates.
+    fn fit_linear_with_units(
+        points: &[CalibrationPoint],
+        units: &str,
+    ) -> Result<Self, CalibrationError> {
+        let pairs: Vec<(f64, f64)> = points.iter().map(|p| (p.channel, p.value)).collect();
+        linear_fit(&pairs)
+            .map(|coefficients| Self::new(coefficients, units))
+            .ok_or(CalibrationError::Degenerate)
     }
 }
 
@@ -185,7 +190,8 @@ const AUTO_TOLERANCE: f64 = 2.0;
 /// energies. Every pair of peaks is tried against every pair of lines; each
 /// candidate linear calibration is scored by how many of the peaks it drops
 /// within 2 keV of some line, and the winner is refitted through
-/// all of its matches. At least three peaks must agree, so a lucky pair cannot
+/// all of its matches. At least three peaks on three different lines must
+/// agree, so a lucky pair - or a doublet split across one line - cannot
 /// calibrate a spectrum by itself; ties go to the candidate whose matches are
 /// tightest.
 pub fn auto_calibrate(
@@ -245,7 +251,15 @@ pub fn auto_calibrate(
 
     match best {
         Some((_, _, matches)) => {
-            let calibration = EnergyCalibration::fit_with_units(&matches, units)?;
+            // Three matches validate the winning line, no more: an exact
+            // parabola through them would bend to fit tolerance-sized misses
+            // and diverge on extrapolation. Four or more overdetermine the
+            // quadratic, which is then allowed to pick up real nonlinearity.
+            let calibration = if matches.len() == 3 {
+                EnergyCalibration::fit_linear_with_units(&matches, units)?
+            } else {
+                EnergyCalibration::fit_with_units(&matches, units)?
+            };
             Ok(AutoCalibration {
                 calibration,
                 matches,
@@ -260,14 +274,17 @@ pub fn auto_calibrate(
 
 /// Which peaks a candidate `zero + gain*channel` drops onto a reference line,
 /// and the mean absolute miss of those that land.
+///
+/// Each reference line may be claimed by one peak only - the closest. Without
+/// that rule an unresolved doublet counts as two agreeing peaks on the same
+/// line, and "at least three must agree" can be satisfied by two real lines.
 fn match_peaks(
     peaks: &[f64],
     references: &[f64],
     zero: f64,
     gain: f64,
 ) -> (Vec<CalibrationPoint>, f64) {
-    let mut matches = Vec::new();
-    let mut total_miss = 0.0;
+    let mut claims: Vec<(f64, f64, f64)> = Vec::new();
     for &channel in peaks {
         let predicted = zero + gain * channel;
         let nearest = references
@@ -282,15 +299,29 @@ fn match_peaks(
             .expect("references are non-empty");
         let miss = (nearest - predicted).abs();
         if miss <= AUTO_TOLERANCE {
-            matches.push(CalibrationPoint::new(channel, nearest));
-            total_miss += miss;
+            claims.push((channel, nearest, miss));
         }
+    }
+    claims.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    let mut matches: Vec<CalibrationPoint> = Vec::new();
+    let mut total_miss = 0.0;
+    for (channel, line, miss) in claims {
+        if matches.iter().any(|taken| taken.value == line) {
+            continue;
+        }
+        matches.push(CalibrationPoint::new(channel, line));
+        total_miss += miss;
     }
     let mean = if matches.is_empty() {
         f64::INFINITY
     } else {
         total_miss / matches.len() as f64
     };
+    matches.sort_by(|a, b| {
+        a.channel
+            .partial_cmp(&b.channel)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     (matches, mean)
 }
 
@@ -339,20 +370,16 @@ impl ShapeCalibration {
                 got: points.len(),
             });
         }
-        if points.len() == 2 {
-            let ((x0, y0), (x1, y1)) = (points[0], points[1]);
-            if (x1 - x0).abs() < 1e-9 {
-                return Err(CalibrationError::Degenerate);
-            }
-            let slope = (y1 - y0) / (x1 - x0);
-            return Ok(Self::new([y0 - slope * x0, slope, 0.0]));
+        let distinct = distinct_abscissae(points.iter().map(|(channel, _)| *channel));
+        if distinct < 2 {
+            return Err(CalibrationError::Degenerate);
         }
-        let rows: Vec<([f64; 3], f64)> = points
-            .iter()
-            .map(|(channel, width)| ([1.0, *channel, channel * channel], *width))
-            .collect();
-        let solution = least_squares3(&rows).ok_or(CalibrationError::Degenerate)?;
-        Ok(Self::new(solution))
+        let solution = if distinct == 2 {
+            linear_fit(points)
+        } else {
+            quadratic_fit(points)
+        };
+        solution.map(Self::new).ok_or(CalibrationError::Degenerate)
     }
 }
 
@@ -464,6 +491,73 @@ impl CalibrationTable {
 
 fn truncate_units(units: &str) -> String {
     units.chars().take(4).collect()
+}
+
+/// How many of the `x` values are meaningfully different from each other.
+fn distinct_abscissae(xs: impl Iterator<Item = f64>) -> usize {
+    let mut sorted: Vec<f64> = xs.collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    sorted.len()
+}
+
+/// Least-squares straight line `y = c0 + c1*x`, as polynomial coefficients.
+///
+/// Repeated `x` values average instead of breaking the fit, which is what a
+/// calibration point entered twice deserves. Centred on the mean, so the
+/// arithmetic is well conditioned at any channel count.
+fn linear_fit(points: &[(f64, f64)]) -> Option<[f64; 3]> {
+    let n = points.len() as f64;
+    let mean_x = points.iter().map(|(x, _)| x).sum::<f64>() / n;
+    let mean_y = points.iter().map(|(_, y)| y).sum::<f64>() / n;
+    let mut cross = 0.0;
+    let mut spread = 0.0;
+    for (x, y) in points {
+        let d = x - mean_x;
+        cross += d * (y - mean_y);
+        spread += d * d;
+    }
+    if spread <= 0.0 {
+        return None;
+    }
+    let gain = cross / spread;
+    let zero = mean_y - gain * mean_x;
+    (gain.is_finite() && zero.is_finite()).then_some([zero, gain, 0.0])
+}
+
+/// Least-squares parabola `y = c0 + c1*x + c2*x^2`.
+///
+/// The normal equations are solved in a centred, scaled coordinate: on the raw
+/// channel basis a 16k-channel spectrum puts entries from 1 to 10^17 in the
+/// same matrix, and the quadratic coefficient comes back shredded.
+fn quadratic_fit(points: &[(f64, f64)]) -> Option<[f64; 3]> {
+    let n = points.len() as f64;
+    let mean = points.iter().map(|(x, _)| x).sum::<f64>() / n;
+    let scale = points
+        .iter()
+        .map(|(x, _)| (x - mean).abs())
+        .fold(0.0, f64::max);
+    if scale <= 0.0 {
+        return None;
+    }
+    let rows: Vec<([f64; 3], f64)> = points
+        .iter()
+        .map(|(x, y)| {
+            let t = (x - mean) / scale;
+            ([1.0, t, t * t], *y)
+        })
+        .collect();
+    let [a, b, c] = least_squares3(&rows)?;
+    // Expand y = a + b*t + c*t^2 with t = (x - m)/s back to powers of x.
+    let (m, s) = (mean, scale);
+    let c2 = c / (s * s);
+    let c1 = b / s - 2.0 * m * c / (s * s);
+    let c0 = a - b * m / s + c * m * m / (s * s);
+    let coefficients = [c0, c1, c2];
+    coefficients
+        .iter()
+        .all(|v| v.is_finite())
+        .then_some(coefficients)
 }
 
 /// Solves a 3-parameter linear least-squares problem via normal equations.
@@ -588,6 +682,85 @@ mod tests {
     fn solve3_rejects_a_singular_system() {
         let a = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]];
         assert!(solve3(a, [1.0, 2.0, 3.0]).is_none());
+    }
+
+    #[test]
+    fn a_point_entered_twice_averages_instead_of_breaking_the_fit() {
+        // The same peak recorded twice with slightly different energies: the
+        // fit should pass through the average, not divide by zero.
+        let fit = EnergyCalibration::fit(&[
+            CalibrationPoint::new(100.0, 50.0),
+            CalibrationPoint::new(100.0, 55.0),
+            CalibrationPoint::new(500.0, 250.0),
+        ])
+        .expect("two distinct channels are enough");
+        assert!((fit.energy(100.0) - 52.5).abs() < 1e-9);
+        assert!((fit.energy(500.0) - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_duplicated_channel_still_counts_every_point() {
+        // Least squares over all three points, not a line through the first
+        // two: at channel 500 the best answer is the average of 250 and 270.
+        let fit = EnergyCalibration::fit(&[
+            CalibrationPoint::new(100.0, 50.0),
+            CalibrationPoint::new(500.0, 250.0),
+            CalibrationPoint::new(500.0, 270.0),
+        ])
+        .expect("two distinct channels are enough");
+        assert!(
+            (fit.energy(500.0) - 260.0).abs() < 1e-9,
+            "got {}",
+            fit.energy(500.0)
+        );
+    }
+
+    #[test]
+    fn the_quadratic_fit_survives_sixteen_thousand_channels() {
+        // On the raw basis 1, ch, ch^2 the normal equations span seventeen
+        // orders of magnitude at these channels and shred the curvature.
+        let truth = [3.0, 0.35, 1.0e-7];
+        let energy = |ch: f64| truth[0] + truth[1] * ch + truth[2] * ch * ch;
+        let points: Vec<CalibrationPoint> = (0..9)
+            .map(|i| {
+                let ch = 8000.0 + 1000.0 * i as f64;
+                CalibrationPoint::new(ch, energy(ch))
+            })
+            .collect();
+        let fit = EnergyCalibration::fit(&points).expect("a clean parabola");
+        for point in &points {
+            assert!(
+                (fit.energy(point.channel) - point.value).abs() < 1e-6,
+                "channel {} should read {}, got {}",
+                point.channel,
+                point.value,
+                fit.energy(point.channel)
+            );
+        }
+    }
+
+    #[test]
+    fn one_reference_line_takes_one_peak_only() {
+        // Channels 100 and 100.2 both land within tolerance of the 500 line;
+        // only the closer may claim it, so two lines are matched, not three.
+        let (matches, _) = match_peaks(&[100.0, 100.2, 300.0], &[500.0, 1500.0], 0.0, 5.0);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].channel, 100.0);
+        assert_eq!(matches[1].channel, 300.0);
+    }
+
+    #[test]
+    fn three_auto_calibration_matches_fit_a_line_not_a_parabola() {
+        // Peaks sitting a hair off a perfect line: an exact quadratic through
+        // them would pick up curvature from the misses alone.
+        let centroids = [200.1, 600.0, 1199.8];
+        let lines = [200.0, 600.0, 1200.0];
+        let result = auto_calibrate(&centroids, &lines, "keV").expect("should calibrate");
+        assert!(
+            result.calibration.order() <= 1,
+            "coefficients {:?}",
+            result.calibration.coefficients
+        );
     }
 }
 

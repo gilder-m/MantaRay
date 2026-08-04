@@ -1,8 +1,8 @@
 //! Smooth (eq. 23), Strip, Sum, counting activity (eq. 22) and MDA.
 
 use ortseam_core::{
-    AnalysisError, Spectrum, StripFactor, counting_activity, mda_currie, smooth,
-    statistical_uncertainty, strip, sum_channels,
+    AnalysisError, CalculationSettings, Roi, Spectrum, StripFactor, counting_activity, mda_currie,
+    peak_info, smooth, statistical_uncertainty, strip, sum_channels,
 };
 
 #[test]
@@ -119,17 +119,40 @@ fn counting_activity_follows_equation_22() {
 
 #[test]
 fn statistical_uncertainty_is_the_relative_error_of_the_net_area() {
-    // Region with 10 000 gross counts over a flat background: the preset
-    // compares this percentage against the requested limit.
-    let mut s = Spectrum::from_counts(vec![100; 100]);
-    s.live_time = 10.0;
-    let pct = statistical_uncertainty(&s, 10, 89).unwrap();
-    let gross: f64 = 80.0 * 100.0;
+    // The manual: "percent uncertainty at 1 sigma of the net peak area",
+    // "calculated in the same manner as for the Peak Info command". So the
+    // value must be Peak Info's equation (21) over its equation (20), for a
+    // real peak over background.
+    let mut counts = vec![50u64; 100];
+    for (channel, extra) in [
+        (45, 200),
+        (46, 800),
+        (47, 2000),
+        (48, 3200),
+        (49, 3600),
+        (50, 3200),
+        (51, 2000),
+        (52, 800),
+        (53, 200),
+    ] {
+        counts[channel] += extra;
+    }
+    let s = Spectrum::from_counts(counts);
+    let info = peak_info(&s, Roi::new(40, 60), &CalculationSettings::default()).unwrap();
+    assert!(info.net_area > 0.0);
+    let pct = statistical_uncertainty(&s, 40, 60).unwrap();
+    let expected = 100.0 * info.net_area_uncertainty / info.net_area;
     assert!(
-        (pct - 100.0 / gross.sqrt()).abs() < 1e-9,
-        "got {pct}, expected {}",
-        100.0 / gross.sqrt()
+        (pct - expected).abs() < 1e-9,
+        "got {pct}, expected {expected}"
     );
+
+    // A flat continuum holds no net peak: however many counts it gathers, no
+    // uncertainty target can be reached, where the gross formula would claim
+    // one ever more loudly.
+    let flat = Spectrum::from_counts(vec![100; 100]);
+    assert!(statistical_uncertainty(&flat, 10, 89).is_none());
+
     let empty = Spectrum::new(100);
     assert!(statistical_uncertainty(&empty, 10, 89).is_none());
 }

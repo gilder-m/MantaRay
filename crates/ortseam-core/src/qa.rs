@@ -250,7 +250,9 @@ fn classify(value: f64, center: f64, sigma: f64, limits: &ControlLimits) -> QaSt
         return QaStatus::InControl;
     }
     let z = (value - center).abs() / sigma;
-    if z >= limits.action_sigma {
+    // A measurement that is not a number cannot be in control: NaN fails
+    // every comparison, and without this it would sail through as fine.
+    if !z.is_finite() || z >= limits.action_sigma {
         QaStatus::Action
     } else if z >= limits.warning_sigma {
         QaStatus::Warning

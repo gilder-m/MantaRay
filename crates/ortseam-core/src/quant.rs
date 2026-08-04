@@ -199,6 +199,10 @@ pub struct QuantitativeReport {
     pub live_time: f64,
     /// Real time of the analysed spectrum.
     pub real_time: f64,
+    /// Things the analysis was asked for but could not do, and why - a
+    /// requested correction or MDA row must not just silently vanish.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 impl QuantitativeReport {
@@ -278,6 +282,39 @@ pub fn analyse(
     };
     let live_time = spectrum.live_time;
 
+    let mut notes: Vec<String> = Vec::new();
+    if options.decay_correct_to_reference
+        && options.sample.reference_date.is_some()
+        && spectrum.start_time.is_none()
+    {
+        notes.push(
+            "decay correction to the reference date needs the spectrum's start time, \
+             which is not recorded; activities are uncorrected"
+                .to_string(),
+        );
+    }
+    // MDA rows for absent nuclides have preconditions shared by every nuclide;
+    // say those once rather than once per library entry.
+    let mda_possible = if options.report_mda_for_absent_nuclides {
+        let mut possible = true;
+        if spectrum.energy_calibration.is_none() {
+            notes.push(
+                "MDAs for nuclides not found need an energy calibration; the spectrum has none"
+                    .to_string(),
+            );
+            possible = false;
+        }
+        if spectrum.live_time <= 0.0 {
+            notes.push(
+                "MDAs for nuclides not found need a live time; the spectrum has none".to_string(),
+            );
+            possible = false;
+        }
+        possible
+    } else {
+        false
+    };
+
     let mut nuclides: Vec<NuclideResult> = Vec::new();
     for nuclide in library.iter() {
         let decay_correction = decay_corrections(spectrum, options, nuclide.half_life_seconds);
@@ -353,11 +390,11 @@ pub fn analyse(
             .collect();
 
         if lines.is_empty() {
-            if options.report_mda_for_absent_nuclides
-                && !nuclide.flags.no_mda
-                && let Some(result) = mda_only_result(spectrum, options, nuclide, decay_correction)
-            {
-                nuclides.push(result);
+            if mda_possible && !nuclide.flags.no_mda {
+                match mda_only_result(spectrum, options, nuclide, decay_correction) {
+                    Ok(result) => nuclides.push(result),
+                    Err(reason) => notes.push(format!("no MDA for {}: {reason}", nuclide.name)),
+                }
             }
             continue;
         }
@@ -402,6 +439,7 @@ pub fn analyse(
         sample_unit: options.sample.unit.clone(),
         live_time,
         real_time: spectrum.real_time,
+        notes,
     }
 }
 
@@ -481,13 +519,19 @@ fn is_detected(
 }
 
 /// Builds an MDA-only entry for a nuclide that was not found.
+///
+/// The error is the reason no entry can be built, worded for the report's
+/// notes: the caller asked for this row, so its absence must be explained.
 fn mda_only_result(
     spectrum: &Spectrum,
     options: &AnalysisOptions,
     nuclide: &crate::library::Nuclide,
     decay_correction: f64,
-) -> Option<NuclideResult> {
-    let calibration = spectrum.energy_calibration.as_ref()?;
+) -> Result<NuclideResult, String> {
+    let calibration = spectrum
+        .energy_calibration
+        .as_ref()
+        .ok_or("the spectrum has no energy calibration")?;
     // Without an efficiency curve the report is in count-rate units, and the
     // detection limit follows suit rather than disappearing.
     let efficiency = options
@@ -495,7 +539,7 @@ fn mda_only_result(
         .as_ref()
         .filter(|curve| !curve.is_empty());
     if spectrum.live_time <= 0.0 {
-        return None;
+        return Err("the spectrum has no live time".to_string());
     }
     let quantity = if options.sample.quantity > 0.0 {
         options.sample.quantity
@@ -506,10 +550,19 @@ fn mda_only_result(
         .peaks
         .iter()
         .find(|peak| peak.key_line)
-        .or_else(|| nuclide.peaks.first())?;
-    let channel = calibration.channel(reference_line.energy)?;
+        .or_else(|| nuclide.peaks.first())
+        .ok_or("the library holds no line for it")?;
+    let channel = calibration.channel(reference_line.energy).ok_or_else(|| {
+        format!(
+            "the calibration gives no channel for its {:.1} keV line",
+            reference_line.energy
+        )
+    })?;
     if channel < 0.0 || channel >= spectrum.len() as f64 {
-        return None;
+        return Err(format!(
+            "its {:.1} keV line falls outside the spectrum",
+            reference_line.energy
+        ));
     }
     let fwhm = spectrum.fwhm_at(channel).unwrap_or(4.0);
     let half = (1.5 * fwhm).max(2.0);
@@ -526,7 +579,10 @@ fn mda_only_result(
         None => (1.0, 1.0),
     };
     if curve_efficiency <= 0.0 || yield_fraction <= 0.0 {
-        return None;
+        return Err(format!(
+            "the efficiency curve gives nothing at its {:.1} keV line",
+            reference_line.energy
+        ));
     }
     let mda = mda_currie(
         background,
@@ -535,7 +591,7 @@ fn mda_only_result(
         spectrum.live_time,
     ) * decay_correction
         / quantity;
-    Some(NuclideResult {
+    Ok(NuclideResult {
         nuclide: nuclide.name.clone(),
         activity: 0.0,
         uncertainty: 0.0,

@@ -205,7 +205,15 @@ pub fn peak_info(
     let (fwhm, fw_x_m) = if max_net > 0.0 {
         (
             width_at_level(&net, peak_index, max_net / 2.0),
-            width_at_level(&net, peak_index, max_net / settings.fw_x.max(2) as f64),
+            width_at_level(
+                &net,
+                peak_index,
+                max_net
+                    / settings
+                        .fw_x
+                        .clamp(CalculationSettings::MIN_FW_X, CalculationSettings::MAX_FW_X)
+                        as f64,
+            ),
         )
     } else {
         (0.0, 0.0)
@@ -672,12 +680,20 @@ pub fn counting_activity(net_counts: f64, yield_percent: f64, live_time: f64) ->
     (100.0 / yield_percent) * (net_counts / live_time)
 }
 
-/// Relative statistical (1 sigma) uncertainty, in percent, of the counts in a
-/// channel range. This drives the uncertainty preset on instruments that support
-/// it: acquisition stops once the value falls below the requested limit.
+/// Relative statistical (1 sigma) uncertainty, in percent, of the net peak
+/// area in a channel range. This drives the uncertainty preset on instruments
+/// that support it: acquisition stops once the value falls below the requested
+/// limit. The manual defines the preset as "percent uncertainty at 1 sigma of
+/// the net peak area", "calculated in the same manner as for the Peak Info
+/// command" - so this is Peak Info's equation (21) over its equation (20).
+///
+/// `None` when the range holds no net peak (pure continuum, or too narrow for
+/// the background points): no uncertainty target can have been reached when
+/// there is nothing to measure.
 pub fn statistical_uncertainty(spectrum: &Spectrum, low: usize, high: usize) -> Option<f64> {
-    let gross = spectrum.sum_range(low, high) as f64;
-    (gross > 0.0).then(|| 100.0 / gross.sqrt())
+    let settings = CalculationSettings::default();
+    let info = peak_info(spectrum, Roi::new(low, high), &settings).ok()?;
+    (info.net_area > 0.0).then(|| 100.0 * info.net_area_uncertainty / info.net_area)
 }
 
 /// Currie minimum detectable activity: `(2.71 + 4.65*sqrt(B)) / (eff * yield * live)`.

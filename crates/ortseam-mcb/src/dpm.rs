@@ -138,6 +138,20 @@ fn frame(op: u8, offset: u16, data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Sends a frame and insists every byte of it went.
+///
+/// A partly-sent frame is not a smaller request, it is a corrupt one: the
+/// adapter would read the truncation as the frame's end and answer something
+/// else entirely, so it has to be an error here and not a quiet short count.
+fn send_whole(device: &dyn BulkDevice, frame: &mut [u8]) -> Result<(), String> {
+    let wanted = frame.len();
+    let sent = device.bulk(OUT, frame, PATIENCE)?;
+    if sent != wanted {
+        return Err(format!("only {sent} of {wanted} frame bytes were accepted"));
+    }
+    Ok(())
+}
+
 /// One instrument, spoken to through its adapter.
 pub struct Dpm<'a> {
     device: &'a dyn BulkDevice,
@@ -174,7 +188,7 @@ impl<'a> Dpm<'a> {
             ));
         }
         let mut out = read_frame(space, offset, length as u16);
-        self.device.bulk(OUT, &mut out, PATIENCE)?;
+        send_whole(self.device, &mut out)?;
         // One packet of slack, so an answer that fills its last packet exactly
         // does not leave its end-of-transfer marker for the next read. See
         // [`read_block`](Self::read_block).
@@ -186,6 +200,16 @@ impl<'a> Dpm<'a> {
             // never completes - and the adapter sends its answer in small
             // transfers anyway, so this is how the bytes were always going to
             // arrive.
+            //
+            // An open question, noted rather than guessed at: when the length
+            // is an exact multiple of the piece size (every spectrum read is),
+            // the last piece has no slack, so a terminating empty packet -
+            // if the adapter sends one after these replies - would be left for
+            // the next exchange to trip over. On the bench that never
+            // happened: 8192-channel reads followed by commands stayed in
+            // sync, byte-identical to ORTEC's own readout. So either these
+            // replies carry no terminator or the driver absorbs it; do not
+            // "fix" this without an instrument to prove the change against.
             let room = (reply.len() - got).min(HELPING);
             let mut piece = vec![0_u8; room];
             let arrived = self.device.bulk(IN, &mut piece, PATIENCE)?;
@@ -262,7 +286,7 @@ impl<'a> Dpm<'a> {
         out.extend_from_slice(&(length as u16).to_le_bytes());
         out.push(space);
         out.extend_from_slice(&offset.to_le_bytes());
-        self.device.bulk(OUT, &mut out, PATIENCE)?;
+        send_whole(self.device, &mut out)?;
 
         // Room for one packet more than the answer needs. A device that has
         // sent a whole number of packets marks the end with an empty one, and
@@ -297,6 +321,16 @@ impl<'a> Dpm<'a> {
     /// length in sixteen bits.
     pub fn read_all(&self, offset: u16, length: usize) -> Result<Vec<u8>, String> {
         const CHUNK: usize = 1024;
+        // Checked up front, because `offset + progress` is done in sixteen
+        // bits below: past 65535 the cast would wrap and the read would start
+        // again from the bottom, returning duplicated memory under
+        // ever-growing labels rather than an error.
+        let space_left = u16::MAX as usize - offset as usize + 1;
+        if length > space_left {
+            return Err(format!(
+                "{length} bytes from {offset:#06x} runs off the end of the address space"
+            ));
+        }
         let mut out = Vec::with_capacity(length);
         while out.len() < length {
             let want = (length - out.len()).min(CHUNK);
@@ -321,11 +355,17 @@ impl<'a> Dpm<'a> {
             ));
         }
         let mut out = frame(WRITE, offset, data);
-        self.device.bulk(OUT, &mut out, PATIENCE)?;
+        send_whole(self.device, &mut out)?;
         // A write is acknowledged with one byte, which has to be collected or
         // it turns up at the head of the next read.
         let mut reply = [0_u8; MAX_PACKET];
-        self.device.bulk(IN, &mut reply, PATIENCE)?;
+        let arrived = self.device.bulk(IN, &mut reply, PATIENCE)?;
+        if arrived == 0 {
+            // An empty transfer is a stale end-of-transfer marker, not an
+            // acknowledgement: the real one is still queued, and accepting the
+            // marker in its place would push every later reply one behind.
+            return Err("an empty answer stood where the write's acknowledgement should be".into());
+        }
         Ok(())
     }
 
@@ -356,7 +396,7 @@ impl<'a> Dpm<'a> {
             return Err(format!("{text:?} is too long for one frame"));
         }
         let mut out = frame(COMMAND, COMMAND_BUFFER, text.as_bytes());
-        self.device.bulk(OUT, &mut out, PATIENCE)?;
+        send_whole(self.device, &mut out)?;
 
         // Room for the biggest reply the protocol allows: a WRITE record of
         // up to 512 data bytes, its header and checksum, and the length word.
@@ -368,9 +408,18 @@ impl<'a> Dpm<'a> {
             ));
         }
         let declared = u16::from_le_bytes([reply[0], reply[1]]) as usize;
-        let end = declared.min(got - 2);
+        if declared > got - 2 {
+            // A length word promising more than arrived means the framing is
+            // wrong - a stale reply, or an answer cut short. Quietly keeping
+            // the shorter count would hand the caller data that is not the
+            // answer to its question.
+            return Err(format!(
+                "the reply declares {declared} bytes but carries {}",
+                got - 2
+            ));
+        }
         reply.drain(..2);
-        reply.truncate(end);
+        reply.truncate(declared);
         Ok(reply)
     }
 }
@@ -468,12 +517,81 @@ mod tests {
         assert_eq!(regions, [true, false, true, false]);
     }
 
+    /// A scripted device: answers reads from a queue, records what was sent.
+    struct Scripted {
+        sent: std::cell::RefCell<Vec<Vec<u8>>>,
+        answers: std::cell::RefCell<std::collections::VecDeque<Vec<u8>>>,
+    }
+
+    impl Scripted {
+        fn answering(answers: &[&[u8]]) -> Self {
+            Self {
+                sent: std::cell::RefCell::new(Vec::new()),
+                answers: std::cell::RefCell::new(
+                    answers.iter().map(|answer| answer.to_vec()).collect(),
+                ),
+            }
+        }
+    }
+
+    impl BulkDevice for Scripted {
+        fn bulk(&self, endpoint: u8, data: &mut [u8], _milliseconds: u32) -> Result<usize, String> {
+            if endpoint & 0x80 == 0 {
+                self.sent.borrow_mut().push(data.to_vec());
+                Ok(data.len())
+            } else {
+                let answer = self.answers.borrow_mut().pop_front().unwrap_or_default();
+                let taken = answer.len().min(data.len());
+                data[..taken].copy_from_slice(&answer[..taken]);
+                Ok(taken)
+            }
+        }
+    }
+
     #[test]
     fn a_frame_may_not_carry_more_than_its_length_field_can_count() {
-        let device_free = |length: usize| length == 0 || length > MAX_FRAME;
-        assert!(device_free(0));
-        assert!(device_free(256));
-        assert!(!device_free(255));
-        assert!(!device_free(1));
+        // The real `write`, not a re-statement of its check: nothing may reach
+        // the device when the length cannot be expressed.
+        let device = Scripted::answering(&[]);
+        let dpm = Dpm::new(&device);
+        assert!(dpm.write(0, &[]).is_err());
+        assert!(dpm.write(0, &vec![0_u8; MAX_FRAME + 1]).is_err());
+        assert!(device.sent.borrow().is_empty(), "no frame should have gone");
+
+        let device = Scripted::answering(&[&[0x06]]);
+        let dpm = Dpm::new(&device);
+        assert!(dpm.write(0, &vec![0_u8; MAX_FRAME]).is_ok());
+        assert_eq!(device.sent.borrow().len(), 1);
+    }
+
+    #[test]
+    fn an_empty_transfer_is_not_a_write_acknowledgement() {
+        // A stale end-of-transfer marker where the ack should be means the
+        // stream is desynchronised; it must surface, not propagate.
+        let device = Scripted::answering(&[&[]]);
+        let dpm = Dpm::new(&device);
+        let error = dpm.write(4, &[0xA5, 0x00]).expect_err("must refuse");
+        assert!(error.contains("acknowledgement"), "{error}");
+    }
+
+    #[test]
+    fn a_reply_declaring_more_than_it_carries_is_refused() {
+        // Length word says ten bytes, three arrive: framing is wrong, and
+        // quietly returning three would hand back the wrong answer.
+        let device = Scripted::answering(&[&[0x0A, 0x00, b'a', b'b', b'c']]);
+        let dpm = Dpm::new(&device);
+        let error = dpm.command_bytes("SHOW_TRUE").expect_err("must refuse");
+        assert!(error.contains("declares 10"), "{error}");
+    }
+
+    #[test]
+    fn a_read_past_the_end_of_the_address_space_is_refused_up_front() {
+        // 0x200 bytes from 0xFF00 would wrap the sixteen-bit offset and read
+        // the bottom of memory under top-of-memory labels.
+        let device = Scripted::answering(&[]);
+        let dpm = Dpm::new(&device);
+        let error = dpm.read_all(0xFF00, 0x200).expect_err("must refuse");
+        assert!(error.contains("address space"), "{error}");
+        assert!(device.sent.borrow().is_empty(), "no frame should have gone");
     }
 }

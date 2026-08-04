@@ -145,7 +145,9 @@ impl EfficiencyCalibration {
     }
 
     fn interpolate(&self, energy: f64) -> f64 {
-        if self.points.is_empty() || energy <= 0.0 {
+        // The explicit NaN check matters: a NaN energy sails through
+        // `energy <= 0.0` and would come back out as a NaN efficiency.
+        if self.points.is_empty() || energy.is_nan() || energy <= 0.0 {
             return 0.0;
         }
         let first = self.points[0];
