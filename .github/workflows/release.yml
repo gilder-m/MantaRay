@@ -23,13 +23,13 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: ortseam-windows-x86_64.zip
+            archive: ORTSEAM-windows-x86_64.zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: ortseam-linux-x86_64.tar.gz
+            archive: ORTSEAM-linux-x86_64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: ortseam-macos-aarch64.tar.gz
+            archive: ORTSEAM-macos-aarch64.tar.gz
     steps:
       - uses: actions/checkout@v4
 
@@ -49,15 +49,24 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p ortseam-gui -p ortseam-cli
 
+      # The bridge to ORTEC hardware is 32-bit because ORTEC's libraries are,
+      # and a 64-bit process cannot load them. Windows is the only platform
+      # where it has anything to talk to.
+      - name: Build the hardware bridge (Windows, 32-bit)
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo build --release --target i686-pc-windows-msvc -p ortseam-mcb
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/ortseam-gui.exe" dist/
-          Copy-Item "target/${{ matrix.target }}/release/ortseam.exe" dist/ -ErrorAction SilentlyContinue
-          if (-not (Test-Path dist/ortseam.exe)) { Copy-Item "target/${{ matrix.target }}/release/ortseam-cli.exe" dist/ortseam.exe }
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE dist/
+          Copy-Item "target/${{ matrix.target }}/release/ortseam.exe" dist/
+          Copy-Item "target/i686-pc-windows-msvc/release/ortseam-mcb.exe" dist/
+          Copy-Item README.md, CHANGELOG.md, LICENSE.md dist/
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.archive }}
 
       - name: Package (Unix)
@@ -65,9 +74,8 @@ jobs:
         run: |
           mkdir dist
           cp target/${{ matrix.target }}/release/ortseam-gui dist/
-          cp target/${{ matrix.target }}/release/ortseam dist/ 2>/dev/null \
-            || cp target/${{ matrix.target }}/release/ortseam-cli dist/ortseam
-          cp README.md LICENSE-MIT LICENSE-APACHE dist/
+          cp target/${{ matrix.target }}/release/ortseam dist/
+          cp README.md CHANGELOG.md LICENSE.md dist/
           tar -czf ${{ matrix.archive }} -C dist .
 
       - uses: actions/upload-artifact@v4
@@ -87,7 +95,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            ortseam-windows-x86_64.zip
-            ortseam-linux-x86_64.tar.gz
-            ortseam-macos-aarch64.tar.gz
-          generate_release_notes: true
+            ORTSEAM-windows-x86_64.zip
+            ORTSEAM-linux-x86_64.tar.gz
+            ORTSEAM-macos-aarch64.tar.gz
