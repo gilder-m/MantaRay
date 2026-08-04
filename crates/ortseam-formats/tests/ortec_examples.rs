@@ -18,10 +18,11 @@
 use std::path::PathBuf;
 
 /// Where the examples are, if they are anywhere.
+///
+/// Only `ORTSEAM_ORTEC_EXAMPLES` says; there is no default, because a default
+/// would be one machine's layout written into everyone's checkout.
 fn examples() -> Option<PathBuf> {
-    let directory = std::env::var("ORTSEAM_ORTEC_EXAMPLES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(r"C:\Users\gilde\ORTEC-reference\V9 Examples"));
+    let directory = PathBuf::from(std::env::var("ORTSEAM_ORTEC_EXAMPLES").ok()?);
     directory.is_dir().then_some(directory)
 }
 

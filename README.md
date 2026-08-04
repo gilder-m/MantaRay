@@ -209,3 +209,24 @@ ORTSEAM is an independent implementation. It is not affiliated with, endorsed by
 or derived from the source code of ORTEC or AMETEK, and MAESTRO is their
 trademark. Behaviour was reproduced from the published user manual and from
 public file-format descriptions.
+
+## How this was built
+
+The initial version of ORTSEAM was vibe-coded: written largely by a large
+language model working from the MAESTRO manual, under human direction, rather
+than typed line by line. That is stated plainly because it should change how you
+read the code and how much you trust it before checking it yourself.
+
+What that does **not** mean is that it is unverified. The behaviour is pinned by
+about 550 automated tests, the file readers are checked against genuine ORTEC
+files, and the hardware path was validated against a real ORTEC 926 - the
+in-house USB readout returns all 8192 channels identically to ORTEC's own
+library, with the clocks matching to the millisecond. Where something could not
+be confirmed, it is marked unverified in the documentation rather than quietly
+assumed, and several formats are left unimplemented for exactly that reason.
+
+What it does mean is the ordinary caution owed to any young instrument
+program: this is alpha software, it has not had a long shakedown across many
+machines and detectors, and nobody should stake a measurement that matters on
+it without checking the result against something already trusted. Bug reports
+are welcome, and so is a careful reading of the parts you intend to rely on.
