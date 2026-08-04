@@ -1,0 +1,13 @@
+REM Daily calibration check against a stored region table and calibration.
+SET_DETECTOR 1
+SET_PRESET_CLEAR
+SET_PRESET_LIVE 300
+CLEAR
+START
+WAIT
+FILL_BUFFER
+SET_BUFFER
+RECALL_CALIB "reference.chn"
+RECALL_ROI "reference.roi"
+REPORT "qa-$(Loop1).rpt"
+SAVE "qa-check.chn"

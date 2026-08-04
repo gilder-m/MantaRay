@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ortseam/ortseam"
+authors = ["ortseam contributors"]
+description = "Modern, open multichannel-analyzer (MCA) emulation and gamma-spectroscopy workbench"
+keywords = ["gamma-spectroscopy", "mca", "hpge", "nuclear", "spectrum"]
+categories = ["science", "visualization"]
+
+[workspace.dependencies]
+ortseam-core = { path = "crates/ortseam-core", version = "0.1.0" }
+ortseam-formats = { path = "crates/ortseam-formats", version = "0.1.0" }
+ortseam-device = { path = "crates/ortseam-device", version = "0.1.0" }
+ortseam-jobs = { path = "crates/ortseam-jobs", version = "0.1.0" }
+ortseam-report = { path = "crates/ortseam-report", version = "0.1.0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

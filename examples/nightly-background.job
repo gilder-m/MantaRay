@@ -1,0 +1,17 @@
+REM Overnight background: ten one-hour counts, each saved and reported.
+REM Run with: ortseam job examples/nightly-background.job --trace
+SET_DETECTOR 1
+SET_PRESET_CLEAR
+SET_PRESET_LIVE 3600
+LOOP 10
+CLEAR
+START
+WAIT
+FILL_BUFFER
+SET_DETECTOR 0
+DESCRIBE_SAMPLE "Overnight background, run ???"
+SAVE "BKG???.CHN"
+MARK_PEAKS
+REPORT "BKG???.RPT"
+SET_DETECTOR 1
+END_LOOP
