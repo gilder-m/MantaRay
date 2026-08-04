@@ -24,23 +24,46 @@ use crate::umcbi::{Hdet, Umcbi};
 /// and 7892556 * 0.02 is exactly that.
 const TICK: f64 = 0.02;
 
+/// An instrument the bridge can drive, however it is reached.
+///
+/// There are two ways in, and the dialect above them is identical: ORTEC's
+/// library, and this project's own USB. The second needs none of ORTEC's
+/// user-mode software, so it is what a machine with only the driver installed
+/// can use - which is the whole reason this is a trait rather than a struct.
+pub trait Instrument {
+    /// Sends a command in the instrument's own dialect and returns its answer.
+    fn command(&self, text: &str) -> Result<String, String>;
+    /// How many channels the instrument is set to use.
+    fn channels(&self) -> usize;
+    /// Reads channel counts.
+    fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String>;
+    /// Whether the ADC is acquiring.
+    fn is_counting(&self) -> bool;
+    /// Model name, empty when the instrument does not offer one.
+    fn model(&self) -> String;
+    /// What to report as the serial: a detector number or an adapter serial.
+    fn identity(&self) -> String;
+    /// The energy calibration, when the host has one stored.
+    fn calibration(&self) -> Option<(f64, f64, f64)>;
+    /// One line for the log, saying how the instrument is being reached.
+    fn route(&self) -> String;
+}
+
 /// Runs the bridge until standard input closes.
-pub fn run(library: &Umcbi, detector: Hdet, number: i32) -> Result<(), String> {
-    // Said out loud on standard error, because it is the one thing here that
-    // can be quietly wrong: a configuration copied from another machine can put
-    // a calibration under the wrong instrument, and a spectrum scaled by
-    // somebody else's gain looks perfectly reasonable.
-    let mcb = library.mcb_number(detector);
-    match calibration_for(mcb) {
-        Some((a, b, c)) => eprintln!("calibration from MCBLOC32.INI [M{mcb}S01]: {a} {b} {c}"),
-        None => eprintln!("no calibration stored for [M{mcb}S01]; the spectrum is in channels"),
+pub fn run(instrument: &dyn Instrument) -> Result<(), String> {
+    // Said out loud on standard error, because these are the two things here
+    // that can be quietly wrong: a configuration copied from another machine
+    // can put a calibration under the wrong instrument, and a spectrum scaled
+    // by somebody else's gain looks perfectly reasonable.
+    eprintln!("{}", instrument.route());
+    match instrument.calibration() {
+        Some((a, b, c)) => eprintln!("energy calibration: {a} {b} {c}"),
+        None => eprintln!("no stored calibration; the spectrum is in channels"),
     }
     let input = std::io::stdin();
     let mut output = std::io::stdout();
     let mut session = Session {
-        library,
-        detector,
-        number,
+        instrument,
         total: 0,
     };
     for line in input.lock().lines() {
@@ -60,9 +83,7 @@ pub fn run(library: &Umcbi, detector: Hdet, number: i32) -> Result<(), String> {
 
 /// What the bridge remembers between commands.
 struct Session<'a> {
-    library: &'a Umcbi,
-    detector: Hdet,
-    number: i32,
+    instrument: &'a dyn Instrument,
     /// Total counts, from the last spectrum read.
     ///
     /// Summing eight thousand channels is the only way to get this number, and
@@ -100,19 +121,19 @@ impl Session<'_> {
 
     /// Sends a command through untouched and reports OK.
     fn pass(&mut self, command: &str) -> Result<String, String> {
-        self.library.command(self.detector, command)?;
+        self.instrument.command(command)?;
         Ok("OK".into())
     }
 
     fn clear(&mut self) -> Result<String, String> {
-        self.library.command(self.detector, "CLEAR")?;
+        self.instrument.command("CLEAR")?;
         self.total = 0;
         Ok("OK".into())
     }
 
     fn clear_presets(&mut self) -> Result<String, String> {
-        self.library.command(self.detector, "SET_TRUE_PRESET 0")?;
-        self.library.command(self.detector, "SET_LIVE_PRESET 0")?;
+        self.instrument.command("SET_TRUE_PRESET 0")?;
+        self.instrument.command("SET_LIVE_PRESET 0")?;
         Ok("OK".into())
     }
 
@@ -122,28 +143,26 @@ impl Session<'_> {
             .parse()
             .map_err(|_| format!("{argument:?} is not a number of seconds"))?;
         let ticks = (seconds / TICK).round().max(0.0) as u64;
-        self.library
-            .command(self.detector, &format!("{verb} {ticks}"))?;
+        self.instrument.command(&format!("{verb} {ticks}"))?;
         Ok("OK".into())
     }
 
     fn configuration(&mut self) -> Result<String, String> {
-        let model = self.library.model(self.detector);
-        let channels = self.library.length(self.detector);
-        let firmware = self
-            .library
-            .command(self.detector, "SHOW_VERSION")
-            .unwrap_or_default();
+        let model = self.instrument.model();
+        let channels = self.instrument.channels();
+        let firmware = self.instrument.command("SHOW_VERSION").unwrap_or_default();
         // A 926 holds no calibration of its own; MAESTRO keeps it host-side, so
         // the bridge fetches it from there and hands it over rather than
         // leaving every spectrum off this instrument uncalibrated.
-        let calibration = calibration_for(self.library.mcb_number(self.detector))
+        let calibration = self
+            .instrument
+            .calibration()
             .map(|(a, b, c)| format!(" CAL={a},{b},{c}"))
             .unwrap_or_default();
         Ok(format!(
             "MODEL={} SERIAL={} FIRMWARE={} CHANNELS={channels}{calibration}",
             if model.is_empty() { "MCB" } else { &model },
-            self.number,
+            self.instrument.identity(),
             record_text(&firmware),
         ))
     }
@@ -158,7 +177,7 @@ impl Session<'_> {
         } else {
             0.0
         };
-        let active = i32::from(self.library.is_counting(self.detector));
+        let active = i32::from(self.instrument.is_counting());
         Ok(format!(
             "RT={real:.2} LT={live:.2} DT={dead:.2}% ICR=0 ACTIVE={active} TOTAL={}",
             self.total
@@ -167,13 +186,13 @@ impl Session<'_> {
 
     /// One of the instrument's clocks, in seconds.
     fn clock(&mut self, command: &str) -> Result<f64, String> {
-        let reply = self.library.command(self.detector, command)?;
+        let reply = self.instrument.command(command)?;
         Ok(record_number(&reply)? * TICK)
     }
 
     fn data(&mut self) -> Result<String, String> {
-        let channels = self.library.length(self.detector);
-        let counts = self.library.read(self.detector, 0, channels)?;
+        let channels = self.instrument.channels();
+        let counts = self.instrument.read(0, channels)?;
         self.total = counts.iter().sum();
         let mut reply = String::with_capacity(counts.len() * 4 + 16);
         reply.push_str("DATA ");
@@ -184,6 +203,149 @@ impl Session<'_> {
         }
         Ok(reply)
     }
+}
+
+/// An instrument reached through ORTEC's library.
+pub struct ViaUmcbi<'a> {
+    pub library: &'a Umcbi,
+    pub detector: Hdet,
+    pub number: i32,
+}
+
+impl Instrument for ViaUmcbi<'_> {
+    fn command(&self, text: &str) -> Result<String, String> {
+        self.library.command(self.detector, text)
+    }
+    fn channels(&self) -> usize {
+        usize::from(self.library.length(self.detector))
+    }
+    fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String> {
+        // ORTEC's call counts channels in sixteen bits, which is every channel
+        // any of these instruments has.
+        let start = u16::try_from(start).map_err(|_| format!("channel {start} is out of range"))?;
+        let count = u16::try_from(count).map_err(|_| format!("{count} channels is too many"))?;
+        self.library.read(self.detector, start, count)
+    }
+    fn is_counting(&self) -> bool {
+        self.library.is_counting(self.detector)
+    }
+    fn model(&self) -> String {
+        self.library.model(self.detector)
+    }
+    fn identity(&self) -> String {
+        self.number.to_string()
+    }
+    fn calibration(&self) -> Option<(f64, f64, f64)> {
+        calibration_for(self.library.mcb_number(self.detector))
+    }
+    fn route(&self) -> String {
+        let mcb = self.library.mcb_number(self.detector);
+        format!(
+            "detector {} (MCB {mcb}) through ORTEC's library",
+            self.number
+        )
+    }
+}
+
+/// An instrument reached over USB, with none of ORTEC's user-mode software.
+///
+/// Only the kernel driver is involved. Everything the bridge needs is asked of
+/// the instrument in its own dialect, so a machine that has never had MAESTRO
+/// on it drives the hardware exactly as one that has.
+#[cfg(windows)]
+pub struct ViaUsb {
+    device: crate::usb::Device,
+    /// Asked once at start-up: the conversion gain is how many channels the
+    /// instrument is actually set to use, and it is not always all of them.
+    channels: usize,
+    model: String,
+    serial: String,
+}
+
+#[cfg(windows)]
+impl ViaUsb {
+    /// Opens an instrument and asks it what it is.
+    pub fn open(device: crate::usb::Device) -> Result<Self, String> {
+        let serial = serial_of(device.path());
+        let memory = crate::dpm::Dpm::new(&device);
+        let gain = memory.command("SHOW_GAIN_CONVERSION")?;
+        let channels = record_number(&gain)
+            .map_err(|_| format!("SHOW_GAIN_CONVERSION answered {gain:?}"))?
+            as usize;
+        if channels == 0 || channels > 1 << 20 {
+            return Err(format!("{channels} channels is not a conversion gain"));
+        }
+        let model = record_text(&memory.command("SHOW_VERSION").unwrap_or_default());
+        Ok(Self {
+            device,
+            channels,
+            model: if model == "unknown" {
+                String::new()
+            } else {
+                model
+            },
+            serial,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Instrument for ViaUsb {
+    fn command(&self, text: &str) -> Result<String, String> {
+        crate::dpm::Dpm::new(&self.device).command(text)
+    }
+    fn channels(&self) -> usize {
+        self.channels
+    }
+    fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String> {
+        // The instrument hands over the whole histogram in one frame, so a
+        // partial read is a slice of it rather than a different request.
+        let (counts, _regions) = crate::dpm::Dpm::new(&self.device).read_spectrum(self.channels)?;
+        Ok(counts
+            .into_iter()
+            .skip(start)
+            .take(count)
+            .map(u64::from)
+            .collect())
+    }
+    fn is_counting(&self) -> bool {
+        // `$C00001088` when the ADC is acquiring, `$C00000087` when it is not.
+        self.command("SHOW_ACTIVE")
+            .ok()
+            .and_then(|reply| record_number(&reply).ok())
+            .is_some_and(|active| active != 0.0)
+    }
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+    fn identity(&self) -> String {
+        self.serial.clone()
+    }
+    fn calibration(&self) -> Option<(f64, f64, f64)> {
+        // A 926 holds no calibration of its own. If this machine happens to
+        // have MAESTRO's file, use it; a machine without one is not worse off
+        // than it was, it simply reports channels.
+        None
+    }
+    fn route(&self) -> String {
+        format!(
+            "adapter {} over USB, with none of ORTEC's user-mode software",
+            self.serial
+        )
+    }
+}
+
+/// The adapter serial out of a device path.
+///
+/// A path reads `\\?\USB#VID_0A2D&PID_0016#08134079#{guid}`, and the serial is
+/// the field before the interface GUID.
+#[cfg(windows)]
+fn serial_of(path: &str) -> String {
+    path.split('#')
+        .nth(2)
+        .filter(|field| !field.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// The energy calibration MAESTRO stores for an instrument.

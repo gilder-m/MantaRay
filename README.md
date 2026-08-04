@@ -139,12 +139,18 @@ plot and reports on one page, and the complete §6.5 JOB command set - including
 `RUN`/`WAIT "program"` launching real programs, `LOOP SPECTRA`/`VIEW` walking
 the instrument's stored spectra, and `ZOOM` placing windows.
 
-**Real hardware works.** ORTSEAM drives an ORTEC 926 over USB: it finds the
-instruments on the machine, numbers them itself, and reads out spectra with
-their calibration. Instruments are reached through a transport carrying one
-ASCII dialect, so a socket and a local instrument are the same code above the
-seam. See [docs/ortec-hardware.md](docs/ortec-hardware.md), which records what
-is verified and what is still guessed at.
+**Real hardware works, with none of ORTEC's software.** ORTSEAM drives an ORTEC
+926 over USB using only the kernel driver - no `Mcbcio32.dll`, no `mcbloc32.dll`,
+no `DpmUsbAddIn.dll`, no MAESTRO installed. It finds the instruments, numbers
+them itself, and reads whole spectra: all 8192 channels identical to what
+ORTEC's own library reads from the same detector, clocks matching to the
+millisecond, and the channel sums agreeing with the instrument's own arithmetic.
+A spectrum takes about a sixteenth of a second.
+
+Instruments are reached through a transport carrying one ASCII dialect, so a
+socket and a local instrument are the same code above the seam. See
+[docs/ortec-hardware.md](docs/ortec-hardware.md), which records the wire format
+and marks what is verified and what is not.
 
 ## Verified against real data
 
@@ -174,11 +180,11 @@ it can be driven without a window on screen. Five suites run in
 
 | | builds | tests | hardware |
 |---|---|---|---|
-| Windows | yes | 534 | yes, through `ortseam-mcb` |
-| Linux | yes | 528 | not yet - see `docs/ortec-hardware.md` |
-| macOS | type-checks | no machine to run them on | not yet |
+| Windows | yes | 551 | yes - USB, with only ORTEC's kernel driver |
+| Linux | yes | all but the Windows-only suites | libusb path compiles; not yet run against an instrument |
+| macOS | type-checks | no machine to run them on | libusb path compiles; not yet run |
 
-The Linux figure is lower only because a few suites are about Windows itself -
+The Linux run is smaller only because a few suites are about Windows itself -
 file-type registration, the crash report, the bridge to ORTEC's library. The
 desktop application builds and runs there, and every headless frame test passes.
 

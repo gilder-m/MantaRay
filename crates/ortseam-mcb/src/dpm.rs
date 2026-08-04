@@ -22,14 +22,24 @@
 //! address down to a flat sixteen-bit space rather than the several other
 //! readings the frame would otherwise allow.
 
-#![cfg(windows)]
 // The protocol is recorded here in full, including the parts nothing calls yet:
 // writing to dual-port memory and the two mailbox registers. They cost nothing,
 // the tests check them against the capture, and a half-written record of a
 // protocol nobody documents is worse than none.
 #![allow(dead_code)]
 
-use crate::usb::Device;
+/// A device with the two bulk endpoints this protocol needs.
+///
+/// The protocol above it is the same everywhere; what differs is how the bytes
+/// reach the wire. On Windows that is ORTEC's driver through its own IOCTLs;
+/// on Linux and macOS it is the kernel's own USB stack through libusb, with no
+/// driver to install at all.
+pub trait BulkDevice {
+    /// Sends or receives on a bulk endpoint, returning how many bytes moved.
+    ///
+    /// `endpoint` carries its direction in the top bit, as USB numbers them.
+    fn bulk(&self, endpoint: u8, data: &mut [u8], milliseconds: u32) -> Result<usize, String>;
+}
 
 /// Read `len` bytes of dual-port memory.
 pub const READ: u8 = 0x03;
@@ -130,11 +140,11 @@ fn frame(op: u8, offset: u16, data: &[u8]) -> Vec<u8> {
 
 /// One instrument, spoken to through its adapter.
 pub struct Dpm<'a> {
-    device: &'a Device,
+    device: &'a dyn BulkDevice,
 }
 
 impl<'a> Dpm<'a> {
-    pub fn new(device: &'a Device) -> Self {
+    pub fn new(device: &'a dyn BulkDevice) -> Self {
         Self { device }
     }
 

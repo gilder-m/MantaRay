@@ -659,14 +659,69 @@ means bytes 0 and 2 of each count, a plausible-looking spectrum missing bits
 8-15. `0x03` returns consecutive bytes. Both take a sixteen-bit length; only
 one of them reads a spectrum.
 
+### Driving it from the application
+
+**Verified against the instrument.** `ortseam-mcb serve` speaks ORTSEAM's own
+dialect on a pipe, and it now reaches the instrument **over USB first**, falling
+back to ORTEC's library only when that cannot. The order is the point: the USB
+path needs nothing but the kernel driver, so a machine that has never had
+MAESTRO installed drives its own detector. `--usb` or `--umcbi` insists on one
+or the other, which is what a person debugging one of them wants.
+
+Both routes implement the same `Instrument` trait, so the translation above them
+- clocks in ticks, presets in seconds, dead time from the two clocks - is
+written once.
+
+`crates/ortseam-device/tests/bridge_hardware.rs` drives the whole chain:
+ORTSEAM's dialect, through the bridge process, over USB, to a real 926. It
+checks that the channels sum to the total the instrument itself reports, and
+that `START` and `STOP` move it. It needs hardware, so it skips out loud without
+`ORTSEAM_MCB` naming a bridge, and it takes a lock because an adapter can be
+open in one process at a time.
+
+Two things that were quietly wrong and are worth not repeating:
+
+- **The device path was printed on standard output.** In `serve`, output *is*
+  the protocol, so the first thing the application read was a path rather than a
+  reply. Diagnostics belong on standard error.
+- **Windows keeps an interface record for every adapter ever bound**, so the
+  list outlives the cable. Unasked, take the first that actually opens rather
+  than the first recorded, or a serve session picks an adapter that left months
+  ago.
+
+### Away from Windows
+
+**Compiles for Linux and macOS; not yet run against hardware.** There is no
+vendor driver on those platforms and none is needed: the kernel's own USB stack
+hands the interface over, and the same frames go down the same two bulk
+endpoints. `crates/ortseam-mcb/src/direct.rs` is that path, on libusb through
+`nusb`; `crates/ortseam-mcb/src/dpm.rs` sits on a `BulkDevice` trait so the
+protocol is written once and neither platform is a special case.
+
+It is honest to say what has and has not been shown. The protocol layer is the
+same code that reads a real 926 on Windows every day. The libusb layer under it
+builds warning-free for `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`
+and has never moved a byte, because the bench is a Windows machine. Treat it as
+untested until someone runs it.
+
+If opening the adapter fails on Linux it is almost always permission rather than
+anything missing - a udev rule granting `0a2d:0016` to the user, not a driver.
+
 ### What is left
 
-Nothing, for the instrument in hand: commands, clocks, configuration, gain,
-mode, integrals, the dual-port memory and a whole spectrum all work with none
-of ORTEC's user-mode software. The same frames go over libusb on Linux and
-macOS with no ORTEC driver at all - the adapter is an ordinary bulk device, and
-everything above the endpoints is in `crates/ortseam-mcb/src/dpm.rs`, which has
-no Windows in it beyond the `Device` it borrows.
+Nothing for the instrument in hand on Windows: commands, clocks, configuration,
+gain, mode, integrals, the dual-port memory, whole spectra and the application
+itself all work with none of ORTEC's user-mode software.
+
+Two things remain, and neither is protocol work:
+
+1. **Run the libusb path against hardware** on Linux or macOS. It compiles;
+   nothing more is claimed.
+2. **Windows without ORTEC's driver at all.** Binding the adapter to WinUSB
+   instead would remove the last vendor dependency, and `nusb` already speaks
+   that. The cost is that ORTEC's own software stops seeing the device while it
+   is bound, so it is a choice rather than an improvement - on a machine with no
+   MAESTRO installed, it costs nothing.
 
 What was ruled out along the way, so it is not tried again: a paging register
 in the mailbox window (the window does not change across a full readout);

@@ -18,3 +18,8 @@ chrono = "0.4.45"
 [[bin]]
 name = "ortseam-mcb"
 path = "src/main.rs"
+
+# libusb, for the platforms with no vendor driver. Not on Windows, where
+# ORTEC's driver already owns the adapter and is reached through its own IOCTLs.
+[target.'cfg(not(windows))'.dependencies]
+nusb = "0.2"

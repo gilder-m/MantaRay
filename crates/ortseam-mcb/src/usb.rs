@@ -788,3 +788,9 @@ pub fn endpoints(descriptor: &[u8]) -> Vec<Endpoint> {
     }
     found
 }
+
+impl crate::dpm::BulkDevice for Device {
+    fn bulk(&self, endpoint: u8, data: &mut [u8], milliseconds: u32) -> Result<usize, String> {
+        Device::bulk(self, endpoint, data, milliseconds)
+    }
+}

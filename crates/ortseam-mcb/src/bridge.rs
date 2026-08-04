@@ -254,7 +254,40 @@ fn ticks(library: &Umcbi, detector: umcbi::Hdet, command: &str) -> Result<f64, S
 }
 
 /// Serves one detector to ortseam over standard input and output.
+///
+/// USB first, ORTEC's library second. The order matters: reaching the
+/// instrument over USB needs only the kernel driver, so a machine that has
+/// never had MAESTRO installed still drives its hardware, and the fallback
+/// exists for instruments this project cannot reach directly yet. Either can be
+/// insisted on - `--usb` or `--umcbi` - because a person debugging one of them
+/// needs to know which is answering.
 fn serve_bridge(directory: Option<&str>, arguments: &[String]) -> Result<(), String> {
+    let mut arguments: Vec<String> = arguments.to_vec();
+    let take = |arguments: &mut Vec<String>, flag: &str| {
+        arguments
+            .iter()
+            .position(|argument| argument == flag)
+            .map(|at| {
+                arguments.remove(at);
+                true
+            })
+            .unwrap_or(false)
+    };
+    let only_usb = take(&mut arguments, "--usb");
+    let only_umcbi = take(&mut arguments, "--umcbi");
+    if only_usb && only_umcbi {
+        return Err("--usb and --umcbi ask for different things".into());
+    }
+
+    #[cfg(windows)]
+    if !only_umcbi {
+        match open_usb_instrument(&mut arguments) {
+            Ok(instrument) => return serve::run(&instrument),
+            Err(error) if only_usb => return Err(error),
+            Err(error) => eprintln!("no instrument over USB ({error}); trying ORTEC's library"),
+        }
+    }
+
     let number: i32 = arguments
         .first()
         .ok_or("give a detector number to serve")?
@@ -270,11 +303,25 @@ fn serve_bridge(directory: Option<&str>, arguments: &[String]) -> Result<(), Str
         library.model(handle),
         library.length(handle)
     );
-    let outcome = serve::run(&library, handle, number);
+    let outcome = serve::run(&serve::ViaUmcbi {
+        library: &library,
+        detector: handle,
+        number,
+    });
     // SAFETY: the handle came from open_detector and is still open.
     unsafe { (library.close_detector)(handle) };
     library.close();
     outcome
+}
+
+/// Opens the instrument to serve over USB.
+///
+/// `--device` names one by serial; otherwise a lone adapter is taken as the one
+/// meant, and a positional number picks among several.
+#[cfg(windows)]
+fn open_usb_instrument(arguments: &mut Vec<String>) -> Result<serve::ViaUsb, String> {
+    let device = pick_usb_device(arguments)?;
+    serve::ViaUsb::open(device)
 }
 
 /// Builds the detector list from what is actually connected.
@@ -567,7 +614,14 @@ fn pick_usb_device(arguments: &mut Vec<String>) -> Result<usb::Device, String> {
         wanted = Some(arguments.remove(at));
     }
     let path = match wanted {
-        None => paths[0].clone(),
+        // Windows keeps an interface record for every adapter that has ever
+        // been bound, so the list outlives the cable. Unasked, take the first
+        // one that actually opens rather than the first one recorded.
+        None => paths
+            .iter()
+            .find(|path| usb::Device::open(path).is_ok())
+            .cloned()
+            .unwrap_or_else(|| paths[0].clone()),
         // A serial number is digits too, so a match against the paths comes
         // first and a position is only a position when nothing contains it.
         Some(which) => match paths.iter().find(|p| p.contains(&which)) {
@@ -584,7 +638,10 @@ fn pick_usb_device(arguments: &mut Vec<String>) -> Result<usb::Device, String> {
             },
         },
     };
-    println!("{path}");
+    // Standard error, not standard output: when the bridge is serving, output
+    // carries the dialect, and a device path on it is read as the answer to
+    // whatever was asked first.
+    eprintln!("{path}");
     usb::Device::open(&path)
 }
 
