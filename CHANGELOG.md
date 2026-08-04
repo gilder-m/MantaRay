@@ -26,7 +26,7 @@ and reports on one page; QA control charts; a multi-detector dashboard,
 alarms and a batch queue; four colour schemes held to measured contrast
 rules; window tiling; a keyboard reference on F1; settings that survive a
 restart; and a headless test suite that drives the real application - about
-490 tests in all, including a monkey that hammers the session with hostile
+550 tests in all, including a monkey that hammers the session with hostile
 actions and has already caught a crash.
 
 **Care in the corners.** The analysis table links every nuclide to its
@@ -39,6 +39,19 @@ degrade gracefully at narrow widths instead of clipping.
 
 **Real hardware.** Instruments are reached through a transport carrying the
 ASCII `SET_`/`SHOW_` dialect. TCP is built in and proven against a served
-simulator (`ortseam serve`); a vendor-library transport can be added without
-touching the protocol. Validation against physical ORTEC units is pending
-bench time.
+simulator (`ortseam serve`).
+
+Beyond that, ORTSEAM talks to a real ORTEC 926 over USB **using none of ORTEC's
+user-mode software** - no `Mcbcio32.dll`, no `mcbloc32.dll`, no
+`DpmUsbAddIn.dll`, only the kernel driver. Commands, clocks, configuration,
+gain, mode, integrals, the dual-port memory and whole spectra all work, and the
+readout was checked channel-for-channel against ORTEC's own library on the same
+instrument: 8192 of 8192 identical, clocks matching to the millisecond, and the
+totals agreeing with the instrument's own arithmetic. `ortseam-mcb` is the
+32-bit bridge, and it can also drive ORTEC's libraries where they are
+installed. The wire format is written down in
+[docs/ortec-hardware.md](docs/ortec-hardware.md).
+
+**ORTEC's own files.** Binary `.Lib` nuclide libraries are read as GammaVision
+writes them, chain-walked rather than trusted in file order, and every library
+that ships with MAESTRO loads.

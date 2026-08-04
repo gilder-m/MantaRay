@@ -277,7 +277,13 @@ impl Device {
                 overlapped.as_mut_ptr().cast(),
             )
         };
-        self.finish(ok, &mut overlapped, &mut returned, milliseconds, Recover::Yes)
+        self.finish(
+            ok,
+            &mut overlapped,
+            &mut returned,
+            milliseconds,
+            Recover::Yes,
+        )
     }
 
     fn control_with_timeout(
@@ -703,13 +709,7 @@ impl Device {
                 overlapped.as_mut_ptr().cast(),
             )
         };
-        let returned = self.finish(
-            ok,
-            &mut overlapped,
-            &mut got,
-            milliseconds + 1000,
-            recover,
-        )?;
+        let returned = self.finish(ok, &mut overlapped, &mut got, milliseconds + 1000, recover)?;
         let carried = returned.saturating_sub(SINGLE_TRANSFER_LEN).min(data.len());
         data[..carried]
             .copy_from_slice(&packet[SINGLE_TRANSFER_LEN..SINGLE_TRANSFER_LEN + carried]);

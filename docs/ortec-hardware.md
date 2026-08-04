@@ -1,6 +1,6 @@
 # Talking to real ORTEC hardware
 
-What is known about reaching an ORTEC MCB from ortseam, established from a
+What is known about reaching an ORTEC MCB from ORTSEAM, established from a
 working MAESTRO Pro 9.01 installation and from the instrument on the bench.
 Every claim here is marked **verified** (read out of a file, a binary or a
 screenshot) or **unverified** (inferred, or taken from a secondary source and
@@ -19,7 +19,7 @@ CompatibleID  USB\COMPAT_VID_0A2D&Class_00&SubClass_00&Prot_00
 Device class 00 is vendor-specific, so it needs a vendor driver; there is no
 inbox Windows driver that will bind it. On a machine without ORTEC software
 installed it sits at **Problem 28, `CM_PROB_FAILED_INSTALL`** - no driver - and
-nothing can reach it, ortseam or otherwise.
+nothing can reach it, ORTSEAM or otherwise.
 
 MAESTRO's own status bar names the model: `Mcb Model No. 0926-001`.
 
@@ -97,9 +97,9 @@ The PDB also names `lpdwROIMask`, matching the documented behaviour that a
 spectrum word carries its ROI flag in a high bit and the mask says which.
 
 **The bitness is the design constraint.** A 32-bit in-process DLL cannot be
-loaded by a 64-bit process. ortseam is 64-bit, so the instrument has to be
+loaded by a 64-bit process. ORTSEAM is 64-bit, so the instrument has to be
 reached through a **small 32-bit sidecar process** that owns the DLL and speaks
-to ortseam over a pipe or a socket. That is not a workaround to be avoided later
+to ORTSEAM over a pipe or a socket. That is not a workaround to be avoided later
 - it is the shape of the solution, and the [`Transport`] seam already accepts
 it, because a transport only has to carry a command out and a line back.
 
@@ -240,10 +240,10 @@ ticks is 157851.12 s, and MAESTRO reading the same instrument displayed
 `Real: 157,851.12`. Live time and the live preset check the same way, against
 `153,272.64` and `259,200.00`.
 
-**What ortseam gets wrong today.** `crates/ortseam-device/src/remote.rs` sends
+**What ORTSEAM gets wrong today.** `crates/ortseam-device/src/remote.rs` sends
 `SET_PRESET_LIVE`, which the instrument **rejects** - the real command is
 `SET_LIVE_PRESET`, and its argument is ticks, not seconds. `SHOW_STATUS` does
-exist but returns a `$M` record, not the `RT=.. LT=..` text ortseam's simulator
+exist but returns a `$M` record, not the `RT=.. LT=..` text ORTSEAM's simulator
 answers with. Correcting that is a separate piece of work; the bridge does not
 depend on it, because it asks the instrument directly.
 
@@ -251,7 +251,7 @@ depend on it, because it asks the instrument directly.
 
 ## Configuring it ourselves
 
-**Verified against two instruments.** ortseam does not need a configuration
+**Verified against two instruments.** ORTSEAM does not need a configuration
 inherited from anywhere. `ortseam-mcb configure` asks the transports what is
 answering and writes both files the local layer wants.
 
@@ -318,14 +318,14 @@ ASCII dialect ($G..., checksummed)   <- decoded, see above
 ```
 
 All three layers are now worked out, and everything below is what they turned
-out to be. That matters for two things at once: ortseam no longer depends on
+out to be. That matters for two things at once: ORTSEAM no longer depends on
 ORTEC's user-mode software on Windows, and the same code runs on Linux and
 macOS, where `Mcbcio32.dll` can never go and libusb can claim
 `VID_0A2D&PID_0016` with no driver at all.
 
 ### What works already
 
-**Verified against both adapters, 2026-07-31.** ortseam holds a full conversation
+**Verified against both adapters, 2026-07-31.** ORTSEAM holds a full conversation
 with a 926 over USB with no ORTEC software in the process at all - no
 `Mcbcio32.dll`, no `mcbloc32.dll`, no `DpmUsbAddIn.dll`. Only ORTEC's *driver*
 is involved, which is the thing that was deliberately kept.

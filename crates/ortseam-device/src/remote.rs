@@ -6,8 +6,8 @@
 //! claim about any manufacturer's: a real ORTEC MCB answers `SHOW_LIVE` with
 //! `$G0007663632108` and rejects `SET_PRESET_LIVE` outright. Hardware is
 //! reached through `ortseam-mcb`, which translates. What is written here is the
-//! contract between ortseam and whatever is at the far end of a
-//! [`Transport`](crate::Transport):
+//! contract between ORTSEAM and whatever is at the far end of a
+//! [`Transport`]:
 //!
 //! | Command | Response |
 //! |---|---|

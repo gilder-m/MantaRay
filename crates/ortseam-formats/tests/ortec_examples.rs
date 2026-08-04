@@ -315,7 +315,10 @@ fn the_shipped_suspect_library_reads_back_its_known_contents() {
     }
     let library = ortseam_formats::library::load(&path).expect("Suspect.Lib reads");
     assert_eq!(library.len(), 99, "Suspect.Lib holds 99 nuclides");
-    assert_eq!(library.name, "Suspect", "the library is named after the file");
+    assert_eq!(
+        library.name, "Suspect",
+        "the library is named after the file"
+    );
 
     let co = library.nuclide("CO-60").expect("Co-60 is in it");
     let year = 365.25 * 86_400.0;
@@ -342,8 +345,7 @@ fn the_shipped_suspect_library_reads_back_its_known_contents() {
     assert!(
         cs.peaks
             .iter()
-            .any(|p| (p.energy - 32.194).abs() < 0.1
-                && p.photon == ortseam_core::PhotonKind::XRay),
+            .any(|p| (p.energy - 32.194).abs() < 0.1 && p.photon == ortseam_core::PhotonKind::XRay),
         "Cs-137's barium x-ray should read as an x-ray"
     );
 

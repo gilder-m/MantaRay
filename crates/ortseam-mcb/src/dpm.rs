@@ -211,9 +211,7 @@ impl<'a> Dpm<'a> {
         let bytes = channels
             .checked_mul(4)
             .filter(|wanted| *wanted <= u16::MAX as usize)
-            .ok_or_else(|| {
-                format!("{channels} channels is more than one frame can carry")
-            })?;
+            .ok_or_else(|| format!("{channels} channels is more than one frame can carry"))?;
         let memory = self.read_in(HISTOGRAM, 0, bytes)?;
         let mut counts = Vec::with_capacity(channels);
         let mut regions = Vec::with_capacity(channels);
@@ -365,7 +363,6 @@ impl<'a> Dpm<'a> {
         reply.truncate(end);
         Ok(reply)
     }
-
 }
 
 #[cfg(test)]

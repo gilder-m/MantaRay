@@ -1,6 +1,6 @@
 # File formats
 
-Layouts as ortseam implements them, and how each was established.
+Layouts as ORTSEAM implements them, and how each was established.
 
 ## `.Chn` - ORTEC integer spectrum
 
@@ -130,7 +130,7 @@ Live Time   120
 `--columns`, `--no-channels` and `--no-header` correspond to TRANSLT's `-col`,
 `-nc` and `-nh`. The reader accepts bare columns of numbers as well.
 
-## `.json` - ortseam native
+## `.json` - ORTSEAM native
 
 The whole in-memory model, including regions, both calibrations, descriptions,
 acquisition mode and where the data came from, so it round-trips exactly. Tagged
@@ -141,7 +141,7 @@ as `2.9858588845854683e-7` comes back one bit different.
 
 ## `.Lis` - list mode
 
-ORTEC's list format is instrument specific, so ortseam defines its own container
+ORTEC's list format is instrument specific, so ORTSEAM defines its own container
 and can slice it by time exactly as the List Data Range dialog does.
 
 ```text
@@ -177,7 +177,7 @@ does not say, established against the shipped example libraries:
   1988); such a line is a gamma. Bit 5 marks the key line, bit 6 keeps a line
   out of the average, matching the library editor's checkboxes.
 
-Libraries ortseam writes are stored as JSON (lossless) or as a CSV table that a
+Libraries ORTSEAM writes are stored as JSON (lossless) or as a CSV table that a
 spreadsheet can produce:
 
 ```csv
@@ -196,7 +196,7 @@ because reports follow library order.
   gain float is identifiable at offset 0x98 (0.36605 keV per channel, matching the
   `.Spe` files from the same detector) but a single file is not enough to decode
   the rest safely. Send more samples and it can be finished.
-- **`.Cfg`, `.Cxt`** - detector configuration and context files. ortseam keeps its
+- **`.Cfg`, `.Cxt`** - detector configuration and context files. ORTSEAM keeps its
   own detector list and settings as JSON.
 - **`.Cnf`** (Canberra Genie) and **IEC-1455** - not ORTEC formats, but both are
   common in the field and would fit the same codec layout.

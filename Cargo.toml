@@ -6,10 +6,10 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/ortseam/ortseam"
-authors = ["ortseam contributors"]
-description = "Modern, open multichannel-analyzer (MCA) emulation and gamma-spectroscopy workbench"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/gilder-m/ORTSEAM"
+authors = ["Gilder Montepeque"]
+description = "Multichannel-analyzer (MCA) emulation and gamma-spectroscopy workbench for ORTEC hardware"
 keywords = ["gamma-spectroscopy", "mca", "hpge", "nuclear", "spectrum"]
 categories = ["science", "visualization"]
 

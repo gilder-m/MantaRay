@@ -653,9 +653,11 @@ fn usb_fix(mut arguments: Vec<String>) -> Result<(), String> {
             return Ok(());
         }
     }
-    Err("the adapter did not come back; the cable and the instrument's power \
+    Err(
+        "the adapter did not come back; the cable and the instrument's power \
          are what is left to check"
-        .into())
+            .into(),
+    )
 }
 
 /// Walks the adapter's address space looking for where the spectrum lives.
@@ -859,10 +861,8 @@ fn usb_spectrum(mut arguments: Vec<String>) -> Result<(), String> {
         if let Ok(status) = memory.command("SHOW_STAT")
             && let Some(rest) = status.strip_prefix("$M")
             && rest.len() >= 20
-            && let (Ok(live), Ok(true_time)) = (
-                rest[..10].parse::<f64>(),
-                rest[10..20].parse::<f64>(),
-            )
+            && let (Ok(live), Ok(true_time)) =
+                (rest[..10].parse::<f64>(), rest[10..20].parse::<f64>())
         {
             spectrum.live_time = live * 0.02;
             spectrum.real_time = true_time * 0.02;

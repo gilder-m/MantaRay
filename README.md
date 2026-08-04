@@ -1,4 +1,4 @@
-# ortseam
+# ORTSEAM
 
 A modern, open multichannel-analyzer (MCA) emulator and gamma-spectroscopy
 workbench, written in Rust. It does what ORTEC's MAESTRO does - acquire, display,
@@ -31,7 +31,7 @@ ortseam/
 
 **Acquisition.** Detectors are driven through one interface, so the built-in
 physics simulator and a network instrument (an MCB served over TCP - another
-ortseam's simulator today, bench hardware speaking the same `SET_`/`SHOW_`
+ORTSEAM's simulator today, bench hardware speaking the same `SET_`/`SHOW_`
 dialect tomorrow) behave the same: start, stop, clear, copy to buffer, list
 mode, zero-dead-time modes, amplifier/ADC/bias/stabiliser settings and presets
 on real time, live time, ROI peak, ROI integral, counting uncertainty and
@@ -119,7 +119,7 @@ ortseam job nightly.job --detector 192.168.0.40:2000   # run against an instrume
 | `.Spe` | yes | yes | IAEA/CTBTO ASCII, with `$ROI`, `$MCA_CAL` and `$SHAPE_CAL` |
 | `.Roi` | yes | yes | region tables |
 | `.txt`, `.asc` | yes | yes | ASCII dumps, with TRANSLT's column options |
-| `.json` | yes | yes | ortseam's own lossless format |
+| `.json` | yes | yes | ORTSEAM's own lossless format |
 | `.Lis` | yes | yes | list-mode events, with time slicing |
 | `.n42` | yes | - | ANSI N42.42 XML, both the 2005 and 2011 revisions |
 | `.csv` | - | yes | channels or analysis results, for spreadsheets |
@@ -139,7 +139,7 @@ plot and reports on one page, and the complete §6.5 JOB command set - including
 `RUN`/`WAIT "program"` launching real programs, `LOOP SPECTRA`/`VIEW` walking
 the instrument's stored spectra, and `ZOOM` placing windows.
 
-**Real hardware works.** ortseam drives an ORTEC 926 over USB: it finds the
+**Real hardware works.** ORTSEAM drives an ORTEC 926 over USB: it finds the
 instruments on the machine, numbers them itself, and reads out spectra with
 their calibration. Instruments are reached through a transport carrying one
 ASCII dialect, so a socket and a local instrument are the same code above the
@@ -153,7 +153,7 @@ only synthetic ones. Drop real spectra into
 `crates/ortseam-formats/tests/fixtures/` and the suite will exercise them: every
 file must load, round-trip through the native format, and - for recognised
 sources - show the expected lines at the expected energies. On a real Cs-137
-spectrum from a MAESTRO Pro system, ortseam reports the 661.657 keV line at
+spectrum from a MAESTRO Pro system, ORTSEAM reports the 661.657 keV line at
 661.98 keV with a 1.80 keV FWHM and a net area of 1 286 255 ± 1 185 (0.09 %).
 
 ## How the application itself is tested
@@ -195,9 +195,17 @@ contents.
 
 ## Licence
 
-Dual licensed under MIT or Apache-2.0, at your option.
+[PolyForm Noncommercial 1.0.0](LICENSE.md). Fork it, change it, build on it and
+share it however you like **for any noncommercial purpose** - your own use,
+study, research, teaching, hobby work. Charities, schools, universities, public
+research bodies and government institutions count as noncommercial too, however
+they are funded. What the licence does not grant is the right to sell it or use
+it commercially; for that, ask.
 
-ortseam is an independent implementation. It is not affiliated with, endorsed by
+Note that this is a source-available licence, not an OSI-approved open-source
+one, precisely because it withholds commercial use.
+
+ORTSEAM is an independent implementation. It is not affiliated with, endorsed by
 or derived from the source code of ORTEC or AMETEK, and MAESTRO is their
 trademark. Behaviour was reproduced from the published user manual and from
 public file-format descriptions.
