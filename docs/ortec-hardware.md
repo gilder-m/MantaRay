@@ -220,6 +220,17 @@ reading what came back. Every reply below is a real one.
 | `SHOW_GAIN_CONVERSION` | `$C08192107` | 8192 channels |
 | `SHOW_ROI` | `$D0399900044110` | a region at 3999, 44 channels wide |
 | `SHOW_STATUS` | `$M000766363200078925560000000000092` | live, real, and a third counter |
+| `SHOW_PEAK_PRESET` | `$G0000000123081` | ROI peak preset, in counts |
+| `SHOW_INTEGRAL_PRESET` | `$G0000004567097` | ROI integral preset, in counts |
+
+The last two rows - and the `SET_PEAK_PRESET` / `SET_INTEGRAL_PRESET` verbs
+that write them, arguments in counts with no tick conversion - were established
+over libusb on the Linux bench (2026-08-05): each value written read back
+exactly. Two more things the same session established: a valid `SET` command
+answers an **empty reply**, indistinguishable from an unknown verb (so
+translation has to be right - the instrument will not say when it is not), and
+a live-time preset set through the dialect really does stop the instrument by
+itself, at exactly the preset value on the live clock.
 
 **The record format.** A reply is `$`, a letter naming the record, one or more
 fixed-width decimal fields, then a three-digit checksum:
@@ -691,21 +702,39 @@ Two things that were quietly wrong and are worth not repeating:
 
 ### Away from Windows
 
-**Compiles for Linux and macOS; not yet run against hardware.** There is no
-vendor driver on those platforms and none is needed: the kernel's own USB stack
-hands the interface over, and the same frames go down the same two bulk
-endpoints. `crates/ortseam-mcb/src/direct.rs` is that path, on libusb through
-`nusb`; `crates/ortseam-mcb/src/dpm.rs` sits on a `BulkDevice` trait so the
-protocol is written once and neither platform is a special case.
+**Verified on Linux, 2026-08-05.** There is no vendor driver on these platforms
+and none is needed: the kernel's own USB stack hands the interface over, and
+the same frames go down the same two bulk endpoints.
+`crates/ortseam-mcb/src/direct.rs` is that path, on libusb through `nusb`;
+`crates/ortseam-mcb/src/dpm.rs` sits on a `BulkDevice` trait so the protocol is
+written once and neither platform is a special case.
 
-It is honest to say what has and has not been shown. The protocol layer is the
-same code that reads a real 926 on Windows every day. The libusb layer under it
-builds warning-free for `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`
-and has never moved a byte, because the bench is a Windows machine. Treat it as
-untested until someone runs it.
+The path met an instrument for the first time on a Linux desktop with a 926 on
+adapter `08134079`, and every assumption recorded above held on first contact:
 
-If opening the adapter fails on Linux it is almost always permission rather than
-anything missing - a udev rule granting `0a2d:0016` to the user, not a driver.
+- enumeration found the adapter by `0a2d:0016` and read its serial;
+- `SHOW_VERSION` answered `$F0926-001`, and the clocks answered `$G` records
+  whose tick arithmetic matched (`$G0000009496103` -> 189.92 s real,
+  `$G0000009193097` -> 183.86 s live);
+- a whole 4096-channel spectrum read out with its ROI bits, 284 345 counts,
+  in about a fifth of a second with process start-up included;
+- `ortseam-mcb serve` carried the same instrument into the desktop
+  application - Scan, Open all, and a live detector window - through the same
+  `Session` translation the Windows bridge uses.
+
+What is **still unverified**: macOS, which type-checks and nothing more; and
+multiple adapters on one Linux bus (the bench has one).
+
+The permission prediction below also held exactly - the first open failed with
+`errno 13` and nothing else was missing. The rule that fixed it:
+
+```
+SUBSYSTEM=="usb", ATTR{idVendor}=="0a2d", ATTR{idProduct}=="0016", TAG+="uaccess", MODE="0660"
+```
+
+in `/etc/udev/rules.d/70-ortec-dpm-usb.rules`, then reload, trigger and replug.
+If opening the adapter fails on Linux it is almost always this rather than
+anything missing - permission, not a driver.
 
 ### What is left
 
@@ -715,8 +744,9 @@ itself all work with none of ORTEC's user-mode software.
 
 Two things remain, and neither is protocol work:
 
-1. **Run the libusb path against hardware** on Linux or macOS. It compiles;
-   nothing more is claimed.
+1. **Run the libusb path against hardware** on macOS. On Linux this is done -
+   see "Away from Windows" above; on macOS it compiles and nothing more is
+   claimed.
 2. **Windows without ORTEC's driver at all.** Binding the adapter to WinUSB
    instead would remove the last vendor dependency, and `nusb` already speaks
    that. The cost is that ORTEC's own software stops seeing the device while it

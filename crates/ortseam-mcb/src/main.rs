@@ -19,20 +19,18 @@ mod bridge;
 #[cfg(not(windows))]
 mod direct;
 mod dpm;
-#[cfg(windows)]
 mod serve;
 #[cfg(windows)]
 mod umcbi;
 #[cfg(windows)]
 mod usb;
 
-/// On Windows the bridge does its job; elsewhere it says why it cannot.
+/// On Windows the bridge owns ORTEC's library; elsewhere it speaks libusb.
 ///
 /// ORTEC's library is a 32-bit Windows DLL and there is no version of it for
-/// anything else. Reaching the instrument from Linux or macOS means speaking to
-/// it over USB directly, which is a different piece of work - see
-/// `docs/ortec-hardware.md`. The crate still builds on those platforms so that
-/// a workspace build and the test suite are not split in two.
+/// anything else, so away from Windows the instrument is reached over USB
+/// directly - see `docs/ortec-hardware.md` and `direct_main` below. The same
+/// serve dialect rides the pipe on every platform.
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
     bridge::run()
@@ -49,8 +47,10 @@ pub fn speak(device: &usb::Device, command: &str) -> Result<String, String> {
 ///
 /// ```text
 /// ortseam-mcb usb                        list the adapters on the bus
+/// ortseam-mcb probe                      open each one and ask what it is
 /// ortseam-mcb usbtalk SHOW_VERSION       send one command
 /// ortseam-mcb usbspectrum --out live.json  read the spectrum out
+/// ortseam-mcb serve [N]                  be an instrument for ortseam, on a pipe
 /// ```
 #[cfg(not(windows))]
 fn main() -> std::process::ExitCode {
@@ -75,13 +75,22 @@ fn direct_main() -> Result<(), String> {
                 index += 1;
                 wanted = arguments.get(index).cloned();
             }
+            // Accepted so that a caller built for the Windows bridge can run
+            // this one unchanged; there is no ORTEC library here for it to
+            // point at.
+            "--umcbi-dir" => {
+                index += 1;
+                eprintln!("--umcbi-dir means nothing away from Windows; ignored");
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "ortseam-mcb - the bridge to ORTEC hardware\n\n\
                      USAGE:\n  \
                        ortseam-mcb usb\n  \
+                       ortseam-mcb probe\n  \
                        ortseam-mcb usbtalk [--device SERIAL] <command...>\n  \
-                       ortseam-mcb usbspectrum [--device SERIAL] [--out FILE]\n\n\
+                       ortseam-mcb usbspectrum [--device SERIAL] [--out FILE]\n  \
+                       ortseam-mcb serve [N] [--device SERIAL]\n\n\
                      On this platform the adapter is reached over libusb, with no\n\
                      vendor driver. If opening it fails with a permission error, a\n\
                      udev rule granting {VENDOR:04x}:{PRODUCT:04x} to your user is what is\n\
@@ -97,7 +106,7 @@ fn direct_main() -> Result<(), String> {
     }
     let command = positional.first().map(String::as_str).unwrap_or("usb");
     match command {
-        "usb" | "probe" => {
+        "usb" => {
             let serials = direct::Device::list()?;
             if serials.is_empty() {
                 println!("no DPM-USB adapter on the bus");
@@ -108,6 +117,98 @@ fn direct_main() -> Result<(), String> {
                 }
             }
             Ok(())
+        }
+        // Opens every adapter and asks what it is, in the same block shape the
+        // Windows bridge prints, because ortseam's scan reads exactly that: a
+        // numbered header line, then `model` when the instrument answered or
+        // `<why not>` when it did not.
+        "probe" => {
+            use serve::Instrument;
+            let serials = direct::Device::list()?;
+            if serials.is_empty() {
+                println!("no DPM-USB adapter on the bus");
+                return Ok(());
+            }
+            println!("{} adapter(s) on the bus\n", serials.len());
+            for (index, serial) in serials.iter().enumerate() {
+                let number = index + 1;
+                match direct::Device::open(Some(serial)).and_then(serve::ViaDirect::open) {
+                    Ok(instrument) => {
+                        let model = instrument.model();
+                        if model.is_empty() {
+                            println!("  {number}: {serial}");
+                            println!("      model    unknown");
+                        } else {
+                            println!("  {number}: {model} {serial}");
+                            println!("      model    {model}");
+                        }
+                        println!("      channels {}", instrument.channels());
+                        println!(
+                            "      state    {}",
+                            if instrument.is_counting() {
+                                "counting"
+                            } else {
+                                "idle"
+                            }
+                        );
+                    }
+                    Err(error) => {
+                        println!("  {number}: {serial}");
+                        println!("      <{error}>");
+                    }
+                }
+            }
+            Ok(())
+        }
+        // There is no pick list to write on this platform: instruments are
+        // found on the bus each time, so configuring is looking.
+        "configure" => {
+            let serials = direct::Device::list()?;
+            if serials.is_empty() {
+                return Err(
+                    "no DPM-USB adapter on the bus, so there is nothing to configure. Check \
+                     that the instrument is powered and plugged in."
+                        .into(),
+                );
+            }
+            println!(
+                "nothing to write: away from Windows the bus is the configuration, and \
+                 {} adapter(s) are on it now:",
+                serials.len()
+            );
+            for (index, serial) in serials.iter().enumerate() {
+                println!("  {}: {serial}", index + 1);
+            }
+            Ok(())
+        }
+        // Serves one instrument to ortseam over standard input and output,
+        // exactly as the Windows bridge does: the same dialect rides the same
+        // pipe, only the road to the instrument differs.
+        "serve" => {
+            let device = match wanted.as_deref() {
+                Some(wanted) => direct::Device::open(Some(wanted))?,
+                None => {
+                    let number: usize = match positional.get(1) {
+                        None => 1,
+                        Some(text) => text
+                            .parse()
+                            .ok()
+                            .filter(|number| *number >= 1)
+                            .ok_or_else(|| format!("{text:?} is not an adapter number"))?,
+                    };
+                    if number == 1 {
+                        direct::Device::open(None)?
+                    } else {
+                        let serials = direct::Device::list()?;
+                        let serial = serials.get(number - 1).ok_or_else(|| {
+                            format!("adapter {number} of {} is not there", serials.len())
+                        })?;
+                        direct::Device::open(Some(serial))?
+                    }
+                }
+            };
+            let instrument = serve::ViaDirect::open(device)?;
+            serve::run(&instrument)
         }
         "usbtalk" | "talk" => {
             let device = direct::Device::open(wanted.as_deref())?;
@@ -139,7 +240,7 @@ fn direct_main() -> Result<(), String> {
             Ok(())
         }
         other => Err(format!(
-            "unknown command {other:?}; try usb, usbtalk, usbspectrum"
+            "unknown command {other:?}; try usb, probe, usbtalk, usbspectrum, serve or configure"
         )),
     }
 }

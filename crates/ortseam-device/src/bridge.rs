@@ -3,7 +3,9 @@
 //! ORTEC's library is 32-bit and in-process, so a 64-bit ortseam cannot load it
 //! however much it would like to. `ortseam-mcb` is a small executable built for
 //! i686 that owns the library and speaks ortseam's dialect on a pipe; this
-//! [`Transport`] starts it and carries lines to and from it.
+//! [`Transport`] starts it and carries lines to and from it. Away from Windows
+//! the same helper reaches the adapter over libusb instead, and this transport
+//! neither knows nor cares: the dialect on the pipe is identical.
 //!
 //! Nothing above this knows the difference. [`RemoteMcb`](crate::RemoteMcb)
 //! drives a socket and drives this with the same code, because both are a
@@ -17,7 +19,12 @@ use crate::error::DeviceError;
 use crate::transport::Transport;
 
 /// The helper's name. It sits beside ortseam in a normal installation.
+#[cfg(windows)]
 pub const BRIDGE_EXECUTABLE: &str = "ortseam-mcb.exe";
+/// The same helper away from Windows, where it reaches the adapter over libusb
+/// rather than through ORTEC's library - see `docs/ortec-hardware.md`.
+#[cfg(not(windows))]
+pub const BRIDGE_EXECUTABLE: &str = "ortseam-mcb";
 
 /// Starts a helper without giving it a console window of its own.
 ///

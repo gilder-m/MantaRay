@@ -1713,10 +1713,27 @@ impl App {
             return;
         };
         let region = spectrum.rois.at(marker).copied().or_else(|| {
-            // No region: use three FWHM about the marker, as Peak Info does.
-            let width = spectrum.fwhm_at(marker as f64).unwrap_or(8.0) * 1.5;
-            let low = (marker as f64 - width).max(0.0) as usize;
-            let high = ((marker as f64 + width) as usize).min(spectrum.len().saturating_sub(1));
+            // No region: use three FWHM about the peak, as Peak Info does. The
+            // width comes from the shape calibration when there is one;
+            // otherwise the peak search measures the peak under the marker
+            // from the counts themselves, so an uncalibrated spectrum gets
+            // its whole peak - a NaI(Tl) line can be a hundred channels wide -
+            // rather than a guessed sliver of it.
+            let (centre, fwhm) = match spectrum.fwhm_at(marker as f64) {
+                Some(fwhm) => (marker as f64, fwhm),
+                None => ortseam_core::peak_search(spectrum, &settings)
+                    .into_iter()
+                    .map(|peak| ((peak.centroid - marker as f64).abs(), peak))
+                    .filter(|(distance, peak)| *distance <= peak.width.max(2.0))
+                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, peak)| (peak.centroid, peak.width))
+                    .unwrap_or((marker as f64, 8.0)),
+            };
+            // Never narrower than the background channels need, or the
+            // figures cannot be computed at all.
+            let width = (fwhm * 1.5).max(settings.background_points as f64 + 2.0);
+            let low = (centre - width).max(0.0) as usize;
+            let high = ((centre + width) as usize).min(spectrum.len().saturating_sub(1));
             (high > low).then(|| Roi::new(low, high))
         });
         let Some(region) = region else {

@@ -90,6 +90,12 @@ impl RemoteMcb {
         });
         let mut spectrum = Spectrum::new(channels);
         spectrum.energy_calibration = calibration;
+        // The instrument's place in the pick list travels with its spectrum,
+        // so a file saved from this window says which detector it came from
+        // rather than claiming to be a buffer.
+        spectrum.detector_id = number;
+        spectrum.detector_name = name.to_string();
+        spectrum.detector_description = name.to_string();
         let mut remote = Self {
             transport,
             identity,
@@ -142,7 +148,12 @@ impl RemoteMcb {
         }
         if channels.len() == count && count > 0 {
             if self.spectrum.len() != count {
-                self.spectrum = Spectrum::new(count);
+                // The instrument's conversion gain changed underneath us. The
+                // counts are new, but whose spectrum this is - detector,
+                // calibration, start date - is not.
+                let mut resized = Spectrum::new(count);
+                resized.copy_descriptors_from(&self.spectrum);
+                self.spectrum = resized;
             }
             self.spectrum.channels.copy_from_slice(&channels);
         }
@@ -224,6 +235,12 @@ impl Mcb for RemoteMcb {
         self.ensure_unlocked()?;
         self.command("START")?;
         self.status.active = true;
+        // The instrument reports no measurement date of its own, so the moment
+        // START was accepted is the record - as the simulator keeps it. A
+        // resumed count keeps the original date; Clear resets it.
+        if self.spectrum.start_time.is_none() {
+            self.spectrum.start_time = Some(chrono::Local::now().naive_local());
+        }
         Ok(())
     }
 
