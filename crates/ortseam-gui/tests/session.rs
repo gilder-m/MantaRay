@@ -256,8 +256,7 @@ fn peak_info_on_a_broad_uncalibrated_peak_takes_the_whole_peak() {
     let sigma = 17.0;
     for channel in 0..1024 {
         let offset = channel as f64 - 600.0;
-        spectrum.channels[channel] =
-            30 + (5000.0 * (-0.5 * (offset / sigma).powi(2)).exp()) as u64;
+        spectrum.channels[channel] = 30 + (5000.0 * (-0.5 * (offset / sigma).powi(2)).exp()) as u64;
     }
     let mut app = App::headless();
     app.open_buffer("NaI".into(), spectrum, None);

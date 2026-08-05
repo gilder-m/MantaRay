@@ -369,8 +369,9 @@ fn serial_of(path: &str) -> String {
 
 /// An instrument reached over libusb, with no vendor driver at all.
 ///
-/// The non-Windows twin of [`ViaUsb`]: the same questions are asked of the
-/// instrument in its own dialect, only the road the frames travel differs.
+/// The non-Windows twin of `ViaUsb` - not a link, because that type exists
+/// only on Windows and rustdoc runs here too. The same questions are asked of
+/// the instrument in its own dialect; only the road the frames travel differs.
 /// Nothing host-side is consulted, because away from Windows there is no
 /// MAESTRO installation to consult.
 #[cfg(not(windows))]
@@ -576,7 +577,9 @@ mod tests {
             4
         }
         fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String> {
-            Ok((start..start + count).map(|channel| channel as u64 * 10).collect())
+            Ok((start..start + count)
+                .map(|channel| channel as u64 * 10)
+                .collect())
         }
         fn is_counting(&self) -> bool {
             true
@@ -603,7 +606,10 @@ mod tests {
             total: 0,
         };
         let reply = session.handle("SHOW_STATUS");
-        assert_eq!(reply, "RT=157851.12 LT=153272.64 DT=2.90% ICR=0 ACTIVE=1 TOTAL=0");
+        assert_eq!(
+            reply,
+            "RT=157851.12 LT=153272.64 DT=2.90% ICR=0 ACTIVE=1 TOTAL=0"
+        );
     }
 
     #[test]
