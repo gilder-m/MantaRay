@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+**The bench check, run (2026-08-06).** The preset work below was written
+against doubles and marked as not yet run on the 926; it has been now, and it
+holds: `probe` finds the adapter, `SHOW_PRESETS` read back the very 300-second
+live preset the instrument was found holding, `SET_PRESET_LIVE 2` round-tripped
+and stopped the count at exactly LT=2.00, and `START` against that satisfied
+preset was accepted with the clocks frozen - the silent refusal, reproduced.
+Pinning by `--device` opens the named adapter and refuses a serial that is not
+there; a detector opened twice learns its serial and then matches it. The bench
+check is kept as `crates/ortseam-device/tests/bench_926.rs`, ignored by default
+because it needs the instrument. Three things it found:
+
+- *Dead time could read below zero.* The two clocks are separate commands, so
+  they are sampled a round trip apart, and the one read second has run on: at
+  a low count rate the bench 926 reported `RT=1.00 LT=1.02 DT=-2.00%`. Real
+  time is now read second, which puts the skew in the direction the arithmetic
+  survives, and the result is clamped - a negative dead time is a sampling
+  artefact, not a measurement.
+- *A helper that refuses to start said why to nobody.* Its reason goes to
+  standard error, which a window with no console behind it never shows, so the
+  operator saw only "the bridge stopped". Standard error is now relayed line by
+  line as before *and* kept, so the failure is reported as "the bridge stopped:
+  no adapter with "08134079" in its serial number".
+- Two doc comments had been separated from what they document by code inserted
+  between them, leaving `spawn_program` and `close_window` undocumented and
+  their text attached to a test module and to `remember_serial`.
+
 **A detector can be named, and cannot be confused with another one
 (2026-08-06).** Three related things, all about knowing which instrument you
 are talking to.

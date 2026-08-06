@@ -27,10 +27,6 @@ use crate::viewmodel::{DisplayState, FillMode, VerticalScale};
 /// How many files the File menu remembers.
 const RECENT_FILES: usize = 8;
 
-/// Launches a program from a job's command line (`RUN`, `WAIT "program"`).
-///
-/// The first quoted or unquoted word is the program, the rest its arguments -
-/// the same reading MAESTRO's job engine gives the line.
 #[cfg(test)]
 mod pin_tests {
     use super::pin_by_serial;
@@ -78,6 +74,10 @@ fn pin_by_serial(remembered: &str, detector: i32) -> Option<&str> {
     Some(remembered)
 }
 
+/// Launches a program from a job's command line (`RUN`, `WAIT "program"`).
+///
+/// The first quoted or unquoted word is the program, the rest its arguments -
+/// the same reading MAESTRO's job engine gives the line.
 pub fn spawn_program(command_line: &str) -> Result<std::process::Child, String> {
     let mut words: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -936,8 +936,6 @@ impl App {
             .collect()
     }
 
-    /// Removes a window and hands its roles - active, filling the area - to
-    /// whatever is left.
     /// Records what an instrument called itself, so the next open can check.
     fn remember_serial(&mut self, number: u16, serial: &str) {
         let Some(mut entry) = self.detector_list.get(number).cloned() else {
@@ -979,6 +977,8 @@ impl App {
         self.status = format!("detector {number} is now {name}");
     }
 
+    /// Removes a window and hands its roles - active, filling the area - to
+    /// whatever is left.
     fn close_window(&mut self, id: usize) {
         // What was active stays active by identity, not by position: closing
         // a background window must not silently retarget later commands.

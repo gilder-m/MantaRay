@@ -256,12 +256,19 @@ impl Session<'_> {
     }
 
     fn status(&mut self) -> Result<String, String> {
-        let real = self.clock("SHOW_TRUE")?;
+        // Live first, then real. The two clocks are separate commands, so they
+        // are sampled a round trip apart, and whichever is read second has run
+        // on: reading real time second keeps it the larger of the two, which is
+        // the direction the arithmetic below can survive.
         let live = self.clock("SHOW_LIVE")?;
+        let real = self.clock("SHOW_TRUE")?;
         // The instrument reports no dead time of its own; it is the difference
-        // between the two clocks, which is what dead time means.
+        // between the two clocks, which is what dead time means. Clamped,
+        // because the two readings are not simultaneous: on the bench 926 at a
+        // low count rate this printed DT=-2.00% from RT=1.00 LT=1.02, and dead
+        // time below zero is not a measurement, it is a sampling artefact.
         let dead = if real > 0.0 {
-            (real - live) / real * 100.0
+            ((real - live) / real * 100.0).clamp(0.0, 100.0)
         } else {
             0.0
         };
@@ -818,6 +825,53 @@ mod tests {
             session.handle("SHOW_CONFIGURATION"),
             "MODEL=0926-001 SERIAL=08134079 FIRMWARE=0926-001 CHANNELS=4"
         );
+    }
+
+    #[test]
+    fn dead_time_never_reads_below_zero() {
+        // Measured on the bench 926: the two clocks are separate commands, so
+        // at a low count rate the live clock read a round trip later can come
+        // back past the real clock - RT=1.00 LT=1.02 printed DT=-2.00%, which
+        // is not a dead time any instrument can have.
+        struct Skewed;
+        impl Instrument for Skewed {
+            fn command(&self, text: &str) -> Result<String, String> {
+                Ok(match text {
+                    "SHOW_TRUE" => "$G0000000050000".into(), // 50 ticks = 1.00 s
+                    "SHOW_LIVE" => "$G0000000051000".into(), // 51 ticks = 1.02 s
+                    _ => String::new(),
+                })
+            }
+            fn channels(&self) -> usize {
+                1
+            }
+            fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
+                Ok(vec![0])
+            }
+            fn is_counting(&self) -> bool {
+                true
+            }
+            fn model(&self) -> String {
+                String::new()
+            }
+            fn identity(&self) -> String {
+                "0".into()
+            }
+            fn calibration(&self) -> Option<(f64, f64, f64)> {
+                None
+            }
+            fn route(&self) -> String {
+                "a skewed double".into()
+            }
+        }
+        let skewed = Skewed;
+        let mut session = Session {
+            instrument: &skewed,
+            total: 0,
+        };
+        let status = session.handle("SHOW_STATUS");
+        assert!(status.contains("DT=0.00%"), "{status}");
+        assert!(!status.contains("DT=-"), "{status}");
     }
 
     #[test]
