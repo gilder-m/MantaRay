@@ -287,7 +287,12 @@ pub fn read_ortec(bytes: &[u8]) -> Result<NuclideLibrary, FormatError> {
 
     let mut library = NuclideLibrary::new("");
     // Fore pointers in a corrupt file can loop; a visited set makes the walk
-    // finite without trusting any count the header claims.
+    // finite without trusting any count the header claims. The per-nuclide
+    // set is not enough on its own: 65535 nuclide records all pointing at one
+    // shared 65535-long peak chain would walk it 65535 times - billions of
+    // pushes from a five-megabyte file. The format cannot address more than
+    // `peak_max` peaks in total, so that is also the cap across the file.
+    let mut peaks_read_total = 0usize;
     let mut seen_nuclides = vec![false; nuclide_max + 1];
     let mut ordinal = nuclide_start;
     while (1..=nuclide_max).contains(&ordinal) && !seen_nuclides[ordinal] {
@@ -299,7 +304,11 @@ pub fn read_ortec(bytes: &[u8]) -> Result<NuclideLibrary, FormatError> {
         let mut peaks = Vec::new();
         let mut seen_peaks = vec![false; peak_max + 1];
         let mut peak_ordinal = ortec_word(record, 19) as usize;
-        while (1..=peak_max).contains(&peak_ordinal) && !seen_peaks[peak_ordinal] {
+        while (1..=peak_max).contains(&peak_ordinal)
+            && !seen_peaks[peak_ordinal]
+            && peaks_read_total < peak_max
+        {
+            peaks_read_total += 1;
             seen_peaks[peak_ordinal] = true;
             let peak = stored(peak_base, 4, ORTEC_PEAK_WORDS, peak_ordinal)?;
             let flags = ortec_word(peak, 5);

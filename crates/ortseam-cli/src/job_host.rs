@@ -94,6 +94,20 @@ impl CliSession {
         })
     }
 
+    /// Reads, changes and applies the presets, so they reach the instrument.
+    ///
+    /// `presets_mut` writes only the client-side mirror: for a remote
+    /// instrument the preset would never arrive, the stop would be enforced
+    /// purely from this process (and lost with it), and the no-change-while-
+    /// counting rule would be bypassed. `set_presets` is the path that
+    /// transmits.
+    fn change_presets(&mut self, change: impl FnOnce(&mut Presets)) -> Result<(), JobError> {
+        let mcb = self.instrument()?;
+        let mut presets = *mcb.presets();
+        change(&mut presets);
+        mcb.set_presets(presets).map_err(device)
+    }
+
     /// The spectrum commands act on.
     ///
     /// With no instrument attached the detector holds nothing; the empty
@@ -176,16 +190,33 @@ impl JobHost for CliSession {
     }
 
     fn wait_for_stop(&mut self) -> Result<(), JobError> {
-        // The simulator runs faster than real time: step it until a preset stops it.
         if self.instrument()?.presets().is_empty() {
             return Err(JobError::host(
                 "WAIT with no preset would never finish; set a preset first",
             ));
         }
-        let mut guard = 0usize;
-        while self.instrument()?.is_active() && guard < 10_000_000 {
-            advance(self.instrument()?.as_mcb_mut(), 1.0).map_err(device)?;
-            guard += 1;
+        if self.instrument()?.as_simulated().is_some() {
+            // The simulator runs faster than real time: step it until a
+            // preset stops it, and say so if an impossible one never does.
+            let mut stepped = 0usize;
+            while self.instrument()?.is_active() {
+                if stepped >= 10_000_000 {
+                    return Err(JobError::host(
+                        "WAIT gave up: ten million simulated seconds passed and no preset stopped the acquisition",
+                    ));
+                }
+                advance(self.instrument()?.as_mcb_mut(), 1.0).map_err(device)?;
+                stepped += 1;
+            }
+        } else {
+            // A real instrument counts in real time and stops itself when a
+            // preset is reached; wait for that a few polls a second, rather
+            // than hammering the wire in a tight loop.
+            while self.instrument()?.is_active() {
+                let step = std::time::Duration::from_millis(250);
+                std::thread::sleep(step);
+                advance(self.instrument()?.as_mcb_mut(), step.as_secs_f64()).map_err(device)?;
+            }
         }
         let status = self.instrument()?.status();
         self.note(&format!(
@@ -196,10 +227,31 @@ impl JobHost for CliSession {
     }
 
     fn wait_seconds(&mut self, seconds: f64) -> Result<(), JobError> {
-        if self.instrument()?.is_active() {
-            advance(self.instrument()?.as_mcb_mut(), seconds).map_err(device)?;
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Ok(());
         }
-        Ok(())
+        if self.instrument()?.as_simulated().is_some() {
+            // The simulator runs faster than real time: skip straight ahead.
+            if self.instrument()?.is_active() {
+                advance(self.instrument()?.as_mcb_mut(), seconds).map_err(device)?;
+            }
+            return Ok(());
+        }
+        // A real instrument counts in real time, so WAIT means wall-clock
+        // seconds - the manual's own START / WAIT 300 / STOP pattern used to
+        // stop almost immediately and save a near-empty spectrum. Sleep in
+        // steps, polling as the time passes, so the mirror stays current and
+        // a host-side preset can still end the run early.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            let step = remaining.min(std::time::Duration::from_millis(250));
+            std::thread::sleep(step);
+            advance(self.instrument()?.as_mcb_mut(), step.as_secs_f64()).map_err(device)?;
+        }
     }
 
     fn fill_buffer(&mut self) -> Result<(), JobError> {
@@ -358,23 +410,19 @@ impl JobHost for CliSession {
     }
 
     fn set_preset_real(&mut self, seconds: f64) -> Result<(), JobError> {
-        self.instrument()?.presets_mut().real_time = Some(seconds);
-        Ok(())
+        self.change_presets(|presets| presets.real_time = Some(seconds))
     }
 
     fn set_preset_live(&mut self, seconds: f64) -> Result<(), JobError> {
-        self.instrument()?.presets_mut().live_time = Some(seconds);
-        Ok(())
+        self.change_presets(|presets| presets.live_time = Some(seconds))
     }
 
     fn set_preset_peak(&mut self, counts: u64) -> Result<(), JobError> {
-        self.instrument()?.presets_mut().roi_peak = Some(counts);
-        Ok(())
+        self.change_presets(|presets| presets.roi_peak = Some(counts))
     }
 
     fn set_preset_integral(&mut self, counts: u64) -> Result<(), JobError> {
-        self.instrument()?.presets_mut().roi_integral = Some(counts);
-        Ok(())
+        self.change_presets(|presets| presets.roi_integral = Some(counts))
     }
 
     fn set_preset_uncertainty(
@@ -383,17 +431,17 @@ impl JobHost for CliSession {
         low: usize,
         high: usize,
     ) -> Result<(), JobError> {
-        self.instrument()?.presets_mut().uncertainty = Some(UncertaintyPreset {
-            limit_percent: limit,
-            low_channel: low,
-            high_channel: high,
-        });
-        Ok(())
+        self.change_presets(|presets| {
+            presets.uncertainty = Some(UncertaintyPreset {
+                limit_percent: limit,
+                low_channel: low,
+                high_channel: high,
+            })
+        })
     }
 
     fn clear_presets(&mut self) -> Result<(), JobError> {
-        self.instrument()?.presets_mut().clear();
-        Ok(())
+        self.change_presets(Presets::clear)
     }
 
     fn set_list_mode(&mut self, list: bool) -> Result<(), JobError> {
@@ -509,6 +557,68 @@ pub fn run_job_file(
         outcome.commands,
         if outcome.quit { ", QUIT" } else { "" }
     );
-    let _ = Presets::default();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ortseam_device::{MockTransport, RemoteMcb};
+
+    /// A session holding a remote instrument that answers from a script and
+    /// records every command it is sent.
+    fn remote_session(pairs: &[(&str, &str)]) -> CliSession {
+        let transport = MockTransport::scripted(pairs);
+        let remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH").expect("connect");
+        CliSession::new(std::env::temp_dir(), false, Some(AnyMcb::Remote(remote)))
+    }
+
+    #[test]
+    fn a_job_preset_reaches_the_wire_not_just_the_mirror() {
+        // The bug this pins: SET_PRESET_* wrote only the client-side mirror,
+        // so the instrument never held the preset - if the process died
+        // mid-job, the instrument counted forever. The scripted transport
+        // refuses any command it does not expect, so passing proves the
+        // presets went over the wire.
+        let mut session = remote_session(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+            ("SET_PRESET_CLEAR", "OK"),
+            ("SET_PRESET_LIVE 300", "OK"),
+            ("SET_PRESET_CLEAR", "OK"),
+            ("SET_PRESET_LIVE 300", "OK"),
+            ("SET_PRESET_COUNT 5000", "OK"),
+        ]);
+        session.set_preset_live(300.0).expect("live preset");
+        session.set_preset_peak(5000).expect("peak preset");
+    }
+
+    #[test]
+    fn wait_on_a_real_instrument_passes_real_time() {
+        // The manual's own START / WAIT 300 / STOP pattern used to stop
+        // almost immediately: advance() on a remote instrument only bumps a
+        // poll counter, it does not wait. WAIT must spend the seconds it
+        // names. The script carries the one refresh the polling crosses.
+        let mut session = remote_session(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+            ("SHOW_STATUS", "RT=1 LT=1 DT=0% ICR=0 ACTIVE=1 TOTAL=5"),
+            ("SHOW_DATA", "DATA 2 2 3"),
+        ]);
+        let before = std::time::Instant::now();
+        session.wait_seconds(0.6).expect("wait");
+        assert!(
+            before.elapsed() >= std::time::Duration::from_millis(600),
+            "WAIT 0.6 returned after {:?}",
+            before.elapsed()
+        );
+    }
 }

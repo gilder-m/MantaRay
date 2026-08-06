@@ -214,13 +214,14 @@ fn several_spectra_can_be_open_at_once_and_each_can_be_brought_forward() {
         "both recalled windows should be drawn: {:?}",
         visible_titles(&app)
     );
-    // Activating a window makes it the one commands apply to.
+    // Activating a window makes it the one commands apply to. Activate takes
+    // the window's id, so a shifted list cannot focus the wrong window.
     let first_buffer = app
         .windows
         .iter()
         .position(|window| window.title == "first.chn")
         .expect("the first file should have a window");
-    app.apply_action(Action::Activate(first_buffer));
+    app.apply_action(Action::Activate(app.windows[first_buffer].id));
     assert_eq!(app.active, Some(first_buffer));
     assert_eq!(
         app.active_spectrum().map(|spectrum| spectrum.len()),

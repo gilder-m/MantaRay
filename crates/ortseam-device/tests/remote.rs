@@ -35,6 +35,41 @@ fn connecting_learns_what_the_instrument_is() {
 }
 
 #[test]
+fn a_malformed_data_reply_is_an_error_not_an_abort() {
+    // One corrupt line over TCP or the pipe must surface as an error the
+    // caller can show. Before this, a huge declared count aborted the whole
+    // process inside Vec::with_capacity, and a garbled channel word quietly
+    // became 0 counts.
+    for bad in [
+        "DATA 1000000000000000", // would try to allocate petabytes
+        "DATA 2 5 x",            // a word that is not a count
+        "DATA 4 1 2",            // fewer words than declared
+        "DATA nonsense",         // no count at all
+    ] {
+        let mut remote = connect_scripted(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 3 4"),
+            ("SHOW_STATUS", "RT=1 LT=1 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", bad),
+        ]);
+        let error = remote.poll(1.0).expect_err(bad);
+        assert!(
+            error.to_string().contains("DATA"),
+            "{bad:?} should be refused by name, got: {error}"
+        );
+        assert_eq!(
+            remote.spectrum().channels,
+            vec![3, 4],
+            "the last good spectrum must survive a corrupt reply"
+        );
+    }
+}
+
+#[test]
 fn starting_sends_the_start_command_and_nothing_else() {
     let mut remote = connect_scripted(&[
         (
@@ -281,4 +316,51 @@ fn the_whole_protocol_round_trips_over_real_tcp() {
     // And a raw pass-through, as SEND_MESSAGE uses.
     let version = remote.send_message("SHOW_VERSION").expect("version");
     assert!(!version.is_empty());
+}
+
+#[test]
+fn an_uncertainty_preset_does_stop_a_remote_instrument() {
+    // Worth pinning because it was believed otherwise: the uncertainty and
+    // MDA presets are host-side calculations, and no instrument carries them,
+    // so it looks as though a bridged or network detector would count on
+    // forever. It does not. `advance` is what the desktop application calls
+    // for every detector on every frame and what the command line's WAIT
+    // calls as it sleeps; it evaluates the presets against the mirrored
+    // spectrum and sends STOP over the wire when one is satisfied.
+    const PEAK: &str = "DATA 16 5 5 5 10 50 200 400 200 50 10 5 5 5 5 5 5";
+    let transport = MockTransport::scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=16",
+        ),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        ("SHOW_DATA", PEAK),
+        // Only the four the instrument itself carries go over the wire.
+        ("SET_PRESET_CLEAR", "OK"),
+        ("START", "OK"),
+        ("SHOW_STATUS", "RT=10 LT=10 DT=0% ICR=0 ACTIVE=1 TOTAL=960"),
+        ("SHOW_DATA", PEAK),
+        ("STOP", "OK"),
+    ]);
+    let mut remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH-01").expect("connect");
+
+    let presets = ortseam_device::Presets {
+        uncertainty: Some(ortseam_device::UncertaintyPreset {
+            limit_percent: 25.0,
+            low_channel: 2,
+            high_channel: 12,
+        }),
+        ..Default::default()
+    };
+    remote.set_presets(presets).expect("the preset is accepted");
+    remote.start().expect("start");
+    assert!(remote.is_active());
+
+    let stopped = advance(&mut remote, 2.0).expect("advance");
+    assert_eq!(
+        stopped,
+        Some(ortseam_device::PresetKind::Uncertainty),
+        "the uncertainty preset should have stopped the count"
+    );
+    assert!(!remote.is_active(), "and the instrument should be stopped");
 }

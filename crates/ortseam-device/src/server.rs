@@ -18,6 +18,10 @@ use crate::mcb::Mcb;
 /// Reads a command a line at a time and answers each on one line; `ERR reason`
 /// carries a rejection. Returns when the client hangs up.
 pub fn serve_connection(stream: TcpStream, mcb: Arc<Mutex<dyn Mcb>>) -> std::io::Result<()> {
+    // One silent client must not hold the single serving slot forever: the
+    // other end polls every half second when it is alive at all, so a minute
+    // of nothing is a vanished client, not a quiet one.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     let mut line = String::new();
@@ -31,7 +35,10 @@ pub fn serve_connection(stream: TcpStream, mcb: Arc<Mutex<dyn Mcb>>) -> std::io:
             continue;
         }
         let response = {
-            let mut mcb = mcb.lock().expect("instrument lock");
+            // A poisoned lock means the clock thread panicked mid-advance;
+            // the simulator's state is still the best answer there is, and
+            // killing the serve loop over it would refuse every later client.
+            let mut mcb = mcb.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             mcb.send_message(command)
                 .unwrap_or_else(|error| format!("ERR {error}"))
         };

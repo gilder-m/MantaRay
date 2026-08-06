@@ -344,15 +344,16 @@ fn serve(address: &str, channels: usize) -> Result<()> {
             .channels(channels)
             .build(),
     ));
-    // The clock: real seconds advance the served instrument.
+    // The clock: real seconds advance the served instrument - idle too,
+    // because the automatic tuning routines (Optimize, pole zero) run on the
+    // instrument's clock while nothing is counting. Gating this on is_active
+    // left a served START_PZ spinning until an acquisition started.
     let clock = Arc::clone(&instrument);
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
             let mut mcb = clock.lock().expect("instrument lock");
-            if mcb.is_active() {
-                let _ = advance(&mut *mcb, 0.2);
-            }
+            let _ = advance(&mut *mcb, 0.2);
         }
     });
     eprintln!("serving a {channels}-channel simulated MCB on {address} (Ctrl+C stops it)");

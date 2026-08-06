@@ -311,6 +311,8 @@ pub enum Action {
     ForceCloseWindow(usize),
     /// Save, and close only if the save went through.
     SaveThenClose(usize),
+    /// Focus a window by its id - not its position, which an earlier close in
+    /// the same frame's batch can shift.
     Activate(usize),
     TileHorizontally,
     TileVertically,
@@ -582,6 +584,8 @@ pub struct App {
     pub report_text: Option<String>,
     /// A running job.
     pub job: Option<crate::jobs::JobRun>,
+    /// A wait the job is in, checked once per frame instead of blocking one.
+    pub job_wait: Option<crate::jobs::JobWait>,
     /// Variables a job can read.
     pub job_variables: ortseam_jobs::JobVariables,
     /// Directory a job's relative file names resolve against.
@@ -750,6 +754,7 @@ impl App {
             analysis: None,
             report_text: None,
             job: None,
+            job_wait: None,
             job_variables: ortseam_jobs::JobVariables::new(),
             job_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             strip_name: None,
@@ -885,12 +890,27 @@ impl App {
     /// Removes a window and hands its roles - active, filling the area - to
     /// whatever is left.
     fn close_window(&mut self, id: usize) {
+        // What was active stays active by identity, not by position: closing
+        // a background window must not silently retarget later commands.
+        let active_id = self.active.and_then(|index| {
+            self.windows
+                .get(index)
+                .map(|window| window.id)
+                .filter(|active| *active != id)
+        });
+        let before = self.windows.len();
         self.windows.retain(|window| window.id != id);
-        self.active = if self.windows.is_empty() {
-            None
-        } else {
-            Some(self.windows.len() - 1)
-        };
+        if self.windows.len() == before {
+            // Nothing by that id: nothing to retarget either.
+            return;
+        }
+        self.active = active_id
+            .and_then(|id| self.windows.iter().position(|window| window.id == id))
+            .or(if self.windows.is_empty() {
+                None
+            } else {
+                Some(self.windows.len() - 1)
+            });
         // Closing the window that filled the area hands the area to
         // whatever is left, rather than leaving it blank.
         if self.maximized == Some(id) {
@@ -1161,8 +1181,11 @@ impl App {
         // Look for instruments once, on the first frame after the window is up,
         // and only when there is nothing configured. Somebody with an
         // instrument plugged in should find it waiting for them rather than
-        // have to know that a button exists.
-        if !self.looked_for_instruments {
+        // have to know that a button exists. `shown` gates it to the second
+        // frame: the probe is synchronous, and running it before the first
+        // frame was on screen held the window invisible for its whole
+        // duration - the launch appeared to hang.
+        if !self.looked_for_instruments && self.shown {
             self.looked_for_instruments = true;
             if self.detectors.is_empty() && std::env::var("ORTSEAM_NO_OPEN").is_err() {
                 self.scan_local_instruments();
@@ -1516,8 +1539,8 @@ impl App {
                     }
                 }
             }
-            Action::Activate(index) => {
-                if index < self.windows.len() {
+            Action::Activate(id) => {
+                if let Some(index) = self.windows.iter().position(|window| window.id == id) {
                     self.focus_window(index);
                 }
             }
@@ -2541,10 +2564,12 @@ impl App {
     }
 
     /// Applies a strip operation from the Strip dialog.
-    pub fn strip_from(&mut self, path: PathBuf, factor: Option<f64>) {
+    /// Whether it stripped: the caller's status must not claim success over
+    /// the failure message this leaves behind.
+    pub fn strip_from(&mut self, path: PathBuf, factor: Option<f64>) -> bool {
         let Some(disk) = load_spectrum(&path).ok() else {
             self.status = format!("could not read {}", path.display());
-            return;
+            return false;
         };
         self.push_undo("Strip");
         let mode = match factor {
@@ -2553,14 +2578,18 @@ impl App {
         };
         let outcome = match self.active_spectrum_mut() {
             Some(spectrum) => strip(spectrum, &disk, mode),
-            None => return,
+            None => return false,
         };
         match outcome {
             Ok(()) => {
                 self.mark_modified();
                 self.status = format!("stripped {}", path.display());
+                true
             }
-            Err(error) => self.status = format!("could not strip: {error}"),
+            Err(error) => {
+                self.status = format!("could not strip: {error}");
+                false
+            }
         }
     }
 
@@ -3060,6 +3089,11 @@ impl App {
             return;
         };
         if window.calibration.remove(index).is_some() {
+            // The edit texts are keyed by row: the row under the removed one
+            // moves up, and must not inherit the removed point's typing.
+            if index < self.dialogs.calibration_edits.len() {
+                self.dialogs.calibration_edits.remove(index);
+            }
             self.apply_fitted_calibration();
             self.status = format!("point {} removed", index + 1);
         }
@@ -3364,55 +3398,66 @@ impl App {
             let ctrl = input.modifiers.command || input.modifiers.ctrl;
             let alt = input.modifiers.alt;
             let step = if shift { 10 } else { 1 };
+            // A focused text field owns the plain keys: Delete is deleting a
+            // typo, not the ROI under the marker; arrows move the caret, not
+            // the marker; "511" being typed into an energy box must not
+            // recentre the view. Every unmodified binding stands down while
+            // something has the keyboard. (The F-keys and Ctrl/Alt chords
+            // type nothing, so they keep working.)
+            let typing = ctx.egui_wants_keyboard_input();
 
-            if input.key_pressed(Key::ArrowRight)
+            if !typing
+                && input.key_pressed(Key::ArrowRight)
                 && let Some(index) = self.active
             {
                 self.windows[index].display.move_marker(step as i64);
             }
-            if input.key_pressed(Key::ArrowLeft)
+            if !typing
+                && input.key_pressed(Key::ArrowLeft)
                 && let Some(index) = self.active
             {
                 self.windows[index].display.move_marker(-(step as i64));
             }
-            if input.key_pressed(Key::Home) {
+            if !typing && input.key_pressed(Key::Home) {
                 actions.push(Action::Marker(0));
             }
-            if input.key_pressed(Key::End) {
+            if !typing && input.key_pressed(Key::End) {
                 actions.push(Action::Marker(usize::MAX));
             }
-            if input.key_pressed(Key::PageUp)
+            if !typing
+                && input.key_pressed(Key::PageUp)
                 && let Some(index) = self.active
             {
                 let width = self.windows[index].display.view_width as i64;
                 actions.push(Action::Scroll(width / 2));
             }
-            if input.key_pressed(Key::PageDown)
+            if !typing
+                && input.key_pressed(Key::PageDown)
                 && let Some(index) = self.active
             {
                 let width = self.windows[index].display.view_width as i64;
                 actions.push(Action::Scroll(-width / 2));
             }
-            if input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals) {
+            if !typing && (input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals)) {
                 actions.push(Action::ZoomIn);
             }
-            if input.key_pressed(Key::Minus) {
+            if !typing && input.key_pressed(Key::Minus) {
                 actions.push(Action::ZoomOut);
             }
-            if input.key_pressed(Key::Slash) {
+            if !typing && input.key_pressed(Key::Slash) {
                 actions.push(Action::ToggleLog);
             }
             // egui has no keypad-* key, so automatic scaling is on A.
-            if input.key_pressed(Key::A) && !ctrl && !alt {
+            if !typing && input.key_pressed(Key::A) && !ctrl && !alt {
                 actions.push(Action::AutoScale);
             }
-            if input.key_pressed(Key::Num5) && !ctrl {
+            if !typing && input.key_pressed(Key::Num5) && !ctrl {
                 actions.push(Action::Center);
             }
-            if input.key_pressed(Key::Insert) {
+            if !typing && input.key_pressed(Key::Insert) {
                 actions.push(Action::MarkPeak);
             }
-            if input.key_pressed(Key::Delete) {
+            if !typing && input.key_pressed(Key::Delete) {
                 actions.push(Action::ClearRoi);
             }
             if input.key_pressed(Key::F2) {
@@ -3432,7 +3477,7 @@ impl App {
             // A focused text field owns Escape (it releases focus); otherwise
             // Escape peels the topmost layer: open dialogs close first, and
             // only then does it clear the plot's own overlays.
-            if input.key_pressed(Key::Escape) && !ctx.egui_wants_keyboard_input() {
+            if input.key_pressed(Key::Escape) && !typing {
                 if self.dialogs.any_open() {
                     self.dialogs.close_all();
                     self.pending_close = None;
@@ -3448,7 +3493,8 @@ impl App {
                 actions.push(Action::MaximizeActive);
             }
             // Shift with the up and down arrows offsets the comparison trace.
-            if shift
+            if !typing
+                && shift
                 && (input.key_pressed(Key::ArrowUp) || input.key_pressed(Key::ArrowDown))
                 && let Some(index) = self.active
                 && self.windows[index].compare.is_some()
@@ -3510,7 +3556,7 @@ impl App {
             }
             // Ctrl+C copies the open peak card - unless a text field has the
             // keyboard, whose own copy must win.
-            if ctrl && input.key_pressed(Key::C) && !ctx.egui_wants_keyboard_input() {
+            if ctrl && input.key_pressed(Key::C) && !typing {
                 let card_open = self
                     .active
                     .and_then(|index| self.windows.get(index))
@@ -3760,7 +3806,7 @@ impl App {
                                 }
                             });
                         }
-                        ViewEvent::Activate => actions.push(Action::Activate(index)),
+                        ViewEvent::Activate => actions.push(Action::Activate(*id)),
                         ViewEvent::ToggleMaximize => actions.push(Action::ToggleMaximize(*id)),
                         ViewEvent::ClosePeakInfo => *peak_info = None,
                     }

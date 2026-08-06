@@ -141,12 +141,37 @@ impl RemoteMcb {
                 detail: format!("expected DATA, got {data:.40?}"),
             });
         }
-        let count: usize = words.next().and_then(|word| word.parse().ok()).unwrap_or(0);
+        // The count word arrives over a wire and is not to be trusted with an
+        // allocation: the largest real MCB memory is 16k channels, so anything
+        // past this is a corrupt line, not an instrument. One garbled reply
+        // must be an error the caller can show, never an allocation abort and
+        // never counts quietly read as zero.
+        const MOST_CHANNELS: usize = 65536;
+        let count: usize = words
+            .next()
+            .and_then(|word| word.parse().ok())
+            .filter(|count| *count <= MOST_CHANNELS)
+            .ok_or_else(|| DeviceError::Communication {
+                detail: format!("DATA does not declare a believable channel count: {data:.60?}"),
+            })?;
         let mut channels = Vec::with_capacity(count);
         for word in words.take(count) {
-            channels.push(word.parse::<u64>().unwrap_or(0));
+            channels.push(
+                word.parse::<u64>()
+                    .map_err(|_| DeviceError::Communication {
+                        detail: format!("a channel in DATA is not a count: {word:.40?}"),
+                    })?,
+            );
         }
-        if channels.len() == count && count > 0 {
+        if channels.len() != count {
+            return Err(DeviceError::Communication {
+                detail: format!(
+                    "DATA declares {count} channels but carries {}",
+                    channels.len()
+                ),
+            });
+        }
+        if count > 0 {
             if self.spectrum.len() != count {
                 // The instrument's conversion gain changed underneath us. The
                 // counts are new, but whose spectrum this is - detector,

@@ -32,7 +32,15 @@ fn random_text_never_panics_the_parser() {
 
 #[test]
 fn hostile_edits_of_a_valid_job_never_panic() {
-    let valid = "SET_DETECTOR 1\nSET_PRESET_LIVE 300\nCLEAR\nSTART\nWAIT\nSAVE \"run???.chn\"\nLOOP 3\nBEEP\nEND_LOOP\n";
+    // BEEP always takes an argument - the manual gives `BEEP <freq>,<duration>`,
+    // `BEEP ID` and `BEEP "String"`, no bare form. The corpus once wrote a
+    // bare BEEP, so it failed to parse at line 8 and every edit below
+    // exercised less than intended.
+    let valid = "SET_DETECTOR 1\nSET_PRESET_LIVE 300\nCLEAR\nSTART\nWAIT\nSAVE \"run???.chn\"\nLOOP 3\nBEEP 1\nEND_LOOP\n";
+    assert!(
+        Job::parse(valid).is_ok(),
+        "the pristine corpus must parse, or the sweeps below exercise nothing"
+    );
     // Truncations at every byte.
     for keep in 0..valid.len() {
         let _ = Job::parse(&valid[..keep]);

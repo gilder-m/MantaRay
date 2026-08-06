@@ -67,12 +67,16 @@ impl Runner {
     }
 
     /// Line number of the next command, one based.
+    ///
+    /// Past the end, the last command's line - the place the job finished -
+    /// not the command count posing as a line number.
     pub fn position(&self) -> usize {
-        self.job
-            .commands()
+        let entries = self.job.commands();
+        entries
             .get(self.index)
+            .or_else(|| entries.last())
             .map(|entry| entry.line)
-            .unwrap_or_else(|| self.job.len())
+            .unwrap_or(0)
     }
 
     /// Which pass of the current loop is running, if any.

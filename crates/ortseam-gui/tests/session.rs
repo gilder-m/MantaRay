@@ -877,11 +877,17 @@ fn a_job_can_run_a_real_program_and_wait_for_it() {
     };
     std::fs::write(&job, line).expect("write");
     ortseam_gui::jobs::start(&mut app, &job).expect("parse");
-    for _ in 0..50 {
+    // The job parks while the program runs and is looked in on once per
+    // frame; frames come milliseconds apart, so the steps here must too, or
+    // fifty of them pass before the child can so much as exit. The ceiling
+    // is CI-sized: on a loaded two-core runner even `true` can wait a while
+    // to be scheduled, and a healthy run leaves after a few iterations.
+    for _ in 0..400 {
         ortseam_gui::jobs::step(&mut app);
         if app.job.is_none() {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
     assert!(app.job.is_none(), "the job should finish: {}", app.status);
     assert!(
@@ -899,11 +905,12 @@ fn a_job_can_run_a_real_program_and_wait_for_it() {
     };
     std::fs::write(&job, line).expect("write");
     ortseam_gui::jobs::start(&mut app, &job).expect("parse");
-    for _ in 0..50 {
+    for _ in 0..400 {
         ortseam_gui::jobs::step(&mut app);
         if app.job.is_none() {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
     assert!(
         app.status.contains("exited with") || app.status.contains("failed"),

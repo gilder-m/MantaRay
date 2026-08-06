@@ -293,15 +293,29 @@ impl Dialogs {
 
     /// Closes every open dialog (Escape).
     pub fn close_all(&mut self) {
-        self.open.clear();
+        for dialog in std::mem::take(&mut self.open) {
+            self.on_close(dialog);
+        }
     }
 
     /// Opens or closes a dialog.
     pub fn set(&mut self, dialog: Dialog, open: bool) {
         if open {
             self.open.insert(dialog);
-        } else {
-            self.open.remove(&dialog);
+        } else if self.open.remove(&dialog) {
+            self.on_close(dialog);
+        }
+    }
+
+    /// Lets go of state that belongs to one showing of a dialog.
+    fn on_close(&mut self, dialog: Dialog) {
+        match dialog {
+            // Half-typed calibration texts must not greet the next opening -
+            // the table would show the old typing over different points.
+            Dialog::Calibration => self.calibration_edits.clear(),
+            // A half-finished preset edit dies with its dialog.
+            Dialog::McbProperties => self.presets_edit = None,
+            _ => {}
         }
     }
 }
@@ -410,11 +424,16 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             )
         })
         .collect();
+    // Ids, not positions: Activate resolves by id, so the row cannot focus
+    // the wrong window if the list shifted under the menu.
+    let active_id = app
+        .active
+        .and_then(|index| app.windows.get(index))
+        .map(|window| window.id);
     let window_titles: Vec<(usize, String)> = app
         .windows
         .iter()
-        .enumerate()
-        .map(|(index, window)| (index, window.title.clone()))
+        .map(|window| (window.id, window.title.clone()))
         .collect();
     let mark_mode = app.mark_mode;
     let fill = app
@@ -858,13 +877,13 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 ui.close();
             }
             ui.separator();
-            for (index, title) in &window_titles {
+            for (id, title) in &window_titles {
                 // The active window is ticked, as any window manager would.
                 if ui
-                    .selectable_label(app.active == Some(*index), title)
+                    .selectable_label(active_id == Some(*id), title)
                     .clicked()
                 {
-                    actions.push(Action::Activate(*index));
+                    actions.push(Action::Activate(*id));
                     ui.close();
                 }
             }
@@ -1440,6 +1459,22 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         roi.start.hash(&mut hasher);
                         roi.end.hash(&mut hasher);
                     }
+                    // The rows also render through the calibration, the
+                    // library and the calculation settings: calibrating used
+                    // to leave every row saying "ch NNN" under a freshly
+                    // drawn keV header, because none of these were part of
+                    // the fingerprint.
+                    if let Some(calibration) = &spectrum.energy_calibration {
+                        for coefficient in calibration.coefficients {
+                            coefficient.to_bits().hash(&mut hasher);
+                        }
+                        calibration.units.hash(&mut hasher);
+                    }
+                    library.len().hash(&mut hasher);
+                    library.name.hash(&mut hasher);
+                    settings.fw_x.hash(&mut hasher);
+                    settings.sensitivity.hash(&mut hasher);
+                    settings.background_points.hash(&mut hasher);
                     hasher.finish()
                 };
                 let (rows, refreshed) = match &app.dialogs.region_cache {
@@ -2680,6 +2715,9 @@ fn report_viewer(app: &mut App, ctx: &egui::Context) {
     let text = app.report_text.clone().unwrap_or_default();
     egui::Window::new("Report")
         .open(&mut open)
+        // Above the spectrum windows, like every dialog_window - a maximized
+        // plot would otherwise bury it on the first click.
+        .order(egui::Order::Foreground)
         .default_size([720.0, 460.0])
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -3727,8 +3765,11 @@ fn strip_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if ui.button("Strip").clicked() {
             let path = PathBuf::from(app.dialogs.strip_path.clone());
             let factor = (!app.dialogs.strip_use_ratio).then_some(app.dialogs.strip_factor);
-            app.strip_from(path, factor);
-            actions.push(Action::Status("stripped; Edit/Undo takes it back".into()));
+            // Queued actions land after strip_from's own status: claiming
+            // success here would paper over its failure message.
+            if app.strip_from(path, factor) {
+                actions.push(Action::Status("stripped; Edit/Undo takes it back".into()));
+            }
         }
     });
 }
@@ -4358,6 +4399,10 @@ fn exit_dialog(app: &mut App, ctx: &egui::Context) {
     let mut confirmed = false;
     egui::Window::new("Exit ortseam")
         .open(&mut open)
+        // A question the whole application is waiting on must not be buried
+        // under a maximized plot - the title-bar X would then appear dead,
+        // each close request re-opening an already-hidden dialog.
+        .order(egui::Order::Foreground)
         .collapsible(false)
         .show(ctx, |ui| {
             if !unsaved.is_empty() {
@@ -4404,6 +4449,8 @@ fn confirm_close_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
         .unwrap_or_default();
     let mut done = false;
     egui::Window::new("Unsaved changes")
+        // The same burial as Exit: this question must stay on top.
+        .order(egui::Order::Foreground)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

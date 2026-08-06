@@ -45,8 +45,11 @@ pub enum JobError {
         /// What the host said.
         detail: String,
     },
-    /// The run was stopped.
-    #[error("the job was stopped")]
+    /// The runaway guard tripped: far more steps than any real job takes.
+    #[error(
+        "the job was stopped after a million steps - a LOOP that large is \
+         almost certainly a runaway"
+    )]
     Aborted,
 }
 

@@ -26,6 +26,19 @@ fn frame(app: &mut App, ctx: &egui::Context, size: [f32; 2]) -> egui::FullOutput
     ctx.run_ui(input, |ui| app.draw(ui))
 }
 
+/// Draws one frame with key events injected, as a keyboard would.
+fn frame_with_events(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1400.0, 900.0),
+        )),
+        events,
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input, |ui| app.draw(ui));
+}
+
 /// How many shapes a frame painted; a blank frame paints almost nothing.
 fn shapes(output: &egui::FullOutput) -> usize {
     output
@@ -236,6 +249,48 @@ fn every_dialog_opens_and_draws() {
         assert!(shapes(&output) > 10, "{dialog:?} drew almost nothing");
         app.dialogs.set(*dialog, false);
     }
+}
+
+#[test]
+fn plain_shortcuts_stand_down_while_something_has_the_keyboard() {
+    // The bug this pins: pressing Delete to fix a typo in the Calibrate
+    // dialog's energy box silently cleared the region under the marker, so
+    // Enter then recorded the bare marker channel instead of the region's
+    // centroid. Every unmodified key binding must stand down while a widget
+    // holds the keyboard.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    let mut spectrum = Spectrum::from_counts(vec![50; 128]);
+    spectrum.rois.mark(ortseam_core::Roi::new(40, 60));
+    app.open_buffer("ROI".into(), spectrum, None);
+    app.apply_action(Action::Marker(50));
+
+    let delete = egui::Event::Key {
+        key: egui::Key::Delete,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    // A focused widget - a text field mid-edit - owns the keyboard.
+    let field = egui::Id::new("an energy box");
+    ctx.memory_mut(|memory| memory.request_focus(field));
+    frame_with_events(&mut app, &ctx, vec![delete.clone()]);
+    assert_eq!(
+        app.active_spectrum().map(|s| s.rois.len()),
+        Some(1),
+        "Delete while typing must not clear the region under the marker"
+    );
+
+    // With the keyboard free again, the same key does its job.
+    ctx.memory_mut(|memory| memory.surrender_focus(field));
+    frame_with_events(&mut app, &ctx, vec![delete]);
+    assert_eq!(
+        app.active_spectrum().map(|s| s.rois.len()),
+        Some(0),
+        "Delete with nothing focused clears the region"
+    );
 }
 
 #[test]

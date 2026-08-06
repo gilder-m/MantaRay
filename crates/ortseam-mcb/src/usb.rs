@@ -146,10 +146,16 @@ pub fn devices() -> Vec<String> {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            if status != 0 {
+            // 259 is ERROR_NO_MORE_ITEMS: the end of the list. Any other
+            // error - a key too long for the buffer, say - skips that key
+            // rather than hiding every device listed after it.
+            if status == 259 {
                 break;
             }
             index += 1;
+            if status != 0 {
+                continue;
+            }
             let bytes: Vec<u8> = name[..length as usize].iter().map(|c| *c as u8).collect();
             let Ok(text) = String::from_utf8(bytes) else {
                 continue;
@@ -177,6 +183,68 @@ enum Recover {
     No,
 }
 
+/// `OVERLAPPED`, laid out as Windows lays it out on either width.
+///
+/// Two pointer-sized status words, the two offset DWORDs, then the event
+/// handle. On 64-bit that puts `hEvent` at byte 24 - modelling this as five
+/// `usize`s put it at byte 32, so the kernel saw a null event and signalled
+/// the file handle instead, which is ambiguous the moment two requests ever
+/// overlap.
+#[repr(C)]
+// The kernel reads and writes these fields, not Rust - dead_code cannot see
+// through a DeviceIoControl.
+#[allow(dead_code)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    h_event: Handle,
+}
+
+/// Everything the kernel may still write through while a request is in
+/// flight, owned on the heap so it can be leaked rather than freed if the
+/// request cannot be withdrawn.
+struct Flight {
+    overlapped: Box<Overlapped>,
+    /// What goes to the driver. For the buffered single-buffer codes this is
+    /// also where the answer lands.
+    input: Vec<u8>,
+    /// Where the answer lands when the code takes distinct buffers.
+    output: Vec<u8>,
+}
+
+impl Flight {
+    fn new(event: Handle, input: &[u8], output_len: usize) -> Self {
+        Self {
+            overlapped: Box::new(Overlapped {
+                internal: 0,
+                internal_high: 0,
+                offset: 0,
+                offset_high: 0,
+                h_event: event,
+            }),
+            input: input.to_vec(),
+            output: vec![0_u8; output_len],
+        }
+    }
+
+    fn overlapped_ptr(&mut self) -> *mut c_void {
+        (&mut *self.overlapped as *mut Overlapped).cast()
+    }
+}
+
+/// Why a request did not finish, kept apart so the caller knows whether the
+/// kernel is done with the buffers.
+enum RequestFailure {
+    /// The request is over - failed, timed out and withdrawn, or refused -
+    /// and the buffers are free to drop.
+    Over(String),
+    /// The request could not be withdrawn: the kernel may still write
+    /// through the buffers, so they must be leaked and the device retired.
+    Wedged(String),
+}
+
 /// An open handle on one instrument's driver.
 pub struct Device {
     handle: Handle,
@@ -185,6 +253,10 @@ pub struct Device {
     event: Handle,
     /// The path this was opened by, for reopening after a port cycle.
     path: String,
+    /// Set when a request could not be withdrawn from the driver. The
+    /// buffers it was given have been leaked, and no further request is
+    /// allowed - the device needs reopening (or replugging).
+    wedged: std::sync::atomic::AtomicBool,
 }
 
 impl Device {
@@ -231,6 +303,7 @@ impl Device {
             handle,
             event,
             path: path.to_string(),
+            wedged: std::sync::atomic::AtomicBool::new(false),
         };
         Ok(device)
     }
@@ -258,13 +331,25 @@ impl Device {
         buffer: &mut [u8],
         milliseconds: u32,
     ) -> Result<usize, String> {
-        let mut overlapped = [0_usize; 5];
-        overlapped[4] = self.event as usize;
+        self.control_both_with(code, buffer, milliseconds, Recover::Yes)
+    }
+
+    fn control_both_with(
+        &self,
+        code: u32,
+        buffer: &mut [u8],
+        milliseconds: u32,
+        recover: Recover,
+    ) -> Result<usize, String> {
+        self.ensure_not_wedged()?;
+        let mut flight = Flight::new(self.event, buffer, 0);
         let mut returned = 0_u32;
-        let pointer: *mut c_void = buffer.as_mut_ptr().cast();
-        let length = buffer.len() as u32;
+        let pointer: *mut c_void = flight.input.as_mut_ptr().cast();
+        let length = flight.input.len() as u32;
         // SAFETY: the same buffer is given for both directions, which is how a
-        // buffered control code works; it outlives the wait below.
+        // buffered control code works. Everything the kernel may write through
+        // lives in `flight`, which outlives the wait - or is leaked whole if
+        // the request cannot be withdrawn.
         let ok = unsafe {
             DeviceIoControl(
                 self.handle,
@@ -274,16 +359,17 @@ impl Device {
                 pointer,
                 length,
                 &mut returned,
-                overlapped.as_mut_ptr().cast(),
+                flight.overlapped_ptr(),
             )
         };
-        self.finish(
-            ok,
-            &mut overlapped,
-            &mut returned,
-            milliseconds,
-            Recover::Yes,
-        )
+        match self.finish(ok, &mut flight, &mut returned, milliseconds, recover) {
+            Ok(count) => {
+                let carried = count.min(buffer.len()).min(flight.input.len());
+                buffer[..carried].copy_from_slice(&flight.input[..carried]);
+                Ok(count)
+            }
+            Err(failure) => Err(self.contain(failure, flight)),
+        }
     }
 
     fn control_with_timeout(
@@ -304,27 +390,61 @@ impl Device {
         milliseconds: u32,
         recover: Recover,
     ) -> Result<usize, String> {
-        // OVERLAPPED is Internal, InternalHigh, Offset, OffsetHigh, hEvent -
-        // three pointer-sized words and two DWORDs on 32-bit, which is five
-        // words either way. The event goes in the last one.
-        let mut overlapped = [0_usize; 5];
-        overlapped[4] = self.event as usize;
+        self.ensure_not_wedged()?;
+        let mut flight = Flight::new(self.event, input, output.len());
         let mut returned = 0_u32;
-        // SAFETY: both buffers are passed with their own lengths, and the
-        // overlapped structure and its event outlive the wait below.
+        // SAFETY: both buffers are passed with their own lengths. Everything
+        // the kernel may write through lives in `flight`, which outlives the
+        // wait - or is leaked whole if the request cannot be withdrawn.
         let ok = unsafe {
             DeviceIoControl(
                 self.handle,
                 code,
-                input.as_mut_ptr().cast(),
-                input.len() as u32,
-                output.as_mut_ptr().cast(),
-                output.len() as u32,
+                flight.input.as_mut_ptr().cast(),
+                flight.input.len() as u32,
+                flight.output.as_mut_ptr().cast(),
+                flight.output.len() as u32,
                 &mut returned,
-                overlapped.as_mut_ptr().cast(),
+                flight.overlapped_ptr(),
             )
         };
-        self.finish(ok, &mut overlapped, &mut returned, milliseconds, recover)
+        match self.finish(ok, &mut flight, &mut returned, milliseconds, recover) {
+            Ok(count) => {
+                let carried = count.min(output.len()).min(flight.output.len());
+                output[..carried].copy_from_slice(&flight.output[..carried]);
+                Ok(count)
+            }
+            Err(failure) => Err(self.contain(failure, flight)),
+        }
+    }
+
+    /// Refuses to touch a device whose last request could not be withdrawn.
+    fn ensure_not_wedged(&self) -> Result<(), String> {
+        if self.wedged.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "{} is wedged: a request could not be withdrawn from the \
+                 driver; close and reopen it (or replug the adapter)",
+                self.path
+            ));
+        }
+        Ok(())
+    }
+
+    /// Settles a failed request's buffers: dropped when the kernel is done
+    /// with them, leaked - and the device retired - when it may not be.
+    fn contain(&self, failure: RequestFailure, flight: Flight) -> String {
+        match failure {
+            RequestFailure::Over(message) => message,
+            RequestFailure::Wedged(message) => {
+                // The kernel may still write through these; freeing them
+                // would hand it freed memory. A leak is the cheap, safe
+                // alternative, and the wedged flag stops anything further.
+                std::mem::forget(flight);
+                self.wedged
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                message
+            }
+        }
     }
 
     /// Waits for a queued request, or withdraws it.
@@ -335,11 +455,11 @@ impl Device {
     fn finish(
         &self,
         ok: Bool32,
-        overlapped: &mut [usize; 5],
+        flight: &mut Flight,
         returned: &mut u32,
         milliseconds: u32,
         recover: Recover,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, RequestFailure> {
         if ok == 0 {
             // SAFETY: reads a thread-local error code.
             let error = unsafe { GetLastError() };
@@ -348,7 +468,7 @@ impl Device {
                 let finished = unsafe {
                     GetOverlappedResultEx(
                         self.handle,
-                        overlapped.as_mut_ptr().cast(),
+                        flight.overlapped_ptr(),
                         returned,
                         milliseconds,
                         0,
@@ -356,16 +476,34 @@ impl Device {
                 };
                 if finished == 0 {
                     // SAFETY: withdrawing the request is what makes it safe to
-                    // let the buffers go.
-                    unsafe {
-                        CancelIoEx(self.handle, overlapped.as_mut_ptr().cast());
+                    // let the buffers go - and both results are checked,
+                    // because "I asked it to stop" is not "it stopped".
+                    let collected = unsafe {
+                        CancelIoEx(self.handle, flight.overlapped_ptr());
                         GetOverlappedResultEx(
                             self.handle,
-                            overlapped.as_mut_ptr().cast(),
+                            flight.overlapped_ptr(),
                             returned,
                             1000,
                             0,
-                        );
+                        )
+                    };
+                    if collected == 0 {
+                        // SAFETY: reads a thread-local error code.
+                        let after = unsafe { GetLastError() };
+                        // 996 is ERROR_IO_INCOMPLETE and 258 WAIT_TIMEOUT:
+                        // the request is still in the driver's hands even
+                        // after the cancel and a second of grace. Anything
+                        // else (995, ERROR_OPERATION_ABORTED, above all)
+                        // means it completed - as cancelled - and the
+                        // buffers are ours again.
+                        if after == 996 || after == 258 {
+                            return Err(RequestFailure::Wedged(format!(
+                                "the driver kept the request past its cancel \
+                                 (Windows error {after}); the device needs \
+                                 reopening"
+                            )));
+                        }
                     }
                     // The withdrawn request may have left an answer nobody
                     // collected. Clearing both pipes here means the next
@@ -375,9 +513,9 @@ impl Device {
                     if recover == Recover::Yes {
                         self.settle();
                     }
-                    return Err(format!(
+                    return Err(RequestFailure::Over(format!(
                         "the instrument did not answer within {milliseconds} ms"
-                    ));
+                    )));
                 }
                 return Ok(*returned as usize);
             }
@@ -385,9 +523,11 @@ impl Device {
             // for a request it does not implement - it is a 2017 build, and
             // some of the published codes came later.
             if error == 122 {
-                return Err("not supported by this driver".to_string());
+                return Err(RequestFailure::Over("not supported by this driver".into()));
             }
-            return Err(format!("the request failed (Windows error {error})"));
+            return Err(RequestFailure::Over(format!(
+                "the request failed (Windows error {error})"
+            )));
         }
         Ok(*returned as usize)
     }
@@ -685,31 +825,15 @@ impl Device {
         // One buffer serving both directions, which is what CyAPI does and what
         // a buffered control code expects: Windows makes a single system
         // buffer, the driver reads the header out of it and writes the result
-        // back into the same place.
-        let mut overlapped = [0_usize; 5];
-        overlapped[4] = self.event as usize;
-        let mut got = 0_u32;
-        let pointer: *mut c_void = packet.as_mut_ptr().cast();
-        let length = packet.len() as u32;
-        // One buffer serving both directions, which is what CyAPI does and what
-        // a buffered control code expects: Windows makes a single system
-        // buffer, the driver reads the header out of it and writes the result
-        // back into the same place.
-        // SAFETY: the buffer outlives the wait, which either completes the
-        // request or withdraws it.
-        let ok = unsafe {
-            DeviceIoControl(
-                self.handle,
-                ioctl::SEND_NON_EP0_TRANSFER,
-                pointer,
-                length,
-                pointer,
-                length,
-                &mut got,
-                overlapped.as_mut_ptr().cast(),
-            )
-        };
-        let returned = self.finish(ok, &mut overlapped, &mut got, milliseconds + 1000, recover)?;
+        // back into the same place. The extra second on top of the caller's
+        // bound covers the driver's own bookkeeping, saturating rather than
+        // wrapping at the top of u32.
+        let returned = self.control_both_with(
+            ioctl::SEND_NON_EP0_TRANSFER,
+            &mut packet,
+            milliseconds.saturating_add(1000),
+            recover,
+        )?;
         let carried = returned.saturating_sub(SINGLE_TRANSFER_LEN).min(data.len());
         data[..carried]
             .copy_from_slice(&packet[SINGLE_TRANSFER_LEN..SINGLE_TRANSFER_LEN + carried]);
