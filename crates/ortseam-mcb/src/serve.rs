@@ -123,6 +123,7 @@ impl Session<'_> {
             "SHOW_CONFIGURATION" => self.configuration(),
             "SHOW_STATUS" => self.status(),
             "SHOW_DATA" => self.data(),
+            "SHOW_PRESETS" => self.presets(),
             "START" => self.pass("START"),
             "STOP" => self.pass("STOP"),
             "CLEAR" => self.clear(),
@@ -173,6 +174,40 @@ impl Session<'_> {
         self.instrument.command("SET_PEAK_PRESET 0")?;
         self.instrument.command("SET_INTEGRAL_PRESET 0")?;
         Ok("OK".into())
+    }
+
+    /// What the instrument is holding in its own preset registers.
+    ///
+    /// Presets outlive the session that set them: a live preset set yesterday
+    /// still stops a count today, whether or not anything on the host knows
+    /// about it. Until this could be asked, ortseam could only write presets,
+    /// so a restarted application showed none while the instrument quietly
+    /// refused to count - it answers START with its usual empty reply and
+    /// then does not run. Time presets are read in ticks and reported in
+    /// seconds; count presets are counts either way. Zero means none set,
+    /// which is how the instrument itself says it.
+    fn presets(&mut self) -> Result<String, String> {
+        let real = self.register("SHOW_TRUE_PRESET") * TICK;
+        let live = self.register("SHOW_LIVE_PRESET") * TICK;
+        let peak = self.register("SHOW_PEAK_PRESET") as u64;
+        let integral = self.register("SHOW_INTEGRAL_PRESET") as u64;
+        Ok(format!(
+            "PRESETS REAL={real:.2} LIVE={live:.2} PEAK={peak} INTEG={integral}"
+        ))
+    }
+
+    /// One preset register, or zero when the instrument will not say.
+    ///
+    /// An instrument that does not know the question is one with no preset
+    /// set as far as anything here can tell, which is the honest answer and
+    /// the same one it gave before the question existed.
+    fn register(&self, verb: &str) -> f64 {
+        self.instrument
+            .command(verb)
+            .ok()
+            .and_then(|reply| record_number(&reply, 'G').ok())
+            .unwrap_or(0.0)
+            .max(0.0)
     }
 
     /// A count preset, passed on as the whole number it is.
@@ -794,6 +829,59 @@ mod tests {
         assert_eq!(one_line("DATA 2 1\n2"), "DATA 2 1 2");
         assert_eq!(one_line("ERR bad\nreply\ttext"), "ERR bad reply text");
         assert!(!one_line("\n\n").contains('\n'));
+    }
+
+    #[test]
+    fn the_presets_the_instrument_holds_can_be_read_back() {
+        // The bench 926 on 2026-08-06 answered SHOW_LIVE_PRESET with
+        // $G0000015000081 - 15000 ticks, a 300-second live preset it had been
+        // holding since the session before. Reading them back is what lets
+        // the application show a preset it did not set itself.
+        struct Holding;
+        impl Instrument for Holding {
+            fn command(&self, text: &str) -> Result<String, String> {
+                Ok(match text {
+                    "SHOW_TRUE_PRESET" => "$G0000000000075".into(),
+                    "SHOW_LIVE_PRESET" => "$G0000015000081".into(),
+                    "SHOW_PEAK_PRESET" => "$G0000000123081".into(),
+                    // The verb this instrument does not know.
+                    "SHOW_INTEGRAL_PRESET" => return Err("unknown verb".into()),
+                    _ => "%000000069".into(),
+                })
+            }
+            fn channels(&self) -> usize {
+                4
+            }
+            fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
+                Ok(vec![0; 4])
+            }
+            fn is_counting(&self) -> bool {
+                false
+            }
+            fn model(&self) -> String {
+                "0926-001".into()
+            }
+            fn identity(&self) -> String {
+                "08134079".into()
+            }
+            fn calibration(&self) -> Option<(f64, f64, f64)> {
+                None
+            }
+            fn route(&self) -> String {
+                "an instrument holding a preset".into()
+            }
+        }
+        let holding = Holding;
+        let mut session = Session {
+            instrument: &holding,
+            total: 0,
+        };
+        // Ticks out, seconds in; counts stay counts; a register the
+        // instrument will not report reads as none set, not as an error.
+        assert_eq!(
+            session.handle("SHOW_PRESETS"),
+            "PRESETS REAL=0.00 LIVE=300.00 PEAK=123 INTEG=0"
+        );
     }
 
     #[test]

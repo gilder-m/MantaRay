@@ -232,6 +232,21 @@ translation has to be right - the instrument will not say when it is not), and
 a live-time preset set through the dialect really does stop the instrument by
 itself, at exactly the preset value on the live clock.
 
+**A preset outlives the session that set it, and the instrument will not
+mention it.** On 2026-08-06 a 926 was found still holding
+`SHOW_LIVE_PRESET` = `$G0000015000081` - 15000 ticks, 300.00 s - from an
+earlier run, with its live clock stopped at exactly that. Starting it again
+in that state is the trap: `START` is accepted, answers as usual, and the
+instrument simply does not count, because the preset is already satisfied.
+Nothing in the reply says so. That is why the bridge answers `SHOW_PRESETS`
+by reading all four registers back (`SHOW_TRUE_PRESET`, `SHOW_LIVE_PRESET`,
+`SHOW_PEAK_PRESET`, `SHOW_INTEGRAL_PRESET`), and why ortseam asks that
+question when it connects rather than assuming an instrument holds whatever
+this session last wrote. Zero in a register means none set, which is how the
+instrument itself says it. Clearing the spectrum resets the clocks and lets
+the same preset run again from the beginning - the preset itself survives a
+`CLEAR`.
+
 **The record format.** A reply is `$`, a letter naming the record, one or more
 fixed-width decimal fields, then a three-digit checksum:
 

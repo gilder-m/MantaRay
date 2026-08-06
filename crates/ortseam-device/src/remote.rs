@@ -14,9 +14,15 @@
 //! | `SHOW_CONFIGURATION` | `MODEL=.. SERIAL=.. FIRMWARE=.. CHANNELS=n [CAL=a,b,c]` |
 //! | `SHOW_STATUS` | `RT=.. LT=.. DT=..% ICR=.. ACTIVE=0/1 TOTAL=n` |
 //! | `SHOW_DATA` | `DATA n c0 c1 ... c(n-1)` |
+//! | `SHOW_PRESETS` | `PRESETS REAL=s LIVE=s PEAK=n INTEG=n` (0 means none set) |
 //! | `START` `STOP` `CLEAR` | `OK` |
 //! | `SET_PRESET_REAL s` etc. | `OK` |
 //! | anything rejected | `ERR reason` |
+//!
+//! `SHOW_PRESETS` is asked once, on connecting, because an instrument's preset
+//! registers outlive the session that wrote them - and an instrument holding a
+//! satisfied preset accepts `START` and then does not count. An older bridge
+//! that refuses the question simply reports no presets.
 //!
 //! Everything here is exercised against a scripted transport and against a
 //! served [`SimulatedMcb`](crate::SimulatedMcb) in the tests. Real hardware
@@ -107,7 +113,45 @@ impl RemoteMcb {
             since_poll: f64::MAX,
         };
         remote.refresh()?;
+        remote.read_presets();
         Ok(remote)
+    }
+
+    /// Asks the instrument what presets it is already holding.
+    ///
+    /// An instrument's preset registers outlive the session that wrote them.
+    /// Until this was asked, ortseam only ever wrote presets, so a restarted
+    /// application showed an empty Presets tab while the instrument held, say,
+    /// a three-hundred-second live preset - and then answered START without
+    /// counting, because that preset was already satisfied. Seen on the bench
+    /// 926 on 2026-08-06, and silent from the operator's side.
+    ///
+    /// Deliberately not an error: a bridge or instrument that does not know
+    /// the question leaves the presets empty, exactly as every version before
+    /// this one did, so an older helper still connects.
+    fn read_presets(&mut self) {
+        let Ok(reply) = self.command("SHOW_PRESETS") else {
+            return;
+        };
+        let field = |key: &str| -> Option<f64> {
+            reply.split_whitespace().find_map(|word| {
+                word.strip_prefix(key)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+        };
+        // Zero is how an instrument says "none set", so it is not a preset of
+        // zero - which would mean an acquisition that stops immediately.
+        let seconds = |value: Option<f64>| value.filter(|value| *value > 0.0);
+        let counts = |value: Option<f64>| {
+            value
+                .filter(|value| *value >= 1.0)
+                .map(|value| value as u64)
+        };
+        self.properties.presets.real_time = seconds(field("REAL"));
+        self.properties.presets.live_time = seconds(field("LIVE"));
+        self.properties.presets.roi_peak = counts(field("PEAK"));
+        self.properties.presets.roi_integral = counts(field("INTEG"));
     }
 
     /// One command out, one checked line back.
@@ -258,6 +302,35 @@ impl Mcb for RemoteMcb {
 
     fn start(&mut self) -> Result<(), DeviceError> {
         self.ensure_unlocked()?;
+        // A preset that is already satisfied is why an instrument can answer
+        // START and then not count: the 926 accepts the command, leaves the
+        // clocks where they are, and says nothing. Refusing here, by name,
+        // beats a Start button that appears to work and does not.
+        //
+        // Only the four the instrument itself holds are checked. Uncertainty
+        // and MDA are worked out host-side, and an acquisition that begins
+        // already satisfying one is stopped by `advance` on the next poll,
+        // which says so - it is not the silent refusal this guards against.
+        let held_by_the_instrument = Presets {
+            real_time: self.properties.presets.real_time,
+            live_time: self.properties.presets.live_time,
+            roi_peak: self.properties.presets.roi_peak,
+            roi_integral: self.properties.presets.roi_integral,
+            ..Default::default()
+        };
+        if let Some(kind) = held_by_the_instrument.reached(
+            &self.spectrum,
+            self.status.real_time,
+            self.status.live_time,
+        ) {
+            return Err(DeviceError::Command {
+                command: "START".into(),
+                detail: format!(
+                    "the {} preset is already reached - clear the spectrum, or change the preset",
+                    kind.label()
+                ),
+            });
+        }
         self.command("START")?;
         self.status.active = true;
         // The instrument reports no measurement date of its own, so the moment

@@ -567,8 +567,17 @@ mod tests {
 
     /// A session holding a remote instrument that answers from a script and
     /// records every command it is sent.
+    ///
+    /// Connecting also asks what presets the instrument already holds, so that
+    /// answer is spliced in after the three-command handshake; "none set"
+    /// leaves these cases as they were.
     fn remote_session(pairs: &[(&str, &str)]) -> CliSession {
-        let transport = MockTransport::scripted(pairs);
+        let mut script = pairs.to_vec();
+        script.insert(
+            pairs.len().min(3),
+            ("SHOW_PRESETS", "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"),
+        );
+        let transport = MockTransport::scripted(&script);
         let remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH").expect("connect");
         CliSession::new(std::env::temp_dir(), false, Some(AnyMcb::Remote(remote)))
     }

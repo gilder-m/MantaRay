@@ -786,6 +786,20 @@ impl Mcb for SimulatedMcb {
                 ))
             }
             "SHOW_VERSION" => Ok(self.identity.firmware.clone()),
+            // The presets this instrument is holding, in the same shape the
+            // bridge reports a real one's registers. Zero means none set.
+            // Uncertainty and MDA are not here: no instrument carries them,
+            // they are worked out host-side from the spectrum.
+            "SHOW_PRESETS" => {
+                let presets = &self.properties.presets;
+                Ok(format!(
+                    "PRESETS REAL={:.2} LIVE={:.2} PEAK={} INTEG={}",
+                    presets.real_time.unwrap_or(0.0),
+                    presets.live_time.unwrap_or(0.0),
+                    presets.roi_peak.unwrap_or(0),
+                    presets.roi_integral.unwrap_or(0)
+                ))
+            }
             "SHOW_CONFIGURATION" => Ok(format!(
                 "MODEL={} SERIAL={} FIRMWARE={} CHANNELS={}",
                 self.identity.model.replace(' ', "_"),

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**A preset the instrument is already holding is visible, and cannot silently
+refuse a count (2026-08-06).** Found on the bench: a 926 was still holding a
+300-second live preset from an earlier session, with its live clock stopped
+at exactly that value. ortseam could only ever *write* presets - it opened
+with an empty Presets tab, because nothing ever asked the instrument what it
+was holding - and then `START` was accepted and the instrument did not count,
+because the preset was already satisfied. The instrument says nothing about
+either: a valid `START` and an ignored one look identical on the wire, and no
+reply carries the preset registers unless they are asked for.
+
+Both halves are closed. The bridge answers a new `SHOW_PRESETS`, reading all
+four registers back (time presets in ticks, reported in seconds; counts as
+counts), and a served simulator answers it the same way, so an instrument and
+a simulator behave alike. Connecting asks the question and shows what comes
+back, so the Presets tab reflects the instrument rather than only this
+session's edits; an older bridge that does not know the verb still connects,
+with no presets shown, exactly as before. And starting an acquisition whose
+real-time, live-time or ROI preset is already reached is now refused by name -
+"the Live time preset is already reached - clear the spectrum, or change the
+preset" - instead of appearing to work. Uncertainty and MDA presets are not
+part of that check: they are host-side, and `advance` stops and reports them
+on the next poll rather than the instrument quietly declining.
+
 **Question and answer stay together on the bridge (2026-08-06).** Reviewing
 the work below found that giving the bridge transport a ten-second timeout
 had introduced a way for it to answer the wrong question. A timed-out
