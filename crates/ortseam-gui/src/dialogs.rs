@@ -194,6 +194,12 @@ pub struct Dialogs {
     /// frame is wasted heat when nothing changed.
     #[allow(clippy::type_complexity)]
     pub region_cache: Option<(u64, Vec<(usize, usize, usize, String)>)>,
+    /// A detector name being typed, and whose detector it is.
+    ///
+    /// A name is typed over many frames, so re-reading the saved one each
+    /// frame would erase every keystroke; the half-typed name lives here
+    /// until Enter or leaving the box commits it.
+    pub detector_name_edit: Option<(u16, String)>,
     /// Presets being typed in MCB Properties, and whose instrument they are.
     ///
     /// A preset is entered over several frames - tick the box, then type the
@@ -261,11 +267,13 @@ impl Default for Dialogs {
                 kind: DetectorKind::Network,
                 channels: 8192,
                 description: String::new(),
+                serial: String::new(),
             },
             library_selection: Some(0),
             queue_id: "S001".into(),
             queue_live_time: 300.0,
             region_cache: None,
+            detector_name_edit: None,
             presets_edit: None,
         }
     }
@@ -3472,14 +3480,39 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                     let entries = app.detector_list.entries().to_vec();
                     for entry in entries {
                         ui.label(entry.number.to_string());
-                        ui.label(&entry.name);
+                        let position = app
+                            .detectors
+                            .iter()
+                            .position(|mcb| mcb.identity().number == entry.number);
+                        // The name is the operator's, not the instrument's:
+                        // "Bench HPGe" beats the model and serial the scan
+                        // printed, and it is what a saved spectrum carries.
+                        // Typed over several frames, so what is being typed
+                        // lives in the dialog until it is committed.
+                        let typing = match &mut app.dialogs.detector_name_edit {
+                            Some((number, text)) if *number == entry.number => text,
+                            slot => {
+                                *slot = Some((entry.number, entry.name.clone()));
+                                &mut slot.as_mut().expect("just set").1
+                            }
+                        };
+                        let editor = ui.add(
+                            egui::TextEdit::singleline(typing)
+                                .desired_width(140.0)
+                                .hint_text("name"),
+                        );
+                        let committed = editor.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        if committed || (editor.lost_focus() && *typing != entry.name) {
+                            let typed = typing.clone();
+                            app.dialogs.detector_name_edit = None;
+                            if let Some(index) = position {
+                                actions.push(Action::RenameDetector(index, typed));
+                            }
+                        }
                         ui.label(&entry.model);
                         ui.label(entry.channels.to_string());
                         ui.horizontal(|ui| {
-                            let position = app
-                                .detectors
-                                .iter()
-                                .position(|mcb| mcb.identity().number == entry.number);
                             if ui.button("open").clicked()
                                 && let Some(index) = position
                             {
@@ -3575,6 +3608,8 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                         kind: DetectorKind::Local,
                         channels: 0,
                         description,
+                        // Learned from the instrument on the first open.
+                        serial: String::new(),
                     });
                     app.dialogs.new_detector.number += 1;
                 }
@@ -3629,6 +3664,7 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                         kind: DetectorKind::Network,
                         channels: 0,
                         description: app.dialogs.network_address.trim().to_string(),
+                        serial: String::new(),
                     };
                     app.add_detector(entry);
                     app.dialogs.new_detector.number += 1;

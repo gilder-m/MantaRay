@@ -55,9 +55,31 @@ pub struct RemoteMcb {
 impl RemoteMcb {
     /// Connects: asks the instrument what it is, and sizes the local mirror.
     pub fn connect(
+        transport: Box<dyn Transport>,
+        number: u16,
+        name: &str,
+    ) -> Result<Self, DeviceError> {
+        Self::connect_expecting(transport, number, name, None)
+    }
+
+    /// The same, refusing an instrument that is not the one expected.
+    ///
+    /// A saved detector says how to reach an instrument - a detector number,
+    /// or a position on the USB bus - and neither is an identity. Add a second
+    /// adapter, or replug the one there, and the same route can lead to a
+    /// different instrument; two of the same model answer identically apart
+    /// from their serial, so nothing downstream would notice. Given what the
+    /// instrument called itself last time, this compares and refuses rather
+    /// than quietly opening the wrong detector and labelling its spectra with
+    /// the wrong name.
+    ///
+    /// `None`, or an empty expectation, learns instead of checking - which is
+    /// what the first open of a new entry does.
+    pub fn connect_expecting(
         mut transport: Box<dyn Transport>,
         number: u16,
         name: &str,
+        expected_serial: Option<&str>,
     ) -> Result<Self, DeviceError> {
         let configuration = checked(transport.exchange("SHOW_CONFIGURATION")?)?;
         let field = |key: &str| -> Option<String> {
@@ -70,11 +92,27 @@ impl RemoteMcb {
         let channels: usize = field("CHANNELS")
             .and_then(|value| value.parse().ok())
             .unwrap_or(1024);
+        let reported = field("SERIAL").unwrap_or_default();
+        // Compared before anything else is built on it: an instrument that is
+        // not the expected one must not become a detector at all.
+        if let Some(expected) = expected_serial
+            && !expected.trim().is_empty()
+            && !reported.trim().is_empty()
+            && !expected.trim().eq_ignore_ascii_case(reported.trim())
+        {
+            return Err(DeviceError::Connection {
+                address: transport.peer(),
+                detail: format!(
+                    "this is instrument {reported:?}, not {expected:?} - the adapters may have \
+                     been swapped or replugged. Rescan to pick it up under its own entry."
+                ),
+            });
+        }
         let identity = McbIdentity {
             number,
             name: name.to_string(),
             model: field("MODEL").unwrap_or_else(|| "remote MCB".into()),
-            serial: field("SERIAL").unwrap_or_default(),
+            serial: reported,
             firmware: field("FIRMWARE").unwrap_or_default(),
             description: format!("network instrument at {}", transport.peer()),
             channels,
@@ -275,6 +313,15 @@ impl Mcb for RemoteMcb {
         self.set_presets(properties.presets)?;
         self.properties = properties;
         Ok(())
+    }
+
+    fn set_name(&mut self, name: &str) {
+        self.identity.name = name.to_string();
+        // The spectrum carries the detector's name into every file saved from
+        // this window, so a rename has to reach it too or the next save still
+        // says what the scan called it.
+        self.spectrum.detector_name = name.to_string();
+        self.spectrum.detector_description = name.to_string();
     }
 
     fn presets_mut(&mut self) -> &mut Presets {

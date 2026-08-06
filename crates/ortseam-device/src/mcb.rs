@@ -264,6 +264,14 @@ pub trait Mcb: Send {
     /// Fixed facts about the instrument.
     fn identity(&self) -> &McbIdentity;
 
+    /// Renames the instrument as the operator sees it.
+    ///
+    /// The name is the application's, not the instrument's: it is what the
+    /// pick list, the window title and a saved spectrum's detector fields
+    /// say. "Bench HPGe" is worth more to whoever reads the file next year
+    /// than the model and serial the scan happened to print.
+    fn set_name(&mut self, name: &str);
+
     /// Current settings.
     fn properties(&self) -> &McbProperties;
 

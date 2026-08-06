@@ -16,6 +16,7 @@ fn a_detector_list_is_a_pick_list_of_numbered_entries() {
         kind: DetectorKind::Simulated,
         channels: 16384,
         description: "portable HPGe".into(),
+        serial: String::new(),
     });
 
     assert_eq!(list.len(), 2);

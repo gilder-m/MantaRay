@@ -398,6 +398,16 @@ impl Mcb for SimulatedMcb {
         &self.identity
     }
 
+    fn set_name(&mut self, name: &str) {
+        self.identity.name = name.to_string();
+        // Every spectrum this instrument holds carries the detector's name
+        // into a saved file, so all three follow the rename.
+        for spectrum in [&mut self.raw, &mut self.corrected, &mut self.error] {
+            spectrum.detector_name = name.to_string();
+            spectrum.detector_description = name.to_string();
+        }
+    }
+
     fn properties(&self) -> &McbProperties {
         &self.properties
     }

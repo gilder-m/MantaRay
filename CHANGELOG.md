@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+**A detector can be named, and cannot be confused with another one
+(2026-08-06).** Three related things, all about knowing which instrument you
+are talking to.
+
+*Detectors can be renamed.* The Detector List's name column is an edit box:
+type over it and the new name reaches the saved pick list, the open
+instrument, its window title, and the detector fields of every spectrum saved
+from it afterwards. A name that means something to whoever reads the file next
+year - "Bench HPGe" - beats the model and serial the scan happened to print.
+
+*A local instrument is pinned to its adapter, not to a position on the bus.*
+Away from ORTEC's configured detector numbers, `serve N` means the Nth adapter
+the bus enumerates, which is a position and not an instrument: plug in a
+second adapter, or replug the one there, and the same entry can lead somewhere
+else. An entry now remembers what the instrument called itself and hands that
+to the helper as `--device`, which both the Windows and the libusb bridge
+already understood. The one case where that would be wrong is handled: through
+ORTEC's library an instrument reports the detector number that selected it,
+and a number is not an adapter serial, so an identity that is only the number
+already used is not treated as a pin.
+
+*And the identity is checked on every open.* Whatever the instrument reports
+in its configuration reply is compared against what the entry remembers -
+learned on the first successful open - and a mismatch refuses the connection
+by name ("this is instrument \"11217584\", not \"08134079\" - the adapters may
+have been swapped or replugged") instead of quietly opening the wrong detector
+and labelling its spectra with the wrong name. An instrument that reports no
+serial is nothing to check against rather than evidence of a mix-up, so those
+still open.
+
 **A preset the instrument is already holding is visible, and cannot silently
 refuse a count (2026-08-06).** Found on the bench: a 926 was still holding a
 300-second live preset from an earlier session, with its live clock stopped

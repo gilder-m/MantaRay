@@ -31,6 +31,53 @@ const RECENT_FILES: usize = 8;
 ///
 /// The first quoted or unquoted word is the program, the rest its arguments -
 /// the same reading MAESTRO's job engine gives the line.
+#[cfg(test)]
+mod pin_tests {
+    use super::pin_by_serial;
+
+    #[test]
+    fn an_adapter_serial_pins_the_connection() {
+        // What the Linux bench reports: the adapter's own serial, which is
+        // not the number that selected it, so it is worth naming.
+        assert_eq!(pin_by_serial("08134079", 1), Some("08134079"));
+        assert_eq!(pin_by_serial("  08134079 ", 2), Some("08134079"));
+    }
+
+    #[test]
+    fn a_detector_number_is_not_a_pin() {
+        // Through ORTEC's library an instrument reports the detector number
+        // that selected it. Handing that back as --device would ask the
+        // helper to match a position or a path against it, which is how the
+        // wrong adapter gets opened.
+        assert_eq!(pin_by_serial("1", 1), None);
+        assert_eq!(pin_by_serial(" 337 ", 337), None);
+        // A different number is still an identity worth naming.
+        assert_eq!(pin_by_serial("338", 337), Some("338"));
+    }
+
+    #[test]
+    fn nothing_remembered_pins_nothing() {
+        assert_eq!(pin_by_serial("", 1), None);
+        assert_eq!(pin_by_serial("   ", 1), None);
+    }
+}
+
+/// The serial to select an adapter by, when selecting by serial is meaningful.
+///
+/// Reached through ORTEC's library, an instrument reports its detector number
+/// as its identity - the same number that selected it. Handing that back as
+/// `--device` would ask the helper to match a *position or path* against it,
+/// which is how the wrong adapter gets opened. So an identity that is only the
+/// number we already used is not a pin; anything else, an adapter serial, is.
+/// Either way the identity is still checked after connecting.
+fn pin_by_serial(remembered: &str, detector: i32) -> Option<&str> {
+    let remembered = remembered.trim();
+    if remembered.is_empty() || remembered == detector.to_string() {
+        return None;
+    }
+    Some(remembered)
+}
+
 pub fn spawn_program(command_line: &str) -> Result<std::process::Child, String> {
     let mut words: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -341,6 +388,8 @@ pub enum Action {
     RecordQa,
     /// Take a detector out of the pick list and the session (Detector List).
     RemoveDetector(usize),
+    /// Rename the detector at this index, in the list and everywhere it shows.
+    RenameDetector(usize, String),
     /// Point Explorer's .Spe/.Chn/.Spc at this executable (per-user).
     /// Ask the bridge what ORTEC hardware this machine can reach.
     ScanLocalInstruments,
@@ -889,6 +938,47 @@ impl App {
 
     /// Removes a window and hands its roles - active, filling the area - to
     /// whatever is left.
+    /// Records what an instrument called itself, so the next open can check.
+    fn remember_serial(&mut self, number: u16, serial: &str) {
+        let Some(mut entry) = self.detector_list.get(number).cloned() else {
+            return;
+        };
+        entry.serial = serial.to_string();
+        self.detector_list.push(entry);
+    }
+
+    /// Renames a detector: the saved entry, the open instrument, its windows.
+    ///
+    /// All three, or the rename is only half true - the pick list would say
+    /// one thing, the window title another, and a spectrum saved afterwards a
+    /// third.
+    fn rename_detector(&mut self, index: usize, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status = "a detector needs a name".into();
+            return;
+        }
+        let Some(detector) = self.detectors.get_mut(index) else {
+            return;
+        };
+        let number = detector.identity().number;
+        let was = detector.identity().name.clone();
+        if was == name {
+            return;
+        }
+        detector.set_name(name);
+        if let Some(mut entry) = self.detector_list.get(number).cloned() {
+            entry.name = name.to_string();
+            self.detector_list.push(entry);
+        }
+        for window in &mut self.windows {
+            if window.target == Target::Detector(index) {
+                window.title = name.to_string();
+            }
+        }
+        self.status = format!("detector {number} is now {name}");
+    }
+
     fn close_window(&mut self, id: usize) {
         // What was active stays active by identity, not by position: closing
         // a background window must not silently retarget later commands.
@@ -1606,6 +1696,7 @@ impl App {
             Action::RunJob => self.dialogs.open(Dialog::JobControl),
             Action::RecordQa => self.record_qa(),
             Action::RemoveDetector(index) => self.remove_detector(index),
+            Action::RenameDetector(index, name) => self.rename_detector(index, &name),
             Action::ScanLocalInstruments => self.scan_local_instruments(),
             Action::ConfigureLocalInstruments => self.configure_local_instruments(),
             Action::OpenLocalInstruments => self.open_local_instruments(),
@@ -2782,6 +2873,8 @@ impl App {
                     kind: ortseam_device::DetectorKind::Local,
                     channels: 0,
                     description,
+                    // Learned from the instrument on the first open.
+                    serial: String::new(),
                 });
                 if !self.detectors.is_empty() {
                     self.apply_one(Action::OpenDetector(0));
@@ -3027,6 +3120,8 @@ impl App {
                 kind: ortseam_device::DetectorKind::Local,
                 channels: 0,
                 description,
+                // Learned from the instrument on the first open.
+                serial: String::new(),
             });
         }
         for index in 0..self.detectors.len() {
@@ -3161,16 +3256,24 @@ impl App {
                     );
                     return;
                 };
-                let connected = ortseam_device::BridgeTransport::start(
+                // The detector number says where to look; the serial says
+                // which instrument is meant. Naming it keeps a second adapter,
+                // or a replug that reorders the bus, from opening the wrong
+                // one - and the check after connecting catches it even when
+                // the helper cannot select by serial at all.
+                let remembered = entry.serial.trim().to_string();
+                let connected = ortseam_device::BridgeTransport::start_pinned(
                     &executable,
                     detector,
+                    pin_by_serial(&remembered, detector),
                     umcbi.map(std::path::Path::new),
                 )
                 .and_then(|transport| {
-                    ortseam_device::RemoteMcb::connect(
+                    ortseam_device::RemoteMcb::connect_expecting(
                         Box::new(transport),
                         entry.number,
                         &entry.name,
+                        Some(remembered.as_str()),
                     )
                 });
                 match connected {
@@ -3180,6 +3283,12 @@ impl App {
                             instrument.identity().model,
                             instrument.identity().channels
                         );
+                        // Learned on the first open, so every open after this
+                        // one has something to check against.
+                        let reported = instrument.identity().serial.trim().to_string();
+                        if remembered.is_empty() && !reported.is_empty() {
+                            self.remember_serial(entry.number, &reported);
+                        }
                         instrument.into()
                     }
                     Err(error) => {

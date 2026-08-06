@@ -50,6 +50,19 @@ pub struct DetectorEntry {
     pub channels: usize,
     /// Free-form description.
     pub description: String,
+    /// What the instrument called itself the last time this entry opened it.
+    ///
+    /// The description says *how* to reach an instrument - a detector number,
+    /// or a position on the USB bus - and a position is not an identity: plug
+    /// in a second adapter, or replug the one that is there, and the same
+    /// number can lead somewhere else. This is the identity, learned from the
+    /// instrument on the first successful open and checked on every one
+    /// after, so opening the wrong detector is refused rather than silent.
+    ///
+    /// Empty until learned, and empty for entries written before this
+    /// existed, which is why it defaults rather than being required.
+    #[serde(default)]
+    pub serial: String,
 }
 
 impl DetectorEntry {
@@ -62,6 +75,7 @@ impl DetectorEntry {
             kind: DetectorKind::Simulated,
             channels: 8_192,
             description: "simulated detector".to_string(),
+            serial: String::new(),
         }
     }
 }

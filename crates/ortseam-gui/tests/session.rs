@@ -1003,6 +1003,7 @@ fn a_network_instrument_joins_the_pick_list_and_counts() {
         kind: ortseam_device::DetectorKind::Network,
         channels: 0,
         description: address,
+        serial: String::new(),
     });
     assert_eq!(
         app.detectors.len(),
@@ -1056,6 +1057,7 @@ fn a_network_instrument_that_drops_mid_count_is_reported_not_fatal() {
         kind: ortseam_device::DetectorKind::Network,
         channels: 0,
         description: address,
+        serial: String::new(),
     });
     app.apply_action(Action::OpenDetector(before));
     app.apply_action(Action::Start);
@@ -1086,6 +1088,7 @@ fn removing_a_detector_closes_its_window_and_keeps_the_rest_straight() {
         kind: ortseam_device::DetectorKind::Simulated,
         channels: 2048,
         description: String::new(),
+        serial: String::new(),
     });
     assert_eq!(app.detectors.len(), 2);
 
@@ -1172,6 +1175,7 @@ fn a_detector_kind_with_no_driver_behind_it_is_refused_not_simulated() {
             // A detector number no configuration has, so this says the same
             // thing on a bench with instruments plugged in as on one without.
             description: "999".into(),
+            serial: String::new(),
         });
         assert_eq!(
             app.detectors.len(),
@@ -1192,6 +1196,57 @@ fn a_detector_kind_with_no_driver_behind_it_is_refused_not_simulated() {
 }
 
 #[test]
+fn renaming_a_detector_reaches_the_list_the_window_and_the_next_save() {
+    // A rename that stops at the pick list is only half true: the window
+    // title would still say the old name, and so would every spectrum saved
+    // from it afterwards. The name is what somebody reads off a file next
+    // year, so all three follow.
+    let mut app = App::headless();
+    let detector = app
+        .detectors
+        .iter()
+        .position(|mcb| ortseam_device::Mcb::identity(mcb).number == 1)
+        .expect("the headless session starts with a simulated detector");
+    let number = ortseam_device::Mcb::identity(&app.detectors[detector]).number;
+    app.apply_action(Action::OpenDetector(detector));
+
+    app.apply_action(Action::RenameDetector(detector, "Bench HPGe".into()));
+
+    assert_eq!(
+        ortseam_device::Mcb::identity(&app.detectors[detector]).name,
+        "Bench HPGe",
+        "the open instrument follows the rename"
+    );
+    assert_eq!(
+        app.detector_list
+            .get(number)
+            .map(|entry| entry.name.clone()),
+        Some("Bench HPGe".to_string()),
+        "and so does the saved pick list"
+    );
+    assert!(
+        app.windows
+            .iter()
+            .any(|window| window.title == "Bench HPGe"),
+        "and the window title: {:?}",
+        app.windows.iter().map(|w| &w.title).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ortseam_device::Mcb::spectrum(&app.detectors[detector]).detector_name,
+        "Bench HPGe",
+        "and what the next saved file will say it came from"
+    );
+
+    // An empty name is refused rather than leaving a nameless detector.
+    app.apply_action(Action::RenameDetector(detector, "   ".into()));
+    assert_eq!(
+        ortseam_device::Mcb::identity(&app.detectors[detector]).name,
+        "Bench HPGe",
+        "an empty name is not a rename"
+    );
+}
+
+#[test]
 fn a_local_instrument_without_a_detector_number_says_so() {
     // The description carries the number ORTEC's configuration gave the
     // instrument. Without it there is nothing to open, and guessing one would
@@ -1205,6 +1260,7 @@ fn a_local_instrument_without_a_detector_number_says_so() {
         kind: ortseam_device::DetectorKind::Local,
         channels: 8192,
         description: String::new(),
+        serial: String::new(),
     });
     assert_eq!(app.detectors.len(), before);
     assert!(
@@ -1226,6 +1282,7 @@ fn a_dead_address_is_reported_not_hung() {
         channels: 0,
         // A reserved port on localhost: refused immediately.
         description: "127.0.0.1:1".into(),
+        serial: String::new(),
     });
     assert_eq!(app.detectors.len(), before, "nothing should be added");
     assert!(

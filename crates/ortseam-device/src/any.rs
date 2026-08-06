@@ -78,6 +78,10 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.identity())
     }
 
+    fn set_name(&mut self, name: &str) {
+        delegate!(self, mcb => mcb.set_name(name))
+    }
+
     fn properties(&self) -> &McbProperties {
         delegate!(self, mcb => mcb.properties())
     }

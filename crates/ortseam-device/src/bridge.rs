@@ -107,9 +107,27 @@ impl BridgeTransport {
         detector: i32,
         umcbi_dir: Option<&Path>,
     ) -> Result<Self, DeviceError> {
+        Self::start_pinned(executable, detector, None, umcbi_dir)
+    }
+
+    /// The same, naming the adapter to open rather than trusting its position.
+    ///
+    /// Away from ORTEC's configured detector numbers, `serve N` means the Nth
+    /// adapter the bus enumerates - which is a position, not an instrument.
+    /// Plug in a second adapter and N can lead somewhere else. A serial names
+    /// one adapter and keeps naming it, whatever else is plugged in.
+    pub fn start_pinned(
+        executable: &Path,
+        detector: i32,
+        serial: Option<&str>,
+        umcbi_dir: Option<&Path>,
+    ) -> Result<Self, DeviceError> {
         let mut command = Command::new(executable);
         command.arg("serve").arg(detector.to_string());
         no_console(&mut command);
+        if let Some(serial) = serial.map(str::trim).filter(|serial| !serial.is_empty()) {
+            command.arg("--device").arg(serial);
+        }
         if let Some(directory) = umcbi_dir {
             command.arg("--umcbi-dir").arg(directory);
         }
