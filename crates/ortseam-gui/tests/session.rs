@@ -246,6 +246,50 @@ fn peak_search_marks_the_peak_and_peak_info_measures_it() {
 }
 
 #[test]
+fn peak_info_on_a_broad_uncalibrated_peak_takes_the_whole_peak() {
+    // A scintillator-wide line - FWHM about forty channels - with no shape
+    // calibration to say so. Peak Info used to assume eight channels and fit
+    // a sliver of it; the width must instead be measured from the counts.
+    let mut spectrum = Spectrum::new(1024);
+    spectrum.live_time = 100.0;
+    spectrum.real_time = 105.0;
+    let sigma = 17.0;
+    for channel in 0..1024 {
+        let offset = channel as f64 - 600.0;
+        spectrum.channels[channel] = 30 + (5000.0 * (-0.5 * (offset / sigma).powi(2)).exp()) as u64;
+    }
+    let mut app = App::headless();
+    app.open_buffer("NaI".into(), spectrum, None);
+
+    // Double-clicking the flank, not the apex: the peak the marker is on is
+    // what should be fitted, centred where the peak is.
+    app.apply_action(Action::Marker(590));
+    app.apply_action(Action::PeakInfoAtMarker);
+    let index = app.active.expect("active");
+    let info = app.windows[index]
+        .peak_info
+        .as_ref()
+        .expect("peak information");
+    assert!(
+        (info.centroid - 600.0).abs() < 2.0,
+        "the fit should centre on the peak, got {}",
+        info.centroid
+    );
+    let expected_fwhm = 2.3548 * sigma;
+    assert!(
+        (info.fwhm - expected_fwhm).abs() < 4.0,
+        "the whole width should be measured, expected about {expected_fwhm:.1}, got {:.1}",
+        info.fwhm
+    );
+    let expected_area = 5000.0 * sigma * (2.0 * std::f64::consts::PI).sqrt();
+    assert!(
+        info.net_area > 0.85 * expected_area,
+        "the whole peak should be inside the fit, expected about {expected_area:.0}, got {:.0}",
+        info.net_area
+    );
+}
+
+#[test]
 fn a_two_point_calibration_turns_channels_into_energies() {
     // Exactly what the Calibrate dialog does: put the marker on a peak, type the
     // energy, press Enter, twice.
@@ -1491,6 +1535,38 @@ fn a_scan_separates_what_answered_from_what_only_the_list_claims() {
         "the summary should say something is wrong: {}",
         scan.summary()
     );
+}
+
+/// The probe output away from Windows, where the bridge walks the USB bus
+/// itself: the same block shape, with the adapter serial standing in for a
+/// configured name because there is no configuration to hold one.
+const DIRECT_PROBE_OUTPUT: &str = "\
+2 adapter(s) on the bus
+
+  1: 0926-001 08134079
+      model    0926-001
+      channels 8192
+      state    counting
+  2: 11217584
+      <claiming interface 0 of adapter 11217584: permission denied (errno 13)>
+";
+
+#[test]
+fn a_scan_reads_the_direct_probe_the_same_as_the_windows_one() {
+    use ortseam_gui::app::InstrumentScan;
+    let scan = InstrumentScan::parse(DIRECT_PROBE_OUTPUT);
+    assert_eq!(
+        scan.reachable,
+        vec![(1, "0926-001 08134079".to_string())],
+        "the adapter that answered"
+    );
+    assert_eq!(
+        scan.missing,
+        vec![(2, "11217584".to_string())],
+        "the adapter that could not be opened"
+    );
+    assert!(scan.scanned);
+    assert!(scan.problem.is_none());
 }
 
 #[test]

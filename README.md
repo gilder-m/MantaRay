@@ -90,6 +90,19 @@ cargo run -p ortseam-gui --no-default-features
 and use **File / Open path...** to type a path instead. The libraries and the
 command-line tool have no system dependencies at all.
 
+To drive a local ORTEC instrument over USB, build the helper that sits beside
+the application - `cargo build -p ortseam-mcb` - and grant the adapter to your
+user once:
+
+```sh
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0a2d", ATTR{idProduct}=="0016", TAG+="uaccess", MODE="0660"' \
+    | sudo tee /etc/udev/rules.d/70-ortec-dpm-usb.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+then replug the adapter and press **Scan** on the opening screen. No driver is
+needed; see [docs/ortec-hardware.md](docs/ortec-hardware.md).
+
 ### Windows and macOS
 
 `cargo run -p ortseam-gui` is enough; no extra packages.
@@ -147,6 +160,11 @@ ORTEC's own library reads from the same detector, clocks matching to the
 millisecond, and the channel sums agreeing with the instrument's own arithmetic.
 A spectrum takes about a sixteenth of a second.
 
+On Linux not even the kernel driver is ORTEC's: the same instrument is reached
+over libusb with no vendor software of any kind, and a one-line udev rule is
+the whole installation. Verified against a real 926 - Scan and Open all in the
+desktop application, and the full spectrum readout - on 2026-08-05.
+
 Instruments are reached through a transport carrying one ASCII dialect, so a
 socket and a local instrument are the same code above the seam. See
 [docs/ortec-hardware.md](docs/ortec-hardware.md), which records the wire format
@@ -181,7 +199,7 @@ it can be driven without a window on screen. Five suites run in
 | | builds | tests | hardware |
 |---|---|---|---|
 | Windows | yes | 551 | yes - USB, with only ORTEC's kernel driver |
-| Linux | yes | all but the Windows-only suites | libusb path compiles; not yet run against an instrument |
+| Linux | yes | all but the Windows-only suites | yes - USB over libusb, with no driver at all |
 | macOS | type-checks | no machine to run them on | libusb path compiles; not yet run |
 
 The Linux run is smaller only because a few suites are about Windows itself -

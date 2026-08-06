@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+**Linux drives real hardware (2026-08-05).** The libusb path met an ORTEC 926
+for the first time - it had compiled for months and never moved a byte - and
+every recorded wire-format assumption held on first contact: the `$F`/`$G`
+records, the tick arithmetic, and a whole 4096-channel spectrum with its ROI
+bits in about a fifth of a second. What changed to get there:
+
+- *`ortseam-mcb serve` exists away from Windows.* The dialect-translation
+  layer (`Session`) is compiled on every platform and a new `ViaDirect`
+  backend carries it over libusb, so the desktop application drives a local
+  instrument on Linux exactly as it does on Windows - Scan, Open all, and a
+  live detector window, with no vendor software of any kind.
+- *`probe` and `configure` answer on Linux* in the same block shape the
+  Windows bridge prints, so the application's scan parses both without caring
+  which platform answered. `usb` keeps the plain serial listing.
+- *The application looks for `ortseam-mcb`* (no `.exe`) beside itself away
+  from Windows.
+- *The translation layer is now tested everywhere*: a bench double answering
+  as the real 926 answered pins the status clocks, preset tick conversion,
+  data reads and refusals on every platform, not only where the hardware is.
+
+Opening the adapter needs a one-line udev rule (see the README); the first
+failure was `errno 13` and nothing else, exactly as predicted in
+[docs/ortec-hardware.md](docs/ortec-hardware.md). macOS still type-checks and
+nothing more.
+
+**File dialogs hid the very files they were for.** On Linux, Recall with the
+`.Spe` filter showed nothing: ORTEC names its files capitalised - `.Spe`,
+`.Chn`, `.Spc` - and GTK and the XDG portal match filter patterns
+case-sensitively where Windows does not, so a lowercase-only filter hid every
+real instrument file. Filters now carry each practical spelling, at the one
+place the platform is spoken to, so every dialog in the application is fixed
+at once.
+
+Presets could not be typed in at all: ticking a preset's box un-ticked it on
+the next frame. The Presets tab re-read the instrument's own presets every
+frame, so a half-finished edit - ticked, but not yet applied - was erased
+before the number could be typed. The edit now lives in the dialog until
+Apply sends it (or Clear discards it), and switching detectors seeds it
+afresh so one instrument's presets are never typed into another's.
+
+Testing MCB Properties against the bench found the count presets never
+arrived: the bridge passed `SET_PRESET_COUNT`/`SET_PRESET_INTEG` through
+untranslated, and the 926 ignores an unknown verb with the same empty reply
+it gives a valid one - so the bridge answered OK while setting nothing. The
+real verbs, established on the bench by writing values and reading them back
+exactly, are `SET_PEAK_PRESET` and `SET_INTEGRAL_PRESET`, in counts;
+`SET_PRESET_CLEAR` now zeroes all four preset registers. The time presets
+were verified whole: a 10-second live preset set through ortseam's dialect
+stopped the instrument by itself at exactly LT=10.00 s. What still does not
+stop a remote instrument: uncertainty and MDA presets, which are host-side
+calculations no instrument carries - the dialog accepts them but nothing
+evaluates them for a bridged or network detector yet.
+
+The first double-click on the bench's own Cs-137 peak found another gap:
+without a region or a shape calibration, Peak Info guessed the peak to be
+eight channels wide and fitted a sliver of anything broader - and a NaI(Tl)
+line can be a hundred channels wide. The peak search now measures the peak
+under the marker from the counts themselves, and the fit takes the whole
+peak, centred where the peak is. The eight-channel guess remains only as the
+last resort when no peak can be found at all.
+
+The first spectrum saved off the bench found a gap that was never
+Linux-specific: a spectrum from **any** remote instrument - a network MCB, or
+either bridge - saved with `DET# 0`, no detector name and a measurement date
+of 01/01/1970, because the remote mirror never carried them. The detector's
+number and name from the pick list now travel with its spectrum, the moment
+START is accepted is recorded as the measurement date (a resumed count keeps
+its original date; Clear resets it, as the simulator always did), and none of
+it is lost if the instrument's conversion gain changes between polls.
+
 **Audit fixes (2026-08-04).** A five-pass review of the whole workspace; what
 it found and what was fixed:
 

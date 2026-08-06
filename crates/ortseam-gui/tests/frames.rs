@@ -239,6 +239,45 @@ fn every_dialog_opens_and_draws() {
 }
 
 #[test]
+fn a_preset_being_typed_survives_the_next_frame() {
+    // A preset is entered over several frames - tick the box, then type the
+    // number - so the edit must outlive the frame it started in. Reading the
+    // instrument's own presets back each frame instead un-ticks the box the
+    // moment it is ticked, which is what this pins.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 2;
+
+    // The state a tick leaves behind: a preset enabled but not yet applied.
+    let typed = ortseam_device::Presets {
+        live_time: Some(0.0),
+        ..Default::default()
+    };
+    app.dialogs.presets_edit = Some((0, typed));
+
+    for _ in 0..3 {
+        frame(&mut app, &ctx, [1400.0, 900.0]);
+        assert_eq!(
+            app.dialogs.presets_edit,
+            Some((0, typed)),
+            "the half-finished preset was erased by a redraw"
+        );
+    }
+
+    // Applying it is what sends it to the instrument, and ends the edit.
+    let applied = ortseam_device::Mcb::set_presets(&mut app.detectors[0], typed);
+    assert!(applied.is_ok(), "{applied:?}");
+    app.dialogs.presets_edit = None;
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert_eq!(
+        app.dialogs.presets_edit, None,
+        "what the instrument already holds is not an unsaved edit"
+    );
+}
+
+#[test]
 fn every_dialog_opens_and_draws_with_nothing_loaded() {
     // The same walk with no spectrum at all: dialogs must cope with an empty
     // session rather than assuming there is data to describe.

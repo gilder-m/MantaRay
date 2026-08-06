@@ -15,6 +15,7 @@
 
 use std::io::{BufRead, Write};
 
+#[cfg(windows)]
 use crate::umcbi::{Hdet, Umcbi};
 
 /// Seconds in one of the instrument's clock ticks.
@@ -108,6 +109,11 @@ impl Session<'_> {
             "SET_PRESET_CLEAR" => self.clear_presets(),
             "SET_PRESET_REAL" => self.preset("SET_TRUE_PRESET", argument),
             "SET_PRESET_LIVE" => self.preset("SET_LIVE_PRESET", argument),
+            // Counts, not seconds, so no tick conversion. The verbs were
+            // established on the bench: SET_PEAK_PRESET 100 reads back as
+            // $G0000000100076 from SHOW_PEAK_PRESET.
+            "SET_PRESET_COUNT" => self.count_preset("SET_PEAK_PRESET", argument),
+            "SET_PRESET_INTEG" => self.count_preset("SET_INTEGRAL_PRESET", argument),
             // Sent verbatim, so that MAESTRO's SEND_MESSAGE window and anything
             // else that knows the real dialect can reach the instrument.
             other if other.starts_with('$') || other.contains('_') => self.pass(command),
@@ -134,6 +140,17 @@ impl Session<'_> {
     fn clear_presets(&mut self) -> Result<String, String> {
         self.instrument.command("SET_TRUE_PRESET 0")?;
         self.instrument.command("SET_LIVE_PRESET 0")?;
+        self.instrument.command("SET_PEAK_PRESET 0")?;
+        self.instrument.command("SET_INTEGRAL_PRESET 0")?;
+        Ok("OK".into())
+    }
+
+    /// A count preset, passed on as the whole number it is.
+    fn count_preset(&mut self, verb: &str, argument: &str) -> Result<String, String> {
+        let counts: u64 = argument
+            .parse()
+            .map_err(|_| format!("{argument:?} is not a number of counts"))?;
+        self.instrument.command(&format!("{verb} {counts}"))?;
         Ok("OK".into())
     }
 
@@ -206,12 +223,14 @@ impl Session<'_> {
 }
 
 /// An instrument reached through ORTEC's library.
+#[cfg(windows)]
 pub struct ViaUmcbi<'a> {
     pub library: &'a Umcbi,
     pub detector: Hdet,
     pub number: i32,
 }
 
+#[cfg(windows)]
 impl Instrument for ViaUmcbi<'_> {
     fn command(&self, text: &str) -> Result<String, String> {
         self.library.command(self.detector, text)
@@ -348,11 +367,97 @@ fn serial_of(path: &str) -> String {
         .to_string()
 }
 
+/// An instrument reached over libusb, with no vendor driver at all.
+///
+/// The non-Windows twin of `ViaUsb` - not a link, because that type exists
+/// only on Windows and rustdoc runs here too. The same questions are asked of
+/// the instrument in its own dialect; only the road the frames travel differs.
+/// Nothing host-side is consulted, because away from Windows there is no
+/// MAESTRO installation to consult.
+#[cfg(not(windows))]
+pub struct ViaDirect {
+    device: crate::direct::Device,
+    /// Asked once at start-up: the conversion gain is how many channels the
+    /// instrument is actually set to use, and it is not always all of them.
+    channels: usize,
+    model: String,
+}
+
+#[cfg(not(windows))]
+impl ViaDirect {
+    /// Opens an instrument and asks it what it is.
+    pub fn open(device: crate::direct::Device) -> Result<Self, String> {
+        let memory = crate::dpm::Dpm::new(&device);
+        let gain = memory.command("SHOW_GAIN_CONVERSION")?;
+        let channels = record_number(&gain)
+            .map_err(|_| format!("SHOW_GAIN_CONVERSION answered {gain:?}"))?
+            as usize;
+        if channels == 0 || channels > 1 << 20 {
+            return Err(format!("{channels} channels is not a conversion gain"));
+        }
+        let model = record_text(&memory.command("SHOW_VERSION").unwrap_or_default());
+        Ok(Self {
+            device,
+            channels,
+            model: if model == "unknown" {
+                String::new()
+            } else {
+                model
+            },
+        })
+    }
+}
+
+#[cfg(not(windows))]
+impl Instrument for ViaDirect {
+    fn command(&self, text: &str) -> Result<String, String> {
+        crate::dpm::Dpm::new(&self.device).command(text)
+    }
+    fn channels(&self) -> usize {
+        self.channels
+    }
+    fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String> {
+        // The instrument hands over the whole histogram in one frame, so a
+        // partial read is a slice of it rather than a different request.
+        let (counts, _regions) = crate::dpm::Dpm::new(&self.device).read_spectrum(self.channels)?;
+        Ok(counts
+            .into_iter()
+            .skip(start)
+            .take(count)
+            .map(u64::from)
+            .collect())
+    }
+    fn is_counting(&self) -> bool {
+        // `$C00001088` when the ADC is acquiring, `$C00000087` when it is not.
+        self.command("SHOW_ACTIVE")
+            .ok()
+            .and_then(|reply| record_number(&reply).ok())
+            .is_some_and(|active| active != 0.0)
+    }
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+    fn identity(&self) -> String {
+        self.device.serial().to_string()
+    }
+    fn calibration(&self) -> Option<(f64, f64, f64)> {
+        // There is no MAESTRO on this machine to have stored one.
+        None
+    }
+    fn route(&self) -> String {
+        format!(
+            "adapter {} over libusb, with no vendor driver",
+            self.device.serial()
+        )
+    }
+}
+
 /// The energy calibration MAESTRO stores for an instrument.
 ///
 /// `MCBLOC32.INI` keeps one section per instrument, `[M<mcb>S01]`, and the
 /// `EnergyCalibration` line in it holds the three polynomial coefficients. The
 /// file's location is the local layer's to decide, so it is asked.
+#[cfg(windows)]
 pub fn calibration_for(mcb: i32) -> Option<(f64, f64, f64)> {
     let path = crate::umcbi::local_paths()
         .into_iter()
@@ -440,5 +545,162 @@ mod tests {
     fn a_version_record_keeps_its_text() {
         assert_eq!(record_text("$F0926-001"), "0926-001");
         assert_eq!(record_text(""), "unknown");
+    }
+
+    /// A bench double answering as the 926 on the bench answered, so the
+    /// translation layer is pinned on every platform, not only where the
+    /// hardware is.
+    struct Bench {
+        sent: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Bench {
+        fn new() -> Self {
+            Self {
+                sent: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Instrument for Bench {
+        fn command(&self, text: &str) -> Result<String, String> {
+            self.sent.borrow_mut().push(text.to_string());
+            Ok(match text {
+                // The replies the real instrument gave for these.
+                "SHOW_TRUE" => "$G0007892556117".into(),
+                "SHOW_LIVE" => "$G0007663632108".into(),
+                "SHOW_VERSION" => "$F0926-001".into(),
+                _ => "%000000069".into(),
+            })
+        }
+        fn channels(&self) -> usize {
+            4
+        }
+        fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String> {
+            Ok((start..start + count)
+                .map(|channel| channel as u64 * 10)
+                .collect())
+        }
+        fn is_counting(&self) -> bool {
+            true
+        }
+        fn model(&self) -> String {
+            "0926-001".into()
+        }
+        fn identity(&self) -> String {
+            "08134079".into()
+        }
+        fn calibration(&self) -> Option<(f64, f64, f64)> {
+            None
+        }
+        fn route(&self) -> String {
+            "a bench double".into()
+        }
+    }
+
+    #[test]
+    fn a_status_reads_the_clocks_in_seconds_and_dead_time_as_their_difference() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        let reply = session.handle("SHOW_STATUS");
+        assert_eq!(
+            reply,
+            "RT=157851.12 LT=153272.64 DT=2.90% ICR=0 ACTIVE=1 TOTAL=0"
+        );
+    }
+
+    #[test]
+    fn a_preset_in_seconds_reaches_the_instrument_in_ticks() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert_eq!(session.handle("SET_PRESET_LIVE 300"), "OK");
+        assert_eq!(bench.sent.borrow()[..], ["SET_LIVE_PRESET 15000"]);
+    }
+
+    #[test]
+    fn a_count_preset_reaches_the_instrument_as_counts_not_ticks() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert_eq!(session.handle("SET_PRESET_COUNT 100"), "OK");
+        assert_eq!(session.handle("SET_PRESET_INTEG 5000"), "OK");
+        assert_eq!(
+            bench.sent.borrow()[..],
+            ["SET_PEAK_PRESET 100", "SET_INTEGRAL_PRESET 5000"]
+        );
+    }
+
+    #[test]
+    fn clearing_presets_zeroes_every_register_the_instrument_has() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert_eq!(session.handle("SET_PRESET_CLEAR"), "OK");
+        assert_eq!(
+            bench.sent.borrow()[..],
+            [
+                "SET_TRUE_PRESET 0",
+                "SET_LIVE_PRESET 0",
+                "SET_PEAK_PRESET 0",
+                "SET_INTEGRAL_PRESET 0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_data_read_reports_every_channel_and_feeds_the_status_total() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert_eq!(session.handle("SHOW_DATA"), "DATA 4 0 10 20 30");
+        let status = session.handle("SHOW_STATUS");
+        assert!(status.ends_with("TOTAL=60"), "{status}");
+    }
+
+    #[test]
+    fn the_instruments_own_dialect_passes_through_untouched() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert_eq!(session.handle("SET_GAIN_CONVERSION 8192"), "OK");
+        assert_eq!(bench.sent.borrow()[..], ["SET_GAIN_CONVERSION 8192"]);
+    }
+
+    #[test]
+    fn a_configuration_names_the_instrument() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert_eq!(
+            session.handle("SHOW_CONFIGURATION"),
+            "MODEL=0926-001 SERIAL=08134079 FIRMWARE=0926-001 CHANNELS=4"
+        );
+    }
+
+    #[test]
+    fn a_verb_the_bridge_does_not_know_is_refused_by_name() {
+        let bench = Bench::new();
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert!(session.handle("FROBNICATE").starts_with("ERR "));
+        assert!(bench.sent.borrow().is_empty());
     }
 }

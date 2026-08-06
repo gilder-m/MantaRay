@@ -50,6 +50,68 @@ fn starting_sends_the_start_command_and_nothing_else() {
 }
 
 #[test]
+fn starting_stamps_the_measurement_date_and_clear_takes_it_back() {
+    let mut remote = connect_scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        ("START", "OK"),
+        ("STOP", "OK"),
+        ("START", "OK"),
+        ("CLEAR", "OK"),
+    ]);
+    assert!(
+        remote.spectrum().start_time.is_none(),
+        "nothing has been measured yet"
+    );
+    remote.start().expect("start");
+    let stamped = remote
+        .spectrum()
+        .start_time
+        .expect("starting is what sets the measurement date");
+    remote.stop().expect("stop");
+    remote.start().expect("resume");
+    assert_eq!(
+        remote.spectrum().start_time,
+        Some(stamped),
+        "a resumed count keeps the date it started"
+    );
+    remote.clear().expect("clear");
+    assert!(
+        remote.spectrum().start_time.is_none(),
+        "cleared data has not been measured"
+    );
+}
+
+#[test]
+fn a_spectrum_knows_which_detector_it_came_from_even_after_a_resize() {
+    let mut remote = connect_scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        // The next poll finds the conversion gain changed under us.
+        ("SHOW_STATUS", "RT=1 LT=1 DT=0% ICR=0 ACTIVE=0 TOTAL=10"),
+        ("SHOW_DATA", "DATA 4 1 2 3 4"),
+    ]);
+    assert_eq!(remote.spectrum().detector_id, 7);
+    assert_eq!(remote.spectrum().detector_name, "BENCH-01");
+    assert_eq!(remote.spectrum().detector_description, "BENCH-01");
+    remote.poll(1.0).expect("poll");
+    assert_eq!(remote.spectrum().len(), 4, "the counts are the new size");
+    assert_eq!(
+        remote.spectrum().detector_description,
+        "BENCH-01",
+        "whose spectrum this is survives the resize"
+    );
+}
+
+#[test]
 fn presets_are_pushed_as_the_documented_commands() {
     let mut remote = connect_scripted(&[
         (

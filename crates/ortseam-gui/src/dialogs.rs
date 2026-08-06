@@ -194,6 +194,14 @@ pub struct Dialogs {
     /// frame is wasted heat when nothing changed.
     #[allow(clippy::type_complexity)]
     pub region_cache: Option<(u64, Vec<(usize, usize, usize, String)>)>,
+    /// Presets being typed in MCB Properties, and whose instrument they are.
+    ///
+    /// A preset is entered over several frames - tick the box, then type the
+    /// number - and only reaches the instrument when Apply is pressed. Reading
+    /// the instrument's own presets back each frame would therefore erase the
+    /// tick the moment it was made, so the half-finished edit lives here until
+    /// it is applied or the dialog is closed.
+    pub presets_edit: Option<(usize, Presets)>,
 }
 
 impl Default for Dialogs {
@@ -258,6 +266,7 @@ impl Default for Dialogs {
             queue_id: "S001".into(),
             queue_live_time: 300.0,
             region_cache: None,
+            presets_edit: None,
         }
     }
 }
@@ -297,13 +306,41 @@ impl Dialogs {
     }
 }
 
+/// Every spelling of an extension a file dialog might have to match.
+///
+/// ORTEC writes its files capitalised - `.Spe`, `.Chn`, `.Spc` - and GTK and
+/// the XDG portal match filter patterns **case-sensitively**, where Windows
+/// does not. A filter of `spe` alone therefore hides every real instrument
+/// file on Linux: exactly the files it was written to show. Lower, capitalised
+/// and upper cover what instruments and people actually write; the extra
+/// patterns cost nothing where the platform ignores case anyway.
+// A --no-default-features build has no dialog to filter for, but the rule is
+// still worth keeping compiled and tested.
+#[cfg_attr(not(feature = "native-dialogs"), allow(dead_code))]
+fn case_variants(extensions: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for extension in extensions {
+        let lower = extension.to_lowercase();
+        let mut capitalised = lower.clone();
+        if let Some(first) = capitalised.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        for variant in [lower, capitalised, extension.to_uppercase()] {
+            if !out.contains(&variant) {
+                out.push(variant);
+            }
+        }
+    }
+    out
+}
+
 /// Opens a native file dialog, when one is available.
 pub fn pick_open_file(filters: &[(&str, &[&str])]) -> Option<PathBuf> {
     #[cfg(feature = "native-dialogs")]
     {
         let mut dialog = rfd::FileDialog::new();
         for (name, extensions) in filters {
-            dialog = dialog.add_filter(*name, extensions);
+            dialog = dialog.add_filter(*name, &case_variants(extensions));
         }
         dialog.pick_file()
     }
@@ -329,7 +366,7 @@ pub fn pick_save_file_named(
     {
         let mut dialog = rfd::FileDialog::new();
         for (name, extensions) in filters {
-            dialog = dialog.add_filter(*name, extensions);
+            dialog = dialog.add_filter(*name, &case_variants(extensions));
         }
         if let Some(name) = default_name {
             dialog = dialog.set_file_name(name);
@@ -2129,7 +2166,14 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             egui::RichText::new("stop the acquisition to change presets").weak(),
                         );
                     }
-                    let mut presets = properties.presets;
+                    // The edit in progress, seeded from the instrument the
+                    // first time this tab is drawn for it. Switching detectors
+                    // seeds afresh, so one instrument's presets are never
+                    // typed into another's.
+                    let mut presets = match app.dialogs.presets_edit {
+                        Some((owner, presets)) if owner == detector => presets,
+                        _ => properties.presets,
+                    };
                     let edit = |ui: &mut egui::Ui, label: &str, value: &mut Option<f64>| {
                         ui.label(label);
                         let mut enabled = value.is_some();
@@ -2223,15 +2267,32 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     ui.horizontal(|ui| {
                         if ui.button("Apply presets").clicked() {
                             match app.detectors[detector].set_presets(presets) {
-                                Ok(()) => actions.push(Action::Status("presets applied".into())),
+                                Ok(()) => {
+                                    // What the instrument now holds is no
+                                    // longer an unsaved edit.
+                                    app.dialogs.presets_edit = None;
+                                    actions.push(Action::Status("presets applied".into()))
+                                }
                                 Err(error) => actions.push(Action::Status(error.to_string())),
                             }
                         }
                         if ui.button("Clear presets").clicked() {
                             let _ = app.detectors[detector].set_presets(Presets::default());
+                            app.dialogs.presets_edit = None;
                             actions.push(Action::Status("presets cleared".into()));
                         }
                     });
+                    // Whatever has been typed so far survives to the next
+                    // frame; only Apply sends it to the instrument.
+                    if app
+                        .detectors
+                        .get(detector)
+                        .is_some_and(|mcb| mcb.properties().presets != presets)
+                    {
+                        app.dialogs.presets_edit = Some((detector, presets));
+                    } else {
+                        app.dialogs.presets_edit = None;
+                    }
                     return;
                 }
                 3 => {
@@ -4394,8 +4455,37 @@ fn open_path_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
 
 #[cfg(test)]
 mod tests {
-    use super::strongest_centroid;
+    use super::{case_variants, strongest_centroid};
     use ortseam_core::{LineResult, NuclideResult};
+
+    #[test]
+    fn a_filter_matches_the_capitals_ortec_actually_writes() {
+        // The bug this pins: on Linux a lowercase-only filter hid every real
+        // instrument file, because ORTEC names them `.Spe` and GTK matches
+        // patterns case-sensitively.
+        let patterns = case_variants(&["spe"]);
+        assert!(patterns.contains(&"Spe".to_string()), "{patterns:?}");
+        assert!(patterns.contains(&"spe".to_string()), "{patterns:?}");
+        assert!(patterns.contains(&"SPE".to_string()), "{patterns:?}");
+    }
+
+    #[test]
+    fn a_filter_written_in_capitals_still_offers_the_lowercase_spelling() {
+        let patterns = case_variants(&["Chn"]);
+        assert!(patterns.contains(&"chn".to_string()), "{patterns:?}");
+        assert!(patterns.contains(&"Chn".to_string()), "{patterns:?}");
+    }
+
+    #[test]
+    fn a_filter_lists_each_spelling_once() {
+        // Every extension of every spectrum filter, so a duplicate cannot
+        // creep into the pattern list the dialog is given.
+        let patterns = case_variants(&["chn", "spc", "spe", "json", "txt", "lis"]);
+        let mut sorted = patterns.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), patterns.len(), "{patterns:?}");
+    }
 
     fn line(centroid: f64, net_area: f64) -> LineResult {
         LineResult {
