@@ -2,6 +2,85 @@
 
 ## Unreleased
 
+**The bench check, run (2026-08-06).** The preset work below was written
+against doubles and marked as not yet run on the 926; it has been now, and it
+holds: `probe` finds the adapter, `SHOW_PRESETS` read back the very 300-second
+live preset the instrument was found holding, `SET_PRESET_LIVE 2` round-tripped
+and stopped the count at exactly LT=2.00, and `START` against that satisfied
+preset was accepted with the clocks frozen - the silent refusal, reproduced.
+Pinning by `--device` opens the named adapter and refuses a serial that is not
+there; a detector opened twice learns its serial and then matches it. The bench
+check is kept as `crates/ortseam-device/tests/bench_926.rs`, ignored by default
+because it needs the instrument. Three things it found:
+
+- *Dead time could read below zero.* The two clocks are separate commands, so
+  they are sampled a round trip apart, and the one read second has run on: at
+  a low count rate the bench 926 reported `RT=1.00 LT=1.02 DT=-2.00%`. Real
+  time is now read second, which puts the skew in the direction the arithmetic
+  survives, and the result is clamped - a negative dead time is a sampling
+  artefact, not a measurement.
+- *A helper that refuses to start said why to nobody.* Its reason goes to
+  standard error, which a window with no console behind it never shows, so the
+  operator saw only "the bridge stopped". Standard error is now relayed line by
+  line as before *and* kept, so the failure is reported as "the bridge stopped:
+  no adapter with "08134079" in its serial number".
+- Two doc comments had been separated from what they document by code inserted
+  between them, leaving `spawn_program` and `close_window` undocumented and
+  their text attached to a test module and to `remember_serial`.
+
+**A detector can be named, and cannot be confused with another one
+(2026-08-06).** Three related things, all about knowing which instrument you
+are talking to.
+
+*Detectors can be renamed.* The Detector List's name column is an edit box:
+type over it and the new name reaches the saved pick list, the open
+instrument, its window title, and the detector fields of every spectrum saved
+from it afterwards. A name that means something to whoever reads the file next
+year - "Bench HPGe" - beats the model and serial the scan happened to print.
+
+*A local instrument is pinned to its adapter, not to a position on the bus.*
+Away from ORTEC's configured detector numbers, `serve N` means the Nth adapter
+the bus enumerates, which is a position and not an instrument: plug in a
+second adapter, or replug the one there, and the same entry can lead somewhere
+else. An entry now remembers what the instrument called itself and hands that
+to the helper as `--device`, which both the Windows and the libusb bridge
+already understood. The one case where that would be wrong is handled: through
+ORTEC's library an instrument reports the detector number that selected it,
+and a number is not an adapter serial, so an identity that is only the number
+already used is not treated as a pin.
+
+*And the identity is checked on every open.* Whatever the instrument reports
+in its configuration reply is compared against what the entry remembers -
+learned on the first successful open - and a mismatch refuses the connection
+by name ("this is instrument \"11217584\", not \"08134079\" - the adapters may
+have been swapped or replugged") instead of quietly opening the wrong detector
+and labelling its spectra with the wrong name. An instrument that reports no
+serial is nothing to check against rather than evidence of a mix-up, so those
+still open.
+
+**A preset the instrument is already holding is visible, and cannot silently
+refuse a count (2026-08-06).** Found on the bench: a 926 was still holding a
+300-second live preset from an earlier session, with its live clock stopped
+at exactly that value. ortseam could only ever *write* presets - it opened
+with an empty Presets tab, because nothing ever asked the instrument what it
+was holding - and then `START` was accepted and the instrument did not count,
+because the preset was already satisfied. The instrument says nothing about
+either: a valid `START` and an ignored one look identical on the wire, and no
+reply carries the preset registers unless they are asked for.
+
+Both halves are closed. The bridge answers a new `SHOW_PRESETS`, reading all
+four registers back (time presets in ticks, reported in seconds; counts as
+counts), and a served simulator answers it the same way, so an instrument and
+a simulator behave alike. Connecting asks the question and shows what comes
+back, so the Presets tab reflects the instrument rather than only this
+session's edits; an older bridge that does not know the verb still connects,
+with no presets shown, exactly as before. And starting an acquisition whose
+real-time, live-time or ROI preset is already reached is now refused by name -
+"the Live time preset is already reached - clear the spectrum, or change the
+preset" - instead of appearing to work. Uncertainty and MDA presets are not
+part of that check: they are host-side, and `advance` stops and reports them
+on the next poll rather than the instrument quietly declining.
+
 **Question and answer stay together on the bridge (2026-08-06).** Reviewing
 the work below found that giving the bridge transport a ten-second timeout
 had introduced a way for it to answer the wrong question. A timed-out

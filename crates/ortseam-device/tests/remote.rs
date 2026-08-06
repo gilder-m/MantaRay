@@ -9,7 +9,26 @@ use std::time::Duration;
 
 use ortseam_device::{AnyMcb, Mcb, MockTransport, RemoteMcb, SimulatedMcb, TcpTransport, advance};
 
+/// The handshake every script starts with: configuration, status, data.
+const HANDSHAKE: usize = 3;
+
+/// A scripted instrument holding no presets.
+///
+/// Connecting also asks what presets the instrument is already holding, so
+/// that answer is spliced in after the handshake and before whatever the test
+/// does next. "None set" leaves every case behaving as it did before the
+/// question existed; a test that cares scripts its own.
 fn connect_scripted(pairs: &[(&str, &str)]) -> RemoteMcb {
+    let mut script = pairs.to_vec();
+    script.insert(
+        pairs.len().min(HANDSHAKE),
+        ("SHOW_PRESETS", "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"),
+    );
+    connect_exactly(&script)
+}
+
+/// A scripted instrument, with no presets answer spliced in.
+fn connect_exactly(pairs: &[(&str, &str)]) -> RemoteMcb {
     let transport = MockTransport::scripted(pairs);
     RemoteMcb::connect(Box::new(transport), 7, "BENCH-01").expect("connect")
 }
@@ -67,6 +86,187 @@ fn a_malformed_data_reply_is_an_error_not_an_abort() {
             "the last good spectrum must survive a corrupt reply"
         );
     }
+}
+
+#[test]
+fn connecting_learns_the_presets_the_instrument_is_already_holding() {
+    // The bug this pins, found on the bench 926 on 2026-08-06: a preset set
+    // in one session stays in the instrument's registers, but ortseam only
+    // ever wrote presets and never read them. A restarted application showed
+    // an empty Presets tab while the instrument held a 300 s live preset -
+    // and then answered START without counting, because the preset was
+    // already satisfied. Silent from the operator's side, twice over.
+    let remote = connect_exactly(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        (
+            "SHOW_STATUS",
+            "RT=310.90 LT=300.00 DT=3.51% ICR=0 ACTIVE=0 TOTAL=0",
+        ),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        // What the bench 926 was actually holding.
+        (
+            "SHOW_PRESETS",
+            "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0",
+        ),
+    ]);
+    assert_eq!(remote.presets().live_time, Some(300.0));
+    assert_eq!(
+        remote.presets().real_time,
+        None,
+        "zero means none set, not a preset of zero"
+    );
+    assert_eq!(remote.presets().roi_peak, None);
+    assert_eq!(remote.presets().roi_integral, None);
+}
+
+#[test]
+fn an_instrument_that_cannot_say_leaves_the_presets_empty() {
+    // An older bridge does not know SHOW_PRESETS and refuses it. That must
+    // still connect, with no presets shown - exactly as before the question
+    // existed - rather than failing to open the detector at all.
+    let remote = connect_exactly(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        (
+            "SHOW_PRESETS",
+            "ERR SHOW_PRESETS is not a command this bridge knows",
+        ),
+    ]);
+    assert!(
+        remote.presets().is_empty(),
+        "nothing is known, so nothing is claimed"
+    );
+}
+
+#[test]
+fn starting_against_a_preset_already_reached_is_refused_by_name() {
+    // What the 926 does instead: it answers START, leaves the clocks where
+    // they are, and never counts. The refusal has to name the preset, or the
+    // operator is left with a Start button that appears to work.
+    let mut remote = connect_exactly(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        (
+            "SHOW_STATUS",
+            "RT=310.90 LT=300.00 DT=3.51% ICR=0 ACTIVE=0 TOTAL=0",
+        ),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        (
+            "SHOW_PRESETS",
+            "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0",
+        ),
+        // No START is scripted: sending one would be the bug.
+    ]);
+    let error = remote.start().expect_err("a satisfied preset cannot start");
+    let text = error.to_string();
+    assert!(text.contains("Live time"), "should name the preset: {text}");
+    assert!(
+        text.contains("clear") || text.contains("change"),
+        "should say what to do about it: {text}"
+    );
+    assert!(!remote.is_active());
+}
+
+#[test]
+fn the_wrong_instrument_is_refused_rather_than_opened() {
+    // A saved detector remembers a route - a number, or a position on the USB
+    // bus - and a route is not an identity. Plug in a second adapter, or
+    // replug the one there, and the same route can reach a different
+    // instrument; two of a model answer identically apart from the serial, so
+    // nothing downstream would notice it had happened.
+    let transport = MockTransport::scripted(&[(
+        "SHOW_CONFIGURATION",
+        "MODEL=0926-001 SERIAL=11217584 FIRMWARE=F CHANNELS=4096",
+    )]);
+    let outcome =
+        RemoteMcb::connect_expecting(Box::new(transport), 1, "Bench HPGe", Some("08134079"));
+    let text = match outcome {
+        Ok(_) => panic!("a different instrument must not open under this entry"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        text.contains("11217584"),
+        "should say what answered: {text}"
+    );
+    assert!(text.contains("08134079"), "and what was expected: {text}");
+}
+
+#[test]
+fn the_expected_instrument_opens_normally() {
+    let remote = RemoteMcb::connect_expecting(
+        Box::new(MockTransport::scripted(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=0926-001 SERIAL=08134079 FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+            ("SHOW_PRESETS", "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"),
+        ])),
+        1,
+        "Bench HPGe",
+        // Case and surrounding space are not a different instrument.
+        Some("  08134079  "),
+    )
+    .expect("the right instrument opens");
+    assert_eq!(remote.identity().serial, "08134079");
+}
+
+#[test]
+fn an_instrument_that_reports_no_serial_is_not_treated_as_a_mismatch() {
+    // Some routes report no serial at all. That is nothing to check against,
+    // not evidence of the wrong instrument - refusing there would lock the
+    // operator out of a detector that is working perfectly well.
+    let remote = RemoteMcb::connect_expecting(
+        Box::new(MockTransport::scripted(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=0926-001 SERIAL= FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+            ("SHOW_PRESETS", "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"),
+        ])),
+        1,
+        "Bench HPGe",
+        Some("08134079"),
+    );
+    assert!(
+        remote.is_ok(),
+        "a missing serial is nothing to check, not a mismatch: {}",
+        remote
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+    );
+}
+
+#[test]
+fn renaming_reaches_the_saved_spectrum_too() {
+    // The name is what a file saved from this window says it came from, so a
+    // rename that stops at the pick list leaves every later save wrong.
+    let mut remote = connect_scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+    ]);
+    assert_eq!(remote.spectrum().detector_name, "BENCH-01");
+    remote.set_name("Bench HPGe");
+    assert_eq!(remote.identity().name, "Bench HPGe");
+    assert_eq!(remote.spectrum().detector_name, "Bench HPGe");
+    assert_eq!(remote.spectrum().detector_description, "Bench HPGe");
 }
 
 #[test]
@@ -335,6 +535,7 @@ fn an_uncertainty_preset_does_stop_a_remote_instrument() {
         ),
         ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SHOW_DATA", PEAK),
+        ("SHOW_PRESETS", "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"),
         // Only the four the instrument itself carries go over the wire.
         ("SET_PRESET_CLEAR", "OK"),
         ("START", "OK"),

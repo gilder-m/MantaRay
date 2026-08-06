@@ -123,6 +123,7 @@ impl Session<'_> {
             "SHOW_CONFIGURATION" => self.configuration(),
             "SHOW_STATUS" => self.status(),
             "SHOW_DATA" => self.data(),
+            "SHOW_PRESETS" => self.presets(),
             "START" => self.pass("START"),
             "STOP" => self.pass("STOP"),
             "CLEAR" => self.clear(),
@@ -175,6 +176,40 @@ impl Session<'_> {
         Ok("OK".into())
     }
 
+    /// What the instrument is holding in its own preset registers.
+    ///
+    /// Presets outlive the session that set them: a live preset set yesterday
+    /// still stops a count today, whether or not anything on the host knows
+    /// about it. Until this could be asked, ortseam could only write presets,
+    /// so a restarted application showed none while the instrument quietly
+    /// refused to count - it answers START with its usual empty reply and
+    /// then does not run. Time presets are read in ticks and reported in
+    /// seconds; count presets are counts either way. Zero means none set,
+    /// which is how the instrument itself says it.
+    fn presets(&mut self) -> Result<String, String> {
+        let real = self.register("SHOW_TRUE_PRESET") * TICK;
+        let live = self.register("SHOW_LIVE_PRESET") * TICK;
+        let peak = self.register("SHOW_PEAK_PRESET") as u64;
+        let integral = self.register("SHOW_INTEGRAL_PRESET") as u64;
+        Ok(format!(
+            "PRESETS REAL={real:.2} LIVE={live:.2} PEAK={peak} INTEG={integral}"
+        ))
+    }
+
+    /// One preset register, or zero when the instrument will not say.
+    ///
+    /// An instrument that does not know the question is one with no preset
+    /// set as far as anything here can tell, which is the honest answer and
+    /// the same one it gave before the question existed.
+    fn register(&self, verb: &str) -> f64 {
+        self.instrument
+            .command(verb)
+            .ok()
+            .and_then(|reply| record_number(&reply, 'G').ok())
+            .unwrap_or(0.0)
+            .max(0.0)
+    }
+
     /// A count preset, passed on as the whole number it is.
     fn count_preset(&mut self, verb: &str, argument: &str) -> Result<String, String> {
         let counts: u64 = argument
@@ -221,12 +256,19 @@ impl Session<'_> {
     }
 
     fn status(&mut self) -> Result<String, String> {
-        let real = self.clock("SHOW_TRUE")?;
+        // Live first, then real. The two clocks are separate commands, so they
+        // are sampled a round trip apart, and whichever is read second has run
+        // on: reading real time second keeps it the larger of the two, which is
+        // the direction the arithmetic below can survive.
         let live = self.clock("SHOW_LIVE")?;
+        let real = self.clock("SHOW_TRUE")?;
         // The instrument reports no dead time of its own; it is the difference
-        // between the two clocks, which is what dead time means.
+        // between the two clocks, which is what dead time means. Clamped,
+        // because the two readings are not simultaneous: on the bench 926 at a
+        // low count rate this printed DT=-2.00% from RT=1.00 LT=1.02, and dead
+        // time below zero is not a measurement, it is a sampling artefact.
         let dead = if real > 0.0 {
-            (real - live) / real * 100.0
+            ((real - live) / real * 100.0).clamp(0.0, 100.0)
         } else {
             0.0
         };
@@ -786,6 +828,53 @@ mod tests {
     }
 
     #[test]
+    fn dead_time_never_reads_below_zero() {
+        // Measured on the bench 926: the two clocks are separate commands, so
+        // at a low count rate the live clock read a round trip later can come
+        // back past the real clock - RT=1.00 LT=1.02 printed DT=-2.00%, which
+        // is not a dead time any instrument can have.
+        struct Skewed;
+        impl Instrument for Skewed {
+            fn command(&self, text: &str) -> Result<String, String> {
+                Ok(match text {
+                    "SHOW_TRUE" => "$G0000000050000".into(), // 50 ticks = 1.00 s
+                    "SHOW_LIVE" => "$G0000000051000".into(), // 51 ticks = 1.02 s
+                    _ => String::new(),
+                })
+            }
+            fn channels(&self) -> usize {
+                1
+            }
+            fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
+                Ok(vec![0])
+            }
+            fn is_counting(&self) -> bool {
+                true
+            }
+            fn model(&self) -> String {
+                String::new()
+            }
+            fn identity(&self) -> String {
+                "0".into()
+            }
+            fn calibration(&self) -> Option<(f64, f64, f64)> {
+                None
+            }
+            fn route(&self) -> String {
+                "a skewed double".into()
+            }
+        }
+        let skewed = Skewed;
+        let mut session = Session {
+            instrument: &skewed,
+            total: 0,
+        };
+        let status = session.handle("SHOW_STATUS");
+        assert!(status.contains("DT=0.00%"), "{status}");
+        assert!(!status.contains("DT=-"), "{status}");
+    }
+
+    #[test]
     fn a_reply_is_reduced_to_one_line_before_it_is_written() {
         // A reply is only cut at a carriage return or a NUL, so a lone line
         // feed reaches here. Two lines for one command would pair every later
@@ -794,6 +883,59 @@ mod tests {
         assert_eq!(one_line("DATA 2 1\n2"), "DATA 2 1 2");
         assert_eq!(one_line("ERR bad\nreply\ttext"), "ERR bad reply text");
         assert!(!one_line("\n\n").contains('\n'));
+    }
+
+    #[test]
+    fn the_presets_the_instrument_holds_can_be_read_back() {
+        // The bench 926 on 2026-08-06 answered SHOW_LIVE_PRESET with
+        // $G0000015000081 - 15000 ticks, a 300-second live preset it had been
+        // holding since the session before. Reading them back is what lets
+        // the application show a preset it did not set itself.
+        struct Holding;
+        impl Instrument for Holding {
+            fn command(&self, text: &str) -> Result<String, String> {
+                Ok(match text {
+                    "SHOW_TRUE_PRESET" => "$G0000000000075".into(),
+                    "SHOW_LIVE_PRESET" => "$G0000015000081".into(),
+                    "SHOW_PEAK_PRESET" => "$G0000000123081".into(),
+                    // The verb this instrument does not know.
+                    "SHOW_INTEGRAL_PRESET" => return Err("unknown verb".into()),
+                    _ => "%000000069".into(),
+                })
+            }
+            fn channels(&self) -> usize {
+                4
+            }
+            fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
+                Ok(vec![0; 4])
+            }
+            fn is_counting(&self) -> bool {
+                false
+            }
+            fn model(&self) -> String {
+                "0926-001".into()
+            }
+            fn identity(&self) -> String {
+                "08134079".into()
+            }
+            fn calibration(&self) -> Option<(f64, f64, f64)> {
+                None
+            }
+            fn route(&self) -> String {
+                "an instrument holding a preset".into()
+            }
+        }
+        let holding = Holding;
+        let mut session = Session {
+            instrument: &holding,
+            total: 0,
+        };
+        // Ticks out, seconds in; counts stay counts; a register the
+        // instrument will not report reads as none set, not as an error.
+        assert_eq!(
+            session.handle("SHOW_PRESETS"),
+            "PRESETS REAL=0.00 LIVE=300.00 PEAK=123 INTEG=0"
+        );
     }
 
     #[test]

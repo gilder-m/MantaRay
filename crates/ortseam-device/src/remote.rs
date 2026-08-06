@@ -14,9 +14,15 @@
 //! | `SHOW_CONFIGURATION` | `MODEL=.. SERIAL=.. FIRMWARE=.. CHANNELS=n [CAL=a,b,c]` |
 //! | `SHOW_STATUS` | `RT=.. LT=.. DT=..% ICR=.. ACTIVE=0/1 TOTAL=n` |
 //! | `SHOW_DATA` | `DATA n c0 c1 ... c(n-1)` |
+//! | `SHOW_PRESETS` | `PRESETS REAL=s LIVE=s PEAK=n INTEG=n` (0 means none set) |
 //! | `START` `STOP` `CLEAR` | `OK` |
 //! | `SET_PRESET_REAL s` etc. | `OK` |
 //! | anything rejected | `ERR reason` |
+//!
+//! `SHOW_PRESETS` is asked once, on connecting, because an instrument's preset
+//! registers outlive the session that wrote them - and an instrument holding a
+//! satisfied preset accepts `START` and then does not count. An older bridge
+//! that refuses the question simply reports no presets.
 //!
 //! Everything here is exercised against a scripted transport and against a
 //! served [`SimulatedMcb`](crate::SimulatedMcb) in the tests. Real hardware
@@ -49,9 +55,31 @@ pub struct RemoteMcb {
 impl RemoteMcb {
     /// Connects: asks the instrument what it is, and sizes the local mirror.
     pub fn connect(
+        transport: Box<dyn Transport>,
+        number: u16,
+        name: &str,
+    ) -> Result<Self, DeviceError> {
+        Self::connect_expecting(transport, number, name, None)
+    }
+
+    /// The same, refusing an instrument that is not the one expected.
+    ///
+    /// A saved detector says how to reach an instrument - a detector number,
+    /// or a position on the USB bus - and neither is an identity. Add a second
+    /// adapter, or replug the one there, and the same route can lead to a
+    /// different instrument; two of the same model answer identically apart
+    /// from their serial, so nothing downstream would notice. Given what the
+    /// instrument called itself last time, this compares and refuses rather
+    /// than quietly opening the wrong detector and labelling its spectra with
+    /// the wrong name.
+    ///
+    /// `None`, or an empty expectation, learns instead of checking - which is
+    /// what the first open of a new entry does.
+    pub fn connect_expecting(
         mut transport: Box<dyn Transport>,
         number: u16,
         name: &str,
+        expected_serial: Option<&str>,
     ) -> Result<Self, DeviceError> {
         let configuration = checked(transport.exchange("SHOW_CONFIGURATION")?)?;
         let field = |key: &str| -> Option<String> {
@@ -64,11 +92,27 @@ impl RemoteMcb {
         let channels: usize = field("CHANNELS")
             .and_then(|value| value.parse().ok())
             .unwrap_or(1024);
+        let reported = field("SERIAL").unwrap_or_default();
+        // Compared before anything else is built on it: an instrument that is
+        // not the expected one must not become a detector at all.
+        if let Some(expected) = expected_serial
+            && !expected.trim().is_empty()
+            && !reported.trim().is_empty()
+            && !expected.trim().eq_ignore_ascii_case(reported.trim())
+        {
+            return Err(DeviceError::Connection {
+                address: transport.peer(),
+                detail: format!(
+                    "this is instrument {reported:?}, not {expected:?} - the adapters may have \
+                     been swapped or replugged. Rescan to pick it up under its own entry."
+                ),
+            });
+        }
         let identity = McbIdentity {
             number,
             name: name.to_string(),
             model: field("MODEL").unwrap_or_else(|| "remote MCB".into()),
-            serial: field("SERIAL").unwrap_or_default(),
+            serial: reported,
             firmware: field("FIRMWARE").unwrap_or_default(),
             description: format!("network instrument at {}", transport.peer()),
             channels,
@@ -107,7 +151,45 @@ impl RemoteMcb {
             since_poll: f64::MAX,
         };
         remote.refresh()?;
+        remote.read_presets();
         Ok(remote)
+    }
+
+    /// Asks the instrument what presets it is already holding.
+    ///
+    /// An instrument's preset registers outlive the session that wrote them.
+    /// Until this was asked, ortseam only ever wrote presets, so a restarted
+    /// application showed an empty Presets tab while the instrument held, say,
+    /// a three-hundred-second live preset - and then answered START without
+    /// counting, because that preset was already satisfied. Seen on the bench
+    /// 926 on 2026-08-06, and silent from the operator's side.
+    ///
+    /// Deliberately not an error: a bridge or instrument that does not know
+    /// the question leaves the presets empty, exactly as every version before
+    /// this one did, so an older helper still connects.
+    fn read_presets(&mut self) {
+        let Ok(reply) = self.command("SHOW_PRESETS") else {
+            return;
+        };
+        let field = |key: &str| -> Option<f64> {
+            reply.split_whitespace().find_map(|word| {
+                word.strip_prefix(key)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .and_then(|value| value.parse::<f64>().ok())
+            })
+        };
+        // Zero is how an instrument says "none set", so it is not a preset of
+        // zero - which would mean an acquisition that stops immediately.
+        let seconds = |value: Option<f64>| value.filter(|value| *value > 0.0);
+        let counts = |value: Option<f64>| {
+            value
+                .filter(|value| *value >= 1.0)
+                .map(|value| value as u64)
+        };
+        self.properties.presets.real_time = seconds(field("REAL"));
+        self.properties.presets.live_time = seconds(field("LIVE"));
+        self.properties.presets.roi_peak = counts(field("PEAK"));
+        self.properties.presets.roi_integral = counts(field("INTEG"));
     }
 
     /// One command out, one checked line back.
@@ -233,6 +315,15 @@ impl Mcb for RemoteMcb {
         Ok(())
     }
 
+    fn set_name(&mut self, name: &str) {
+        self.identity.name = name.to_string();
+        // The spectrum carries the detector's name into every file saved from
+        // this window, so a rename has to reach it too or the next save still
+        // says what the scan called it.
+        self.spectrum.detector_name = name.to_string();
+        self.spectrum.detector_description = name.to_string();
+    }
+
     fn presets_mut(&mut self) -> &mut Presets {
         &mut self.properties.presets
     }
@@ -258,6 +349,35 @@ impl Mcb for RemoteMcb {
 
     fn start(&mut self) -> Result<(), DeviceError> {
         self.ensure_unlocked()?;
+        // A preset that is already satisfied is why an instrument can answer
+        // START and then not count: the 926 accepts the command, leaves the
+        // clocks where they are, and says nothing. Refusing here, by name,
+        // beats a Start button that appears to work and does not.
+        //
+        // Only the four the instrument itself holds are checked. Uncertainty
+        // and MDA are worked out host-side, and an acquisition that begins
+        // already satisfying one is stopped by `advance` on the next poll,
+        // which says so - it is not the silent refusal this guards against.
+        let held_by_the_instrument = Presets {
+            real_time: self.properties.presets.real_time,
+            live_time: self.properties.presets.live_time,
+            roi_peak: self.properties.presets.roi_peak,
+            roi_integral: self.properties.presets.roi_integral,
+            ..Default::default()
+        };
+        if let Some(kind) = held_by_the_instrument.reached(
+            &self.spectrum,
+            self.status.real_time,
+            self.status.live_time,
+        ) {
+            return Err(DeviceError::Command {
+                command: "START".into(),
+                detail: format!(
+                    "the {} preset is already reached - clear the spectrum, or change the preset",
+                    kind.label()
+                ),
+            });
+        }
         self.command("START")?;
         self.status.active = true;
         // The instrument reports no measurement date of its own, so the moment

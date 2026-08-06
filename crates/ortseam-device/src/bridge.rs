@@ -71,6 +71,11 @@ pub struct BridgeTransport {
     /// lasts. A stall long enough to matter needs nothing exotic: a suspended
     /// laptop is past ten seconds on its own.
     owed: usize,
+    /// The last thing the helper said on standard error.
+    ///
+    /// Kept so that a helper which dies before answering can be reported by
+    /// its own reason rather than by the silence that follows it.
+    complaint: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     peer: String,
 }
 
@@ -97,6 +102,23 @@ fn read_lines(stdout: ChildStdout, sender: std::sync::mpsc::Sender<std::io::Resu
     }
 }
 
+/// Passes the helper's standard error on, keeping the last line said.
+///
+/// Relayed as it arrives, so nothing is swallowed or held back until the end;
+/// the copy is only so a failure can quote the reason instead of the silence.
+fn relay_stderr(stderr: std::process::ChildStderr, kept: &std::sync::Mutex<Option<String>>) {
+    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        eprintln!("{line}");
+        if let Ok(mut kept) = kept.lock() {
+            *kept = Some(line);
+        }
+    }
+}
+
 impl BridgeTransport {
     /// Starts the bridge on a detector number from ORTEC's configuration.
     ///
@@ -107,18 +129,40 @@ impl BridgeTransport {
         detector: i32,
         umcbi_dir: Option<&Path>,
     ) -> Result<Self, DeviceError> {
+        Self::start_pinned(executable, detector, None, umcbi_dir)
+    }
+
+    /// The same, naming the adapter to open rather than trusting its position.
+    ///
+    /// Away from ORTEC's configured detector numbers, `serve N` means the Nth
+    /// adapter the bus enumerates - which is a position, not an instrument.
+    /// Plug in a second adapter and N can lead somewhere else. A serial names
+    /// one adapter and keeps naming it, whatever else is plugged in.
+    pub fn start_pinned(
+        executable: &Path,
+        detector: i32,
+        serial: Option<&str>,
+        umcbi_dir: Option<&Path>,
+    ) -> Result<Self, DeviceError> {
         let mut command = Command::new(executable);
         command.arg("serve").arg(detector.to_string());
         no_console(&mut command);
+        if let Some(serial) = serial.map(str::trim).filter(|serial| !serial.is_empty()) {
+            command.arg("--device").arg(serial);
+        }
         if let Some(directory) = umcbi_dir {
             command.arg("--umcbi-dir").arg(directory);
         }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Left attached, so the helper's own account of what it reached
-            // lands wherever ortseam's does rather than vanishing.
-            .stderr(Stdio::inherit())
+            // Piped rather than inherited, but still relayed line by line, so
+            // the helper's account of what it reached lands where ortseam's
+            // does *and* is available to quote. A helper that refuses to start
+            // - "no adapter with X in its serial number" - says so only here,
+            // and a window with no console behind it would otherwise show the
+            // operator nothing but "the bridge stopped".
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| DeviceError::Connection {
                 address: executable.display().to_string(),
@@ -134,13 +178,40 @@ impl BridgeTransport {
         })?;
         let (sender, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || read_lines(stdout, sender));
+        let complaint = std::sync::Arc::new(std::sync::Mutex::new(None));
+        if let Some(stderr) = child.stderr.take() {
+            let kept = std::sync::Arc::clone(&complaint);
+            std::thread::spawn(move || relay_stderr(stderr, &kept));
+        }
         Ok(Self {
             child,
             writer: Some(writer),
             lines,
             owed: 0,
+            complaint,
             peer: format!("detector {detector} through the bridge"),
         })
+    }
+
+    /// The last thing the helper said, allowing for it not having arrived yet.
+    ///
+    /// Standard output and standard error are separate pipes read by separate
+    /// threads, so a helper that complains and exits can close the first while
+    /// the second is still being drained. A short wait on the error path only
+    /// is the difference between naming the reason and reporting silence.
+    fn last_complaint(&self) -> Option<String> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        loop {
+            if let Ok(complaint) = self.complaint.lock()
+                && let Some(said) = complaint.clone()
+            {
+                return Some(said);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Where the helper is, given the running program's own location.
@@ -197,7 +268,13 @@ impl Transport for BridgeTransport {
                     )));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(failed("the bridge stopped".into()));
+                    // A helper that refuses to start says why on its standard
+                    // error and nowhere else; without that, the operator is
+                    // told only that something stopped.
+                    return Err(failed(match self.last_complaint() {
+                        Some(said) => format!("the bridge stopped: {said}"),
+                        None => "the bridge stopped".into(),
+                    }));
                 }
             }
         }

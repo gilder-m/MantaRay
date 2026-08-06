@@ -398,6 +398,16 @@ impl Mcb for SimulatedMcb {
         &self.identity
     }
 
+    fn set_name(&mut self, name: &str) {
+        self.identity.name = name.to_string();
+        // Every spectrum this instrument holds carries the detector's name
+        // into a saved file, so all three follow the rename.
+        for spectrum in [&mut self.raw, &mut self.corrected, &mut self.error] {
+            spectrum.detector_name = name.to_string();
+            spectrum.detector_description = name.to_string();
+        }
+    }
+
     fn properties(&self) -> &McbProperties {
         &self.properties
     }
@@ -786,6 +796,20 @@ impl Mcb for SimulatedMcb {
                 ))
             }
             "SHOW_VERSION" => Ok(self.identity.firmware.clone()),
+            // The presets this instrument is holding, in the same shape the
+            // bridge reports a real one's registers. Zero means none set.
+            // Uncertainty and MDA are not here: no instrument carries them,
+            // they are worked out host-side from the spectrum.
+            "SHOW_PRESETS" => {
+                let presets = &self.properties.presets;
+                Ok(format!(
+                    "PRESETS REAL={:.2} LIVE={:.2} PEAK={} INTEG={}",
+                    presets.real_time.unwrap_or(0.0),
+                    presets.live_time.unwrap_or(0.0),
+                    presets.roi_peak.unwrap_or(0),
+                    presets.roi_integral.unwrap_or(0)
+                ))
+            }
             "SHOW_CONFIGURATION" => Ok(format!(
                 "MODEL={} SERIAL={} FIRMWARE={} CHANNELS={}",
                 self.identity.model.replace(' ', "_"),
