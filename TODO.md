@@ -1,9 +1,11 @@
 # TODO
 
-Findings from the 2026-08-04 full-codebase audit (five independent review
-passes, one per subsystem) that are **not yet fixed**. Each entry says where,
-what goes wrong, why it matters, and what the fix should look like. Items the
-audit confirmed and this session already fixed are in the changelog, not here.
+The open findings, seeded by the 2026-08-04 full-codebase audit (five
+independent review passes, one per subsystem) and updated as work lands -
+pruned 2026-08-05 after the first Linux hardware run (PR #1) fixed some and
+found others. Each entry says where, what goes wrong, why it matters, and
+what the fix should look like. What has been fixed is in the changelog, not
+here.
 
 Severity: **H** = wrong results/crash/hang on realistic use, **M** = on
 unusual-but-possible input, **L** = practice/robustness.
@@ -24,16 +26,16 @@ scale. **Fix:** gate every single-key binding on the same
 `egui_wants_keyboard_input()` check the Escape handler already uses (arrows
 included; keep Escape's special handling).
 
-### H: The MCB Properties "Presets" tab cannot set presets
-`dialogs.rs` (~2126-2236): `let mut presets = properties.presets;` rebuilds
-the edit state from the detector every frame, and nothing writes edits back
-between frames — a checked "Live time" box snaps back unchecked at frame end,
-and "Apply presets" sends the untouched (possibly empty) values, which can
-silently *clear* presets already on the instrument. **Why it matters:**
-presets are effectively only settable from jobs/batch. **Fix:** persist the
-edit state across frames (as `settings_dialog` does with `app.settings =
-settings`, or keep a `presets_edits` field keyed to the dialog), and rebuild
-from the detector only when the dialog opens or the detector changes.
+### M: A debug-build freeze on Linux, seen once, remains unexplained
+During the 2026-08-05 bench run the GUI froze once under a **debug** build
+while a live detector window was polling. It did not recur under a release
+build (CPU fell 93% → 19%), and no root cause was established — a debugger
+could not attach without relaxing `ptrace_scope`. **Why it matters:** an
+unreproduced freeze is an undiagnosed bug, not a fixed one; if it is a real
+deadlock it may only be *slower* to appear in release. **Next step:** try to
+reproduce under a debug build with a live instrument; if it recurs, attach
+with `ptrace_scope` relaxed (or run under `gdb` from the start) and get a
+stack.
 
 ### M: Stale `calibration_edits` after removing a table row
 `dialogs.rs` (~2497-2564): edits are keyed by row index and only `resize`d;
@@ -215,12 +217,24 @@ the application. **Fix:** bound the count (largest real MCB is 16k
 channels; refuse or clamp beyond, e.g. 65536) before allocating, and add
 malformed-reply tests (`tests/remote.rs` currently has none).
 
-### M: Spectrum-length change discards the calibration; bad words become 0
-`remote.rs` ~141-147: if `SHOW_DATA`'s length differs from `CHANNELS=`
-(routine when conversion gain < memory size), `Spectrum::new(count)` throws
-away the `CAL=` calibration captured at connect, permanently; unparseable
-channel words silently parse as 0 counts. **Fix:** carry the calibration
-over on resize; treat unparseable words as an error.
+### M: Unparseable `SHOW_DATA` channel words silently become 0 counts
+`remote.rs` (~poll): a corrupt word in a `DATA` line parses as 0 counts and
+the rest of the spectrum is accepted, so one garbled reply quietly zeroes
+channels. **Fix:** treat an unparseable word as a malformed reply and reject
+the whole line. (The other half of this finding — a length change discarding
+the calibration and detector identity — was fixed 2026-08-05 by
+`copy_descriptors_from` on resize.)
+
+### M: Uncertainty and MDA presets never stop a remote instrument
+The presets dialog accepts uncertainty and MDA presets for any detector, but
+they are host-side calculations no instrument carries, and nothing evaluates
+them for a bridged or network detector — only the simulator honours them.
+**Why it matters:** an operator who sets "stop at 1% uncertainty" on the
+bench 926 gets an acquisition that never stops, with no warning that the
+preset is inert. **Fix:** evaluate these presets host-side in the poll loop
+for remote instruments (the poll already carries the spectrum needed to
+compute them), or grey them out with a "not supported for this instrument"
+note until then.
 
 ### M: Bridge exchange has no timeout; Drop can hang
 `bridge.rs` ~127-135/~151: `read_line` on the helper's stdout blocks forever
@@ -316,13 +330,18 @@ raw.
   bridge_hardware -- --nocapture`. It was skipped this session (adapters
   unplugged, then the instrument was live-counting and must not be
   disturbed).
-- **Prove the libusb path** (`direct.rs`) against the real 926 on
-  Linux/macOS — it compiles and now has clean timeout/cancel semantics
-  (`transfer_blocking`), but has never moved a byte against hardware.
-- **Settle the exact-multiple/ZLP question** documented in
-  `dpm.rs::read_in`: on the bench, read a spectrum whose byte count is an
-  exact multiple of 4096 through both backends and confirm the next command
-  stays in sync. Do not change the loop without this proof.
+- ~~**Prove the libusb path**~~ **Done on Linux, 2026-08-05** (PR #1):
+  `direct.rs` drove the real 926 end to end — enumeration, commands, clocks,
+  a whole spectrum, presets, and the desktop application via
+  `ortseam-mcb serve`. Still open: **macOS**, which only type-checks, and
+  **multiple adapters on one Linux bus** (the bench has one).
+- **The exact-multiple/ZLP question** documented in `dpm.rs::read_in` now
+  has bench evidence on *both* backends: Windows read 8192-channel spectra
+  (32768 bytes ≡ 0 mod 4096) byte-identical with follow-up commands in sync,
+  and the 2026-08-05 Linux run read 4096-channel spectra (16384 bytes)
+  repeatedly through `transfer_blocking` with the live window polling in
+  sync throughout. No stranded terminator has ever been observed. Keep the
+  loop as it is; do not "fix" it on theory alone.
 - **Optionally bind Windows to WinUSB** so the in-house path needs no ORTEC
   driver at all (today direct.rs is non-Windows because ORTEC's driver owns
   the device).
