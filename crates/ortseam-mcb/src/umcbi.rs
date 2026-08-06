@@ -21,9 +21,28 @@ type Bool32 = i32;
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+    fn GetModuleHandleA(name: *const c_char) -> *mut c_void;
+    fn FreeLibrary(module: *mut c_void) -> Bool32;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
     fn GetLastError() -> u32;
     fn SetDllDirectoryA(path: *const c_char) -> Bool32;
+}
+
+/// The module, preferring the copy already in the process.
+///
+/// `mcbloc32.dll` is normally pulled in beside `Mcbcio32.dll` from the pinned
+/// directory; asking for the loaded copy first means a later caller cannot
+/// fetch a different one off the ordinary search path. The flag says whether
+/// this call added a reference - the caller balances it with `FreeLibrary`,
+/// and must not free a handle it did not add a reference to.
+unsafe fn module_in_process(name: &CStr) -> (*mut c_void, bool) {
+    unsafe {
+        let module = GetModuleHandleA(name.as_ptr());
+        if !module.is_null() {
+            return (module, false);
+        }
+        (LoadLibraryA(name.as_ptr()), true)
+    }
 }
 
 macro_rules! signatures {
@@ -158,9 +177,23 @@ impl Umcbi {
             let name = CString::new(LIBRARY).expect("a literal without NUL");
             let module = LoadLibraryA(name.as_ptr());
             if module.is_null() {
+                // A failed attempt leaves nothing pinned for the next one.
+                SetDllDirectoryA(std::ptr::null());
                 return Err(format!("{where_from} (Windows error {})", GetLastError()));
             }
-            Self::resolve(module)
+            let resolved = Self::resolve(module);
+            if resolved.is_err() {
+                // A library missing a symbol is not the library; unload it
+                // rather than leaking a reference per attempt, and unpin the
+                // directory it came from.
+                FreeLibrary(module);
+                SetDllDirectoryA(std::ptr::null());
+            }
+            // On success the directory stays pinned deliberately:
+            // `mcbloc32.dll` and the transport add-ins it names are loaded
+            // lazily from beside `Mcbcio32.dll` at first use, and restoring
+            // the search path now would send those loads elsewhere.
+            resolved
         }
     }
 
@@ -184,7 +217,11 @@ impl Umcbi {
         // An instrument with nothing to report leaves the value alone, so what
         // comes back is the time that went in. That is not a start time, and
         // stamping it on a spectrum would date the file to the moment it was
-        // read rather than the moment it was counted.
+        // read rather than the moment it was counted. The one case this also
+        // discards - a count genuinely started within the current second - is
+        // indistinguishable through this API (the answer is derived from the
+        // `now` that went in), and the value lost is the second the caller
+        // already knows.
         if ok == 0 || i64::from(time) == now {
             return None;
         }
@@ -358,12 +395,14 @@ impl Umcbi {
 /// explanation.
 pub fn local_paths() -> Vec<(&'static str, String)> {
     let mut found = Vec::new();
-    // SAFETY: mcbloc32 sits beside Mcbcio32, which has already been loaded, so
-    // this resolves the module already in the process. Each of these exports
-    // takes no arguments and returns a static NUL-terminated string.
+    // SAFETY: mcbloc32 normally sits in the process already, beside Mcbcio32;
+    // `module_in_process` takes that copy first, so a call before `Umcbi::load`
+    // cannot pull a different one off the search path. Each of these exports
+    // takes no arguments and returns a static NUL-terminated string, copied
+    // out before any unload.
     unsafe {
         let name = CString::new("mcbloc32.dll").expect("a literal without NUL");
-        let module = LoadLibraryA(name.as_ptr());
+        let (module, added) = module_in_process(&name);
         if module.is_null() {
             return found;
         }
@@ -383,6 +422,9 @@ pub fn local_paths() -> Vec<(&'static str, String)> {
                 found.push((label, CStr::from_ptr(text).to_string_lossy().to_string()));
             }
         }
+        if added {
+            FreeLibrary(module);
+        }
     }
     found
 }
@@ -400,15 +442,27 @@ pub fn local_paths() -> Vec<(&'static str, String)> {
 /// number is the argument size in bytes. `LocalGetMCBType@12` is three words,
 /// taken here as a number and a buffer with its length.
 pub fn discover() -> Vec<(i32, String)> {
-    let mut found = Vec::new();
-    // SAFETY: mcbloc32 is already in the process, beside Mcbcio32. Both calls
-    // below are given buffers whose lengths are passed alongside them.
+    // SAFETY: mcbloc32 normally sits in the process already, beside Mcbcio32,
+    // and `module_in_process` takes that copy first. Both calls below are
+    // given buffers whose lengths are passed alongside them.
     unsafe {
         let name = CString::new("mcbloc32.dll").expect("a literal without NUL");
-        let module = LoadLibraryA(name.as_ptr());
+        let (module, added) = module_in_process(&name);
         if module.is_null() {
-            return found;
+            return Vec::new();
         }
+        let found = discover_in(module);
+        if added {
+            FreeLibrary(module);
+        }
+        found
+    }
+}
+
+/// The walk itself, separated so every early exit still balances the load.
+unsafe fn discover_in(module: *mut c_void) -> Vec<(i32, String)> {
+    let mut found = Vec::new();
+    unsafe {
         let highest = CString::new("LocalGetHighestMCBNumber").expect("literal");
         let kind = CString::new("LocalGetMCBType").expect("literal");
         let highest = GetProcAddress(module, highest.as_ptr());

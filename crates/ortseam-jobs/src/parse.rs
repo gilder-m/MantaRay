@@ -256,6 +256,9 @@ fn split_args(text: &str) -> Vec<String> {
                     args.push(current.trim().to_string());
                     current.clear();
                 }
+                // Whitespace ends an argument, quoted or not: without this,
+                // everything after `"pw" ` glues onto the previous argument.
+                pushed_quoted = false;
             }
             c => {
                 if pushed_quoted {
@@ -297,6 +300,24 @@ mod tests {
     #[test]
     fn an_unquoted_name_is_one_argument() {
         assert_eq!(split_args("TEST001.CHN"), vec!["TEST001.CHN"]);
+    }
+
+    #[test]
+    fn space_separated_quoted_arguments_stay_separate() {
+        // The bug this pins: only a comma reset the after-quote state, so
+        // `LOCK "pw" "owner"` locked the detector with password "pwowner"
+        // and owner "" - a password the operator never typed.
+        assert_eq!(split_args("\"pw\" \"owner\""), vec!["pw", "owner"]);
+        assert_eq!(
+            split_args("\"6/29/2012\" \"14:05:00\" 900"),
+            vec!["6/29/2012", "14:05:00", "900"]
+        );
+    }
+
+    #[test]
+    fn text_directly_after_a_closing_quote_still_continues_the_argument() {
+        assert_eq!(split_args("\"a b\"c"), vec!["a bc"]);
+        assert_eq!(split_args("\"a\"bc \"d\""), vec!["abc", "d"]);
     }
 
     #[test]

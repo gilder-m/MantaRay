@@ -117,8 +117,12 @@ impl DisplayState {
             return;
         }
         let grew_from_nothing = self.length == 0;
+        // A view that covered everything keeps covering everything: raising
+        // the conversion gain 1024 -> 8192 must not leave the window showing
+        // the first eighth of the new spectrum.
+        let covered_everything = self.view_start == 0 && self.view_width >= self.length;
         self.length = length;
-        if grew_from_nothing || self.view_width > length {
+        if grew_from_nothing || covered_everything || self.view_width > length {
             self.view_width = length;
             self.view_start = 0;
         }

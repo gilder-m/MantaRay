@@ -2,6 +2,107 @@
 
 ## Unreleased
 
+**Question and answer stay together on the bridge (2026-08-06).** Reviewing
+the work below found that giving the bridge transport a ten-second timeout
+had introduced a way for it to answer the wrong question. A timed-out
+exchange left its late reply in the channel, so the next command read that
+reply as its own and every reading afterwards was the previous one's - for as
+long as the connection lasted, and silently: a status poll that lands on a
+`DATA` line parses as no counts and not counting, which is exactly what an
+idle instrument looks like. A stall that long needs nothing exotic; a
+suspended laptop is past ten seconds on its own. The transport now counts the
+replies still owed by commands it gave up on and discards that many before
+believing an answer, so it either recovers alignment or keeps failing - never
+returns a reply belonging to something else. Alongside it, the bridge reduces
+each reply to the one line the protocol allows: passthrough relays the
+instrument's own words now, a reply is only cut at a carriage return or a
+NUL, and a lone line feed in one would have arrived as two answers and put
+every later question with the wrong one.
+
+**The audit's open list, worked through (2026-08-06).** Everything the
+2026-08-04 audit left in TODO.md is fixed except what needs the bench or a
+product decision; TODO.md now holds only those. In severity order:
+
+- *Global shortcuts stand down while typing.* Every unmodified key binding -
+  Delete, Insert, Home/End, the arrows, `+ - / =`, `A`, `5` - now yields to
+  a focused text field, as Escape always did. Pressing Delete to fix a typo
+  in the Calibrate dialog's energy box no longer silently clears the region
+  under the marker, and typing "511" into an energy box no longer recentres
+  the view.
+- *Job `WAIT`s wait, and job presets reach the wire.* On a real instrument,
+  `WAIT n` now spends n wall-clock seconds and `WAIT` polls a few times a
+  second until the preset stops the count - previously both returned in
+  milliseconds, so the manual's own `START / WAIT 300 / STOP` pattern saved
+  a near-empty spectrum; in the desktop application the job now parks
+  between frames, so the interface stays alive for the whole count instead
+  of freezing while hammering the wire. Job `SET_PRESET_*` goes through
+  `set_presets` and reaches the instrument, where before it wrote only a
+  client-side mirror that died with the process. The simulator keeps its
+  faster-than-real-time fast-forward throughout.
+- *A quoted job argument followed by a space.* `LOCK "pw" "owner"` parsed as
+  password `pwowner` with an empty owner - a password the operator never
+  typed, on a detector now locked with it. Whitespace now ends a quoted
+  argument exactly as a comma does.
+- *One corrupt reply cannot take down the client.* A malformed `SHOW_DATA`
+  line - a huge declared count, a word that is not a number, fewer words
+  than declared - is now a reported error that leaves the last good
+  spectrum standing. Previously a huge count aborted the whole process
+  inside an allocation, and a garbled word quietly became zero counts.
+- *File readers refuse corrupt lengths instead of allocating them.* A
+  `.Spe` whose `$DATA:` range declares nine hundred million channels, a
+  list-mode file whose channel-count field was rewritten, an N42 whose
+  runs of zeros are individually modest but cumulatively gigabytes, and a
+  crafted `.Lib` whose 65535 nuclides all share one 65535-peak chain are
+  all errors now, not aborts or hangs. The N42 element walk is a loop
+  rather than recursion, so a crafted file cannot overflow the stack.
+- *The Windows IOCTL path is sound on 64-bit.* OVERLAPPED was modelled as
+  five pointer-sized words, which on x86_64 leaves the real `hEvent` null -
+  the kernel signalled the file handle instead, ambiguous the moment two
+  requests ever overlap. It is now a proper `#[repr(C)]` struct, correct on
+  both widths. When a timed-out request cannot be withdrawn from the
+  driver, the transfer buffers - now heap-owned for exactly this reason -
+  are leaked rather than freed under a kernel that may still write through
+  them, and the device is retired until reopened. Registry enumeration
+  skips an unreadable key instead of hiding every device after it.
+- *The bridge cannot hang the application.* A wedged helper process used to
+  block the pipe read forever; answers now arrive through a reader thread
+  with a ten-second bound, and closing a wedged bridge kills it after two
+  seconds rather than waiting indefinitely.
+- *Dialog state ends with its dialog.* The strip dialog no longer reports
+  "stripped" over a failure; removing a calibration row no longer smears
+  the deleted row's typing onto the row below, and half-typed calibration
+  edits die when the dialog closes; the Report viewer and the Exit and
+  Unsaved-changes questions stay above a maximized plot; the regions
+  sidebar refreshes when the calibration, library or settings change, not
+  only when counts do.
+- *Windows are addressed by identity.* Closing a background window no
+  longer silently retargets commands at whatever window happens to be last;
+  the Window menu and double-click focus by window id, so a list that
+  shifted mid-frame cannot activate the wrong one. A view that showed the
+  whole spectrum keeps showing all of it when the conversion gain rises.
+- *The first frame shows before the instrument scan runs*, so launching
+  with no detector configured shows a window immediately instead of
+  appearing to hang for the length of a synchronous probe.
+- *The serve dialect answers with the instrument's own words.* A `$`- or
+  `_`-spelled command passed through the bridge now relays the reply
+  (SEND_MESSAGE can finally see its answer); record parsing checks the
+  record letter, so a desynchronised version record can no longer read as a
+  plausible clock; a UMCBI model name with a space no longer shifts the
+  configuration line's fields.
+- *Simulator edges.* Storing on a locked instrument no longer half-happens;
+  clearing list mode keeps the file's description and calibration;
+  `SEND_MESSAGE("SET_PRESET_…")` respects the same no-change-while-counting
+  rule as the dialog; a served instrument's pole-zero completes while idle;
+  the TCP server survives a poisoned lock and drops a silent client after
+  a minute instead of blocking every later connection.
+- *Job engine edges.* The line number reported after a job ends is the last
+  command's, not the command count; the million-step runaway guard says
+  what it is; the chaos corpus's bare `BEEP` (no such form - the manual
+  gives `BEEP <freq>,<duration>`, `BEEP ID` and `BEEP "String"`) is fixed
+  and the corpus now asserts it parses. UMCBI loading no longer leaks a
+  module reference per failed attempt, unpins its DLL directory on failure,
+  and resolves `mcbloc32.dll` to the copy already in the process.
+
 **Linux drives real hardware (2026-08-05).** The libusb path met an ORTEC 926
 for the first time - it had compiled for months and never moved a byte - and
 every recorded wire-format assumption held on first contact: the `$F`/`$G`
@@ -50,10 +151,14 @@ real verbs, established on the bench by writing values and reading them back
 exactly, are `SET_PEAK_PRESET` and `SET_INTEGRAL_PRESET`, in counts;
 `SET_PRESET_CLEAR` now zeroes all four preset registers. The time presets
 were verified whole: a 10-second live preset set through ortseam's dialect
-stopped the instrument by itself at exactly LT=10.00 s. What still does not
-stop a remote instrument: uncertainty and MDA presets, which are host-side
-calculations no instrument carries - the dialog accepts them but nothing
-evaluates them for a bridged or network detector yet.
+stopped the instrument by itself at exactly LT=10.00 s. Uncertainty and MDA
+presets are host-side calculations no instrument carries, and this was
+recorded here as not working on a remote instrument at all; that was wrong.
+They are evaluated from the mirrored spectrum on every frame and STOP is sent
+when one is satisfied. What is really different from a time preset is where
+the stop lives: the instrument's own registers hold a time preset and stop it
+whether or not anything is watching, while these hold only for as long as
+ortseam is running.
 
 The first double-click on the bench's own Cs-137 peak found another gap:
 without a region or a shape calibration, Peak Info guessed the peak to be

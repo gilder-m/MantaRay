@@ -22,7 +22,7 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use ortseam_core::{EnergyCalibration, Roi, ShapeCalibration, Spectrum};
 
-use crate::FormatError;
+use crate::{FormatError, MOST_CHANNELS};
 
 /// Reads a `.Spe` file.
 pub fn read(text: &str) -> Result<Spectrum, FormatError> {
@@ -39,7 +39,14 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
     let mut range_parts = range.split_whitespace();
     let first: usize = parse_field(range_parts.next(), "$DATA: first channel")?;
     let last: usize = parse_field(range_parts.next(), "$DATA: last channel")?;
-    let count = last.saturating_sub(first) + 1;
+    // The declared range sizes an allocation, so it is not taken on faith: no
+    // real MCB reaches a million channels, and an otherwise ordinary file
+    // saying `0 900000000` would otherwise force gigabytes and an abort.
+    let count = last
+        .checked_sub(first)
+        .and_then(|span| span.checked_add(1))
+        .filter(|count| *count <= MOST_CHANNELS)
+        .ok_or_else(|| FormatError::invalid("$DATA: channel range", format!("{first} {last}")))?;
 
     let mut channels = Vec::with_capacity(count);
     for line in lines.take(count) {
@@ -53,7 +60,10 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
     channels.resize(count, 0);
 
     let mut spectrum = Spectrum::from_counts(channels);
-    spectrum.channel_offset = first as u16;
+    // The offset is sixteen bits everywhere a spectrum carries one; a first
+    // channel beyond it is a corrupt range, not an offset to truncate quietly.
+    spectrum.channel_offset = u16::try_from(first)
+        .map_err(|_| FormatError::invalid("$DATA: first channel", first.to_string()))?;
 
     if let Some((_, lines)) = blocks.iter().find(|(keyword, _)| keyword == "$SPEC_ID:") {
         spectrum.sample_description = lines.join(" ").trim().to_string();

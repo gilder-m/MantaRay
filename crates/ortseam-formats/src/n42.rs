@@ -114,18 +114,22 @@ fn pha_spectrum(text: &str) -> Option<&str> {
 fn next_element<'a>(text: &'a str, name: &str, at: &mut usize) -> Option<&'a str> {
     let open = format!("<{name}");
     let close = format!("</{name}>");
-    let start = text[*at..].find(&open)? + *at;
-    // The tag must end at a delimiter, or <Spectrum> matches <SpectrumFoo>.
-    let after_name = start + open.len();
-    let delimiter = text.as_bytes().get(after_name)?;
-    if !matches!(delimiter, b'>' | b' ' | b'\t' | b'\r' | b'\n' | b'/') {
-        *at = after_name;
-        return next_element(text, name, at);
+    // A loop, deliberately: every `<SpectrumX...` prefix hit is another pass,
+    // and recursing here let a sub-megabyte crafted file overflow the stack.
+    loop {
+        let start = text[*at..].find(&open)? + *at;
+        // The tag must end at a delimiter, or <Spectrum> matches <SpectrumFoo>.
+        let after_name = start + open.len();
+        let delimiter = text.as_bytes().get(after_name)?;
+        if !matches!(delimiter, b'>' | b' ' | b'\t' | b'\r' | b'\n' | b'/') {
+            *at = after_name;
+            continue;
+        }
+        let body_start = text[start..].find('>')? + start + 1;
+        let body_end = text[body_start..].find(&close)? + body_start;
+        *at = body_end + close.len();
+        return Some(&text[body_start..body_end]);
     }
-    let body_start = text[start..].find('>')? + start + 1;
-    let body_end = text[body_start..].find(&close)? + body_start;
-    *at = body_end + close.len();
-    Some(&text[body_start..body_end])
 }
 
 /// The text of the first element of a name, trimmed.
@@ -258,8 +262,10 @@ fn channel_counts(text: &str, compressed: bool) -> Result<Vec<u64>, FormatError>
                     FormatError::invalid("N42", format!("{run:?} is not a number of zeros"))
                 })?;
             // A run long enough to exhaust memory is a corrupt file, not a
-            // sixty-million-channel spectrum.
-            if run > 1 << 24 {
+            // sixty-million-channel spectrum - and the runs accumulate, so
+            // the total is what the cap must hold: sixty-four repeats of a
+            // capped run in a kilobyte of XML used to add up to gigabytes.
+            if run > crate::MOST_CHANNELS || counts.len() + run > crate::MOST_CHANNELS {
                 return Err(FormatError::invalid(
                     "N42",
                     "the channel data claims an impossible run of zeros",
@@ -267,6 +273,9 @@ fn channel_counts(text: &str, compressed: bool) -> Result<Vec<u64>, FormatError>
             }
             counts.resize(counts.len() + run, 0);
         } else {
+            if counts.len() >= crate::MOST_CHANNELS {
+                return Err(FormatError::invalid("N42", "the channel data does not end"));
+            }
             counts.push(count);
         }
     }

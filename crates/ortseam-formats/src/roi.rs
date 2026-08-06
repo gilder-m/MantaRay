@@ -36,6 +36,10 @@ pub fn write(rois: &RoiSet) -> Vec<u8> {
     out.extend_from_slice(&0i16.to_le_bytes());
     for roi in rois.iter() {
         // Zero ends the list, so a region touching channel 0 starts at 1.
+        // The clamp at i16::MAX is the format itself: .Roi stores sixteen-bit
+        // signed channel numbers, so a region above channel 32767 cannot be
+        // written faithfully - it is clamped rather than wrapped, and a
+        // spectrum that needs more keeps its regions in .Spe or native JSON.
         let first = roi.start.clamp(1, i16::MAX as usize) as i16;
         let end = (roi.end + 1).min(i16::MAX as usize) as i16;
         out.extend_from_slice(&first.to_le_bytes());

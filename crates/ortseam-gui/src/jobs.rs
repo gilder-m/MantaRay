@@ -18,6 +18,66 @@ pub type JobRun = Runner;
 /// How many commands are carried out per frame.
 const COMMANDS_PER_FRAME: usize = 4;
 
+/// A wait the job is in the middle of, checked once per frame.
+///
+/// A real instrument counts in real time, so its WAITs are wall-clock: looping
+/// to completion inside one frame would freeze the interface for the whole
+/// count while hammering the wire. Registering the wait here instead lets the
+/// frame finish; the runner is simply not stepped again until the wait is
+/// over. (The simulator runs faster than real time and never comes here - its
+/// waits fast-forward it within the frame, as they always have.)
+pub enum JobWait {
+    /// WAIT: until the instrument stops itself (a preset is set).
+    Stop,
+    /// WAIT n: until the wall clock reaches the deadline.
+    Until(std::time::Instant),
+    /// RUN_AND_WAIT: until the program exits.
+    Program(String, std::process::Child),
+    /// WAIT_OPTIMIZE: until the instrument stops optimizing.
+    Optimize,
+    /// Pole-zero WAIT: until the instrument stops pole-zeroing.
+    PoleZero,
+}
+
+/// Whether the pending wait, if any, is over.
+///
+/// `Ok(true)` steps the job this frame, `Ok(false)` leaves it waiting, and
+/// `Err` is a wait that ended badly and stops the job.
+fn wait_over(app: &mut App) -> Result<bool, String> {
+    let Some(mut wait) = app.job_wait.take() else {
+        return Ok(true);
+    };
+    let done = match wait {
+        JobWait::Stop => match app.job_detector() {
+            Some(detector) => !app.detectors[detector].is_active(),
+            None => true,
+        },
+        JobWait::Until(deadline) => std::time::Instant::now() >= deadline,
+        JobWait::Program(ref program, ref mut child) => {
+            let mut child_done = false;
+            match child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) if status.success() => child_done = true,
+                Ok(Some(status)) => return Err(format!("{program} exited with {status}")),
+                Err(error) => return Err(format!("waiting on {program}: {error}")),
+            }
+            child_done
+        }
+        JobWait::Optimize => match app.job_detector() {
+            Some(detector) => !app.detectors[detector].optimizing(),
+            None => true,
+        },
+        JobWait::PoleZero => match app.job_detector() {
+            Some(detector) => !app.detectors[detector].pole_zeroing(),
+            None => true,
+        },
+    };
+    if !done {
+        app.job_wait = Some(wait);
+    }
+    Ok(done)
+}
+
 /// Starts a job file.
 pub fn start(app: &mut App, path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
@@ -29,17 +89,39 @@ pub fn start(app: &mut App, path: &Path) -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("."));
     app.job_variables.current_dir = app.job_directory.display().to_string();
     app.job = Some(Runner::new(job));
+    // A fresh job must not inherit a dead one's pending wait.
+    app.job_wait = None;
     Ok(())
 }
 
 /// Carries out the next few commands of a running job.
 pub fn step(app: &mut App) {
+    if app.job.is_none() {
+        // A cancelled job takes its pending wait with it.
+        app.job_wait = None;
+        return;
+    }
+    match wait_over(app) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            app.status = format!("job stopped: {error}");
+            app.job = None;
+            return;
+        }
+    }
     let Some(mut runner) = app.job.take() else {
         return;
     };
     for _ in 0..COMMANDS_PER_FRAME {
         match runner.step(app) {
-            Ok(true) => {}
+            // A command that registered a wait ends the frame's batch: the
+            // commands after it must not run until the wait is over.
+            Ok(true) => {
+                if app.job_wait.is_some() {
+                    break;
+                }
+            }
             Ok(false) => {
                 app.status = format!("job finished: {} command(s)", runner.outcome().commands);
                 return;
@@ -170,20 +252,40 @@ impl JobHost for App {
         if self.detectors[detector].presets().is_empty() {
             return Err(JobError::host("WAIT with no preset set would never finish"));
         }
-        // The simulator runs far faster than real time; step it to the preset.
-        let mut guard = 0usize;
-        while self.detectors[detector].is_active() && guard < 2_000_000 {
-            advance(&mut self.detectors[detector], 1.0).map_err(device)?;
-            guard += 1;
+        if self.detectors[detector].as_simulated().is_some() {
+            // The simulator runs far faster than real time; step it to the preset.
+            let mut guard = 0usize;
+            while self.detectors[detector].is_active() && guard < 2_000_000 {
+                advance(&mut self.detectors[detector], 1.0).map_err(device)?;
+                guard += 1;
+            }
+        } else if self.detectors[detector].is_active() {
+            // A real instrument stops itself in real time; the job waits a
+            // frame at a time, so the interface stays alive for the count.
+            self.job_wait = Some(JobWait::Stop);
         }
         Ok(())
     }
 
     fn wait_seconds(&mut self, seconds: f64) -> Result<(), JobError> {
-        if let Some(detector) = self.job_detector()
-            && self.detectors[detector].is_active()
-        {
-            advance(&mut self.detectors[detector], seconds).map_err(device)?;
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Ok(());
+        }
+        let Some(detector) = self.job_detector() else {
+            return Ok(());
+        };
+        if self.detectors[detector].as_simulated().is_some() {
+            if self.detectors[detector].is_active() {
+                advance(&mut self.detectors[detector], seconds).map_err(device)?;
+            }
+        } else {
+            // A real instrument counts in wall-clock time, so WAIT n means n
+            // real seconds - fast-forwarding a remote mirror only bumps its
+            // poll counter, and START / WAIT 300 / STOP saved a near-empty
+            // spectrum.
+            self.job_wait = Some(JobWait::Until(
+                std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds),
+            ));
         }
         Ok(())
     }
@@ -266,8 +368,12 @@ impl JobHost for App {
         let target = self.job_path(&name);
         self.job_variables
             .set_spectrum_path(&target.display().to_string());
-        self.strip_from(target, (factor != 0.0).then_some(factor));
-        Ok(())
+        if self.strip_from(target, (factor != 0.0).then_some(factor)) {
+            Ok(())
+        } else {
+            // strip_from wrote why into the status line.
+            Err(JobError::host(self.status.clone()))
+        }
     }
 
     fn set_strip_name(&mut self, path: &str) -> Result<(), JobError> {
@@ -327,15 +433,12 @@ impl JobHost for App {
     }
 
     fn wait_program(&mut self, program: &str) -> Result<(), JobError> {
-        let mut child = crate::app::spawn_program(program).map_err(JobError::host)?;
-        let status = child
-            .wait()
-            .map_err(|error| JobError::host(error.to_string()))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(JobError::host(format!("{program} exited with {status}")))
-        }
+        // The program runs for as long as it runs; blocking the frame on it
+        // froze the whole interface. The job pauses instead, and the child is
+        // looked in on once per frame.
+        let child = crate::app::spawn_program(program).map_err(JobError::host)?;
+        self.job_wait = Some(JobWait::Program(program.to_string(), child));
+        Ok(())
     }
 
     fn zoom(
@@ -390,10 +493,14 @@ impl JobHost for App {
         let detector = self
             .job_detector()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
-        let mut guard = 0;
-        while self.detectors[detector].optimizing() && guard < 100_000 {
-            advance(&mut self.detectors[detector], 0.5).map_err(device)?;
-            guard += 1;
+        if self.detectors[detector].as_simulated().is_some() {
+            let mut guard = 0;
+            while self.detectors[detector].optimizing() && guard < 100_000 {
+                advance(&mut self.detectors[detector], 0.5).map_err(device)?;
+                guard += 1;
+            }
+        } else if self.detectors[detector].optimizing() {
+            self.job_wait = Some(JobWait::Optimize);
         }
         Ok(())
     }
@@ -402,10 +509,14 @@ impl JobHost for App {
         let detector = self
             .job_detector()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
-        let mut guard = 0;
-        while self.detectors[detector].pole_zeroing() && guard < 100_000 {
-            advance(&mut self.detectors[detector], 0.5).map_err(device)?;
-            guard += 1;
+        if self.detectors[detector].as_simulated().is_some() {
+            let mut guard = 0;
+            while self.detectors[detector].pole_zeroing() && guard < 100_000 {
+                advance(&mut self.detectors[detector], 0.5).map_err(device)?;
+                guard += 1;
+            }
+        } else if self.detectors[detector].pole_zeroing() {
+            self.job_wait = Some(JobWait::PoleZero);
         }
         Ok(())
     }

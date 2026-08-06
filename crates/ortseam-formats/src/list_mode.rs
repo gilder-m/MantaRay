@@ -219,7 +219,15 @@ pub fn read(bytes: &[u8]) -> Result<ListModeFile, FormatError> {
         });
     }
     cursor.skip(2)?;
+    // Sizes histograms later (`to_spectrum`), so a corrupt field must not be
+    // stored to abort there: ~4.29e9 channels is ~34 GB of zeros.
     let channel_count = cursor.u32()? as usize;
+    if channel_count > crate::MOST_CHANNELS {
+        return Err(FormatError::invalid(
+            "channel count",
+            channel_count.to_string(),
+        ));
+    }
     let live_time = cursor.f64()?;
     let real_time = cursor.f64()?;
     let event_count = cursor.u32()? as usize;

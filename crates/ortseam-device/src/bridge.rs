@@ -14,9 +14,19 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
 
 use crate::error::DeviceError;
 use crate::transport::Transport;
+
+/// How long one answer may take before the bridge is declared wedged.
+///
+/// The slowest real operation - a whole-spectrum read through ORTEC's own
+/// library - is around a sixteenth of a second; ten of them is a helper that
+/// is not coming back, and blocking forever on it would hang the application
+/// (the TCP transport has had the same guard from the start).
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The helper's name. It sits beside ortseam in a normal installation.
 #[cfg(windows)]
@@ -43,11 +53,48 @@ pub fn no_console(command: &mut Command) {
 }
 
 /// A helper process, kept alive for as long as the instrument is open.
+///
+/// The helper's answers arrive through a reader thread and a channel rather
+/// than a direct pipe read, because a pipe read cannot be given a timeout: a
+/// wedged helper would hang `exchange` - and with it the interface - forever.
 pub struct BridgeTransport {
     child: Child,
     writer: Option<ChildStdin>,
-    reader: BufReader<ChildStdout>,
+    lines: Receiver<std::io::Result<String>>,
+    /// How many replies are still owed by commands already given up on.
+    ///
+    /// The helper answers every command with exactly one line, so a timed-out
+    /// exchange leaves one line still on its way. Discarding that many before
+    /// believing an answer keeps question and answer together; without it the
+    /// late reply becomes the next command's answer and every reading after
+    /// it is the previous one's - silently, and for as long as the connection
+    /// lasts. A stall long enough to matter needs nothing exotic: a suspended
+    /// laptop is past ten seconds on its own.
+    owed: usize,
     peer: String,
+}
+
+/// Reads the helper's answers for the channel until it closes.
+fn read_lines(stdout: ChildStdout, sender: std::sync::mpsc::Sender<std::io::Result<String>>) {
+    let mut reader = BufReader::new(stdout);
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return,
+            Ok(_) => {
+                if sender
+                    .send(Ok(line.trim_end_matches(['\r', '\n']).to_string()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                return;
+            }
+        }
+    }
 }
 
 impl BridgeTransport {
@@ -85,10 +132,13 @@ impl BridgeTransport {
             address: executable.display().to_string(),
             detail: "the bridge has no output".into(),
         })?;
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || read_lines(stdout, sender));
         Ok(Self {
             child,
             writer: Some(writer),
-            reader: BufReader::new(stdout),
+            lines,
+            owed: 0,
             peer: format!("detector {detector} through the bridge"),
         })
     }
@@ -131,15 +181,26 @@ impl Transport for BridgeTransport {
             .and_then(|_| writer.write_all(b"\n"))
             .and_then(|_| writer.flush())
             .map_err(|error| failed(error.to_string()))?;
-        let mut line = String::new();
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .map_err(|error| failed(error.to_string()))?;
-        if read == 0 {
-            return Err(failed("the bridge stopped".into()));
+        loop {
+            match self.lines.recv_timeout(EXCHANGE_TIMEOUT) {
+                // A line owed to a command that was given up on is that
+                // command's answer, not this one's: discard it and keep
+                // waiting for the one that belongs here.
+                Ok(Ok(_)) if self.owed > 0 => self.owed -= 1,
+                Ok(Ok(line)) => return Ok(line),
+                Ok(Err(error)) => return Err(failed(error.to_string())),
+                Err(RecvTimeoutError::Timeout) => {
+                    self.owed += 1;
+                    return Err(failed(format!(
+                        "no answer to {command:?} within {} seconds",
+                        EXCHANGE_TIMEOUT.as_secs()
+                    )));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(failed("the bridge stopped".into()));
+                }
+            }
         }
-        Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 
     fn peer(&self) -> String {
@@ -155,6 +216,20 @@ impl Drop for BridgeTransport {
         if let Some(writer) = self.writer.take() {
             drop(writer);
         }
-        let _ = self.child.wait();
+        // A bounded wait: a healthy helper exits the moment its input closes,
+        // and a wedged one must not hang the drop - it is killed instead, and
+        // the final wait reaps what kill leaves.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
     }
 }

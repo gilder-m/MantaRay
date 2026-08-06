@@ -325,6 +325,17 @@ impl SimulatedMcb {
         }
     }
 
+    /// What every road to the presets must check: unlocked, and not counting.
+    fn presets_busy_check(&self, command: &str) -> Result<(), DeviceError> {
+        self.ensure_unlocked()?;
+        if self.active {
+            return Err(DeviceError::Busy {
+                detail: format!("{command}: presets cannot be changed while counting"),
+            });
+        }
+        Ok(())
+    }
+
     fn dead_fraction(&self) -> f64 {
         let rate = self.source.input_rate();
         let tau = self.source.dead_time_us * 1e-6;
@@ -463,8 +474,13 @@ impl Mcb for SimulatedMcb {
         self.live_time = 0.0;
         self.stored_counts = 0;
         if let Some(list) = &mut self.list {
+            // Clearing empties the events, not the identity: the description
+            // and calibration set_mode gave the file must survive, as they do
+            // on the histogram side.
             let mut fresh = ListModeFile::new(list.channel_count);
             fresh.detector_id = self.identity.number;
+            fresh.detector_description = self.identity.description.clone();
+            fresh.energy_calibration = self.raw.energy_calibration.clone();
             self.list = Some(fresh);
         }
         Ok(())
@@ -729,6 +745,9 @@ impl Mcb for SimulatedMcb {
                 detail: "stop the acquisition before storing".into(),
             });
         }
+        // The clear at the end refuses a locked instrument; refusing here
+        // keeps store-and-clear one action, not a store that half happened.
+        self.ensure_unlocked()?;
         let mut snapshot = self.spectrum().clone();
         snapshot.real_time = self.real_time;
         snapshot.live_time = self.live_time;
@@ -810,28 +829,30 @@ impl Mcb for SimulatedMcb {
                 self.properties.amplifier.coarse_gain = number()?;
                 Ok("OK".to_string())
             }
+            // Through `presets_busy_check`, so the wire cannot do what
+            // `set_presets` refuses: changing presets mid-count.
             "SET_PRESET_REAL" => {
-                self.ensure_unlocked()?;
+                self.presets_busy_check(trimmed)?;
                 self.properties.presets.real_time = Some(number()?);
                 Ok("OK".to_string())
             }
             "SET_PRESET_LIVE" => {
-                self.ensure_unlocked()?;
+                self.presets_busy_check(trimmed)?;
                 self.properties.presets.live_time = Some(number()?);
                 Ok("OK".to_string())
             }
             "SET_PRESET_COUNT" => {
-                self.ensure_unlocked()?;
+                self.presets_busy_check(trimmed)?;
                 self.properties.presets.roi_peak = Some(number()? as u64);
                 Ok("OK".to_string())
             }
             "SET_PRESET_INTEG" | "SET_PRESET_INTEGRAL" => {
-                self.ensure_unlocked()?;
+                self.presets_busy_check(trimmed)?;
                 self.properties.presets.roi_integral = Some(number()? as u64);
                 Ok("OK".to_string())
             }
             "SET_PRESET_CLEAR" => {
-                self.ensure_unlocked()?;
+                self.presets_busy_check(trimmed)?;
                 self.properties.presets.clear();
                 Ok("OK".to_string())
             }

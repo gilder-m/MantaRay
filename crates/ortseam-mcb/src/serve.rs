@@ -74,12 +74,32 @@ pub fn run(instrument: &dyn Instrument) -> Result<(), String> {
             continue;
         }
         let reply = session.handle(command);
+        // One command, one line. Passthrough relays the instrument's own
+        // words, and a reply is only cut at a carriage return or a NUL - a
+        // lone line feed in it would arrive as two answers and pair every
+        // later question with the wrong one, for as long as the connection
+        // lasts. The instrument's text is not this program's to trust.
+        let reply = one_line(&reply);
         writeln!(output, "{reply}").map_err(|error| format!("writing a reply: {error}"))?;
         output
             .flush()
             .map_err(|error| format!("flushing a reply: {error}"))?;
     }
     Ok(())
+}
+
+/// A reply reduced to the one line the protocol allows.
+///
+/// Control characters become spaces rather than disappearing, so that a reply
+/// that arrives mangled still reads as mangled instead of silently closing up
+/// into something plausible.
+fn one_line(reply: &str) -> String {
+    reply
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// What the bridge remembers between commands.
@@ -125,10 +145,20 @@ impl Session<'_> {
         }
     }
 
-    /// Sends a command through untouched and reports OK.
+    /// Sends a command through untouched and relays what came back.
+    ///
+    /// A SHOW sent through SEND_MESSAGE deserves its answer, not a flat OK
+    /// that hides it. A valid SET answers an empty reply (indistinguishable
+    /// from an unknown verb - the 926 will not say), and the dialect's answer
+    /// for that is OK.
     fn pass(&mut self, command: &str) -> Result<String, String> {
-        self.instrument.command(command)?;
-        Ok("OK".into())
+        let reply = self.instrument.command(command)?;
+        let reply = reply.trim();
+        if reply.is_empty() {
+            Ok("OK".into())
+        } else {
+            Ok(reply.to_string())
+        }
     }
 
     fn clear(&mut self) -> Result<String, String> {
@@ -176,10 +206,16 @@ impl Session<'_> {
             .calibration()
             .map(|(a, b, c)| format!(" CAL={a},{b},{c}"))
             .unwrap_or_default();
+        // Space-delimited fields carry no spaces: a UMCBI model name like
+        // "DSPEC 50" would otherwise shift every later field.
+        let model = if model.is_empty() {
+            "MCB".to_string()
+        } else {
+            model.replace(' ', "_")
+        };
         Ok(format!(
-            "MODEL={} SERIAL={} FIRMWARE={} CHANNELS={channels}{calibration}",
-            if model.is_empty() { "MCB" } else { &model },
-            self.instrument.identity(),
+            "MODEL={model} SERIAL={} FIRMWARE={} CHANNELS={channels}{calibration}",
+            self.instrument.identity().replace(' ', "_"),
             record_text(&firmware),
         ))
     }
@@ -204,7 +240,7 @@ impl Session<'_> {
     /// One of the instrument's clocks, in seconds.
     fn clock(&mut self, command: &str) -> Result<f64, String> {
         let reply = self.instrument.command(command)?;
-        Ok(record_number(&reply)? * TICK)
+        Ok(record_number(&reply, 'G')? * TICK)
     }
 
     fn data(&mut self) -> Result<String, String> {
@@ -288,7 +324,7 @@ impl ViaUsb {
         let serial = serial_of(device.path());
         let memory = crate::dpm::Dpm::new(&device);
         let gain = memory.command("SHOW_GAIN_CONVERSION")?;
-        let channels = record_number(&gain)
+        let channels = record_number(&gain, 'C')
             .map_err(|_| format!("SHOW_GAIN_CONVERSION answered {gain:?}"))?
             as usize;
         if channels == 0 || channels > 1 << 20 {
@@ -331,7 +367,7 @@ impl Instrument for ViaUsb {
         // `$C00001088` when the ADC is acquiring, `$C00000087` when it is not.
         self.command("SHOW_ACTIVE")
             .ok()
-            .and_then(|reply| record_number(&reply).ok())
+            .and_then(|reply| record_number(&reply, 'C').ok())
             .is_some_and(|active| active != 0.0)
     }
     fn model(&self) -> String {
@@ -389,7 +425,7 @@ impl ViaDirect {
     pub fn open(device: crate::direct::Device) -> Result<Self, String> {
         let memory = crate::dpm::Dpm::new(&device);
         let gain = memory.command("SHOW_GAIN_CONVERSION")?;
-        let channels = record_number(&gain)
+        let channels = record_number(&gain, 'C')
             .map_err(|_| format!("SHOW_GAIN_CONVERSION answered {gain:?}"))?
             as usize;
         if channels == 0 || channels > 1 << 20 {
@@ -431,7 +467,7 @@ impl Instrument for ViaDirect {
         // `$C00001088` when the ADC is acquiring, `$C00000087` when it is not.
         self.command("SHOW_ACTIVE")
             .ok()
-            .and_then(|reply| record_number(&reply).ok())
+            .and_then(|reply| record_number(&reply, 'C').ok())
             .is_some_and(|active| active != 0.0)
     }
     fn model(&self) -> String {
@@ -497,11 +533,17 @@ pub fn calibration_for(mcb: i32) -> Option<(f64, f64, f64)> {
 ///
 /// A record is `$`, a letter, fixed-width decimal fields, then three digits of
 /// checksum. Only the leading field is wanted here, and every record this is
-/// used on carries exactly one.
-fn record_number(reply: &str) -> Result<f64, String> {
-    let digits: String = reply.chars().filter(char::is_ascii_digit).collect();
-    if digits.len() <= 3 {
-        return Err(format!("{reply:?} carries no number"));
+/// used on carries exactly one. The letter is checked: under a reply desync a
+/// version record's digits would otherwise parse as a plausible clock.
+fn record_number(reply: &str, letter: char) -> Result<f64, String> {
+    let body = reply
+        .trim()
+        .strip_prefix('$')
+        .and_then(|body| body.strip_prefix(letter))
+        .ok_or_else(|| format!("{reply:?} is not a ${letter} record"))?;
+    let digits: String = body.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() <= 3 || digits.len() != body.len() {
+        return Err(format!("{reply:?} does not carry a ${letter} number"));
     }
     digits[..digits.len() - 3]
         .parse()
@@ -526,19 +568,24 @@ mod tests {
     #[test]
     fn a_clock_record_loses_its_checksum() {
         // The reply the 926 gave for SHOW_TRUE while MAESTRO showed 157851.12 s.
-        assert_eq!(record_number("$G0007892556117").unwrap(), 7_892_556.0);
+        assert_eq!(record_number("$G0007892556117", 'G').unwrap(), 7_892_556.0);
         assert!((7_892_556.0 * TICK - 157_851.12).abs() < 1e-6);
     }
 
     #[test]
     fn a_conversion_gain_record_reads_as_its_channel_count() {
-        assert_eq!(record_number("$C08192107").unwrap(), 8192.0);
+        assert_eq!(record_number("$C08192107", 'C').unwrap(), 8192.0);
     }
 
     #[test]
-    fn a_record_with_nothing_in_it_is_refused() {
-        assert!(record_number("$F0926-001").is_err() || record_number("$C").is_err());
-        assert!(record_number("").is_err());
+    fn the_wrong_record_letter_is_refused_not_read_as_a_number() {
+        // Under a reply desync, a version record's digits would parse as a
+        // plausible clock - "$F0926-001" carries 0926001, which after the
+        // checksum strip reads as 926. The letter check is what refuses it.
+        assert!(record_number("$F0926-001", 'G').is_err());
+        assert!(record_number("$G0007892556117", 'C').is_err());
+        assert!(record_number("$C", 'C').is_err());
+        assert!(record_number("", 'G').is_err());
     }
 
     #[test]
@@ -676,8 +723,53 @@ mod tests {
             instrument: &bench,
             total: 0,
         };
-        assert_eq!(session.handle("SET_GAIN_CONVERSION 8192"), "OK");
-        assert_eq!(bench.sent.borrow()[..], ["SET_GAIN_CONVERSION 8192"]);
+        // The instrument's own answer comes back - a SHOW through
+        // SEND_MESSAGE deserves its reply, not a flat OK over it.
+        assert_eq!(session.handle("SET_GAIN_CONVERSION 8192"), "%000000069");
+        assert_eq!(session.handle("SHOW_TRUE"), "$G0007892556117");
+        assert_eq!(
+            bench.sent.borrow()[..],
+            ["SET_GAIN_CONVERSION 8192", "SHOW_TRUE"]
+        );
+    }
+
+    #[test]
+    fn an_empty_reply_from_a_valid_set_reads_as_ok() {
+        // The 926 answers a valid SET with an empty reply; the dialect's
+        // answer for "it worked, nothing to say" is OK, not a blank line.
+        struct Silent;
+        impl Instrument for Silent {
+            fn command(&self, _text: &str) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn channels(&self) -> usize {
+                4
+            }
+            fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
+                Ok(vec![0; 4])
+            }
+            fn is_counting(&self) -> bool {
+                false
+            }
+            fn model(&self) -> String {
+                String::new()
+            }
+            fn identity(&self) -> String {
+                "0".into()
+            }
+            fn calibration(&self) -> Option<(f64, f64, f64)> {
+                None
+            }
+            fn route(&self) -> String {
+                "a silent double".into()
+            }
+        }
+        let silent = Silent;
+        let mut session = Session {
+            instrument: &silent,
+            total: 0,
+        };
+        assert_eq!(session.handle("SET_GAIN_STABILIZER 1"), "OK");
     }
 
     #[test]
@@ -691,6 +783,17 @@ mod tests {
             session.handle("SHOW_CONFIGURATION"),
             "MODEL=0926-001 SERIAL=08134079 FIRMWARE=0926-001 CHANNELS=4"
         );
+    }
+
+    #[test]
+    fn a_reply_is_reduced_to_one_line_before_it_is_written() {
+        // A reply is only cut at a carriage return or a NUL, so a lone line
+        // feed reaches here. Two lines for one command would pair every later
+        // question with the wrong answer, permanently.
+        assert_eq!(one_line("$G0007892556117"), "$G0007892556117");
+        assert_eq!(one_line("DATA 2 1\n2"), "DATA 2 1 2");
+        assert_eq!(one_line("ERR bad\nreply\ttext"), "ERR bad reply text");
+        assert!(!one_line("\n\n").contains('\n'));
     }
 
     #[test]

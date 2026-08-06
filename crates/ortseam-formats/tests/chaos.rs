@@ -74,6 +74,48 @@ fn every_reader_survives_truncations_of_a_valid_file() {
 }
 
 #[test]
+fn a_declared_length_cannot_force_an_allocation() {
+    // Lengths in these files size Vec allocations, so a corrupt length must
+    // be an error, never gigabytes and an uncatchable abort. Each of these is
+    // an otherwise ordinary file whose one length field lies.
+
+    // .Spe: an ordinary header declaring nine hundred million channels.
+    let spe = "$SPEC_ID:\nchaos\n$DATA:\n0 900000000\n0\n1\n2\n";
+    assert!(
+        ortseam_formats::spe::read(spe).is_err(),
+        ".Spe must refuse the range"
+    );
+    // And a first channel past the sixteen-bit offset a spectrum can carry.
+    let offset = "$DATA:\n70000 70003\n0\n1\n2\n3\n";
+    assert!(
+        ortseam_formats::spe::read(offset).is_err(),
+        ".Spe must refuse a first channel past u16"
+    );
+
+    // List mode: a valid file with the channel-count field rewritten to u32::MAX.
+    let mut list = ortseam_formats::ListModeFile::new(1024);
+    list.push(0.5, 100);
+    let mut bytes = ortseam_formats::list_mode::write(&list).expect("write");
+    bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(
+        ortseam_formats::list_mode::read(&bytes).is_err(),
+        "list mode must refuse the channel count"
+    );
+
+    // N42: runs of zeros that are individually modest but add up to gigabytes.
+    let mut runs = String::from("<N42InstrumentData><Measurement><Spectrum>");
+    runs.push_str("<ChannelData Compression=\"CountedZeroes\">");
+    for _ in 0..64 {
+        runs.push_str("0 16000000 ");
+    }
+    runs.push_str("</ChannelData></Spectrum></Measurement></N42InstrumentData>");
+    assert!(
+        ortseam_formats::n42::from_str(&runs).is_err(),
+        "N42 must refuse the cumulative run"
+    );
+}
+
+#[test]
 fn corrupt_bodies_behind_valid_headers_are_survived() {
     let mut spectrum = ortseam_core::Spectrum::new(64);
     spectrum.channels[10] = 1000;

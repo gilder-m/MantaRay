@@ -33,6 +33,14 @@ use thiserror::Error;
 pub use ascii::AsciiOptions;
 pub use list_mode::{ListEvent, ListModeFile, ListRange};
 
+/// The most channels any reader will size an allocation for.
+///
+/// Every channel count in these files arrives from outside and feeds a
+/// `Vec::with_capacity`; a corrupt or hostile length must be an error, never
+/// a multi-gigabyte allocation and an uncatchable abort. No real MCB reaches
+/// a million channels - the largest here is 16k.
+pub(crate) const MOST_CHANNELS: usize = 1 << 20;
+
 /// Anything that can go wrong reading or writing a spectrum file.
 #[derive(Debug, Error)]
 pub enum FormatError {
