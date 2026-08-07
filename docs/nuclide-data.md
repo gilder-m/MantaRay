@@ -40,7 +40,7 @@ which prints what it did:
 ```
 National Nuclear Data Center (NuDat/ENSDF) radiation export, converted 2026-08-07;
 lines at or above 1% emission probability
-read 242295 rows, kept 26852 lines: 2012 nuclides, 26473 lines written to nuclides.json
+read 242295 rows, kept 27402 lines: 2043 nuclides, 27015 lines written to nuclides.json
 ```
 
 Then load `nuclides.json` like any other library.

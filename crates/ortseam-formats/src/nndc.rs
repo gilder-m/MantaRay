@@ -14,11 +14,12 @@
 //!
 //! One row per radiation, per decay branch, per nuclide. The columns this needs
 //! are found by name rather than position, so a wider export - and they vary -
-//! still reads:
+//! still reads, and rows are split on the commas that separate fields rather
+//! than on every comma, because some fields are quoted and hold their own:
 //!
 //! | Column | Used for |
 //! |---|---|
-//! | `Isotope`, `A`, `Element` | the nuclide's name |
+//! | `A`, `Element` | the nuclide's name |
 //! | `Metastable` | the `m` suffix |
 //! | `T1/2 (sec)` | half life |
 //! | `Radiation` | `g` selects the photons; betas and electrons are dropped |
@@ -75,12 +76,14 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
     let mut rows_read = 0usize;
     let mut lines_kept = 0usize;
 
+    // Reused across a quarter of a million rows rather than allocated per row.
+    let mut fields: Vec<String> = Vec::new();
     for row in lines {
         if row.trim().is_empty() {
             continue;
         }
         rows_read += 1;
-        let fields: Vec<&str> = row.split(',').collect();
+        split_row(row, &mut fields);
         let get = |at: usize| fields.get(at).map(|value| value.trim()).unwrap_or("");
 
         // Photons only. The export carries betas, conversion electrons and
@@ -170,6 +173,39 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
     })
 }
 
+/// Splits one row on the commas that separate fields, leaving quoted ones whole.
+///
+/// Splitting on every comma is wrong here, and wrong silently. The spin-parity
+/// column carries values like `"(0-,1-)"` - the ordinary way to write an
+/// undecided assignment - and a comma inside those quotes shifts every column
+/// after it. The four columns this reader needs sit at the end of a forty-two
+/// column row, so all four move together: the row stops looking like a gamma
+/// and is dropped without a word. Against the published export that quietly
+/// costs 550 evaluated lines and 31 nuclides outright, among them Bi-218 from
+/// the radon chain, Rh-102 and Pm-148m.
+///
+/// A doubled quote inside a quoted field is one literal quote, as the format
+/// has it. Rows are still whole lines: a field may hold a comma, but nothing
+/// in this export holds a newline.
+fn split_row(row: &str, into: &mut Vec<String>) {
+    into.clear();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut rest = row.chars().peekable();
+    while let Some(character) = rest.next() {
+        match character {
+            '"' if quoted && rest.peek() == Some(&'"') => {
+                field.push('"');
+                rest.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => into.push(std::mem::take(&mut field)),
+            _ => field.push(character),
+        }
+    }
+    into.push(field);
+}
+
 /// One nuclide as it is being assembled.
 struct Entry {
     half_life_seconds: f64,
@@ -190,8 +226,10 @@ struct Columns {
 
 impl Columns {
     fn find(header: &str) -> Result<Self, FormatError> {
-        let names: Vec<String> = header
-            .split(',')
+        let mut fields = Vec::new();
+        split_row(header, &mut fields);
+        let names: Vec<String> = fields
+            .iter()
             .map(|name| name.trim().to_ascii_lowercase())
             .collect();
         let at = |wanted: &str| -> Result<usize, FormatError> {
@@ -352,6 +390,38 @@ Al24,24,Al,13,11,True,131.3,24Mg,g,,1368.6,100.0
         assert!(built.provenance.contains("National Nuclear Data Center"));
         assert!(built.provenance.contains("ENSDF"));
         assert!(built.rows_read > 0 && built.lines_kept > 0);
+    }
+
+    /// The shape the real export has: a quoted spin-parity holding a comma,
+    /// with the columns that matter sitting after it.
+    const QUOTED: &str = "\
+Isotope,A,Element,JPi,Metastable,T1/2 (sec),Radiation,Rad subtype,Rad Energy,Rad Intensity
+N22,22,N,\"(0-,1-)\",False,0.02,g,,1221.0,2.3
+Cs137,137,Cs,7/2+,False,949252608.0,g,,661.657,85.1
+";
+
+    #[test]
+    fn a_comma_inside_a_quoted_field_does_not_shift_the_columns() {
+        let library = build(QUOTED, 1.0).expect("the export reads").library;
+        let nitrogen = library
+            .nuclide("N-22")
+            .expect("N-22, whose row carries a quoted spin-parity");
+        let line = nitrogen
+            .peaks
+            .iter()
+            .find(|peak| (peak.energy - 1221.0).abs() < 1e-6)
+            .expect("the 1221 keV line, which a naive split loses entirely");
+        assert!((line.yield_percent - 2.3).abs() < 1e-9);
+        // The plain row beside it must still read: the fix cannot have traded
+        // one shape of row for the other.
+        assert!(library.nuclide("Cs-137").is_some(), "the unquoted row too");
+    }
+
+    #[test]
+    fn a_doubled_quote_is_one_literal_quote() {
+        let mut fields = Vec::new();
+        split_row("a,\"b,c\",\"say \"\"hi\"\"\",d", &mut fields);
+        assert_eq!(fields, ["a", "b,c", "say \"hi\"", "d"]);
     }
 
     #[test]

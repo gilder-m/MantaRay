@@ -23,9 +23,18 @@ through NuDat - into a library, keeping every number as evaluated. It selects
 photons and drops betas, conversion electrons and alphas; tells gammas, X-rays
 and the annihilation line apart; names metastable states; keeps the strongest of
 duplicate lines; and records what it converted and when, so a report can cite
-it. Run against the full export it reads 242,295 rows into 2,012 nuclides and
-26,473 lines, and the values land where they should: Cs-137 at 661.657 keV and
+it. Run against the full export it reads 242,295 rows into 2,043 nuclides and
+27,015 lines, and the values land where they should: Cs-137 at 661.657 keV and
 85.1%, Co-60's pair at 99.85 and 99.98%, Eu-152's ladder, K-40 at 1460.82.
+
+Rows are split on the commas that separate fields rather than on every comma.
+Some fields are quoted and hold their own - the spin-parity column carries
+values like `"(0-,1-)"`, which is the ordinary way to write an undecided
+assignment - and a comma inside those quotes shifted every column after it.
+The four columns the reader needs sit at the end of a forty-two column row, so
+all four moved together and the row quietly stopped looking like a gamma. It
+was never wrong, only short: 550 evaluated lines and 31 nuclides went missing
+without a word, among them Bi-218 from the radon chain, Rh-102 and Pm-148m.
 
 See [docs/nuclide-data.md](docs/nuclide-data.md) for where to get an export and
 who to credit - the NNDC and the IAEA for the evaluations, carsus for retrieving
