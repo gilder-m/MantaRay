@@ -69,7 +69,7 @@ pub fn path() -> PathBuf {
 }
 
 /// The name this program stored things under before it was renamed.
-const FORMER_NAME: &str = "ortseam";
+pub(crate) const FORMER_NAME: &str = "ortseam";
 
 /// Where settings and the snapshot live, carrying the old name's across once.
 ///

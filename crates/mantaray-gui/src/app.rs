@@ -185,6 +185,9 @@ pub struct Persisted {
     pub theme: crate::theme::Theme,
     /// The working colours, which may be hand-edited from the scheme.
     pub colors: SpectrumColors,
+    /// Schemes the operator saved or imported, beside the built-in ones.
+    #[serde(default)]
+    pub schemes: Vec<crate::theme::Scheme>,
     /// Files opened lately, most recent first.
     pub recent: Vec<PathBuf>,
     /// Simulation speed.
@@ -703,6 +706,8 @@ pub struct App {
     pub library_path: Option<PathBuf>,
     /// Display colours.
     pub colors: SpectrumColors,
+    /// Schemes the operator saved or imported, beside the built-in ones.
+    pub schemes: Vec<crate::theme::Scheme>,
     /// The colour scheme in force.
     pub theme: crate::theme::Theme,
     /// Undo history.
@@ -753,9 +758,14 @@ pub struct App {
     pending_place: Option<(usize, egui::Rect)>,
     /// Text bound for the clipboard on the next frame.
     pub pending_clipboard: Option<String>,
-    /// The theme egui's own widgets were last dressed in, so a programmatic
-    /// switch (restore, demo states) restyles the chrome on the next frame.
-    applied_theme: Option<crate::theme::Theme>,
+    /// The palette egui's own widgets were last dressed in.
+    ///
+    /// Compared against the whole palette rather than against the name of a
+    /// preset, so that editing a single colour re-dresses the chrome too. When
+    /// this held the preset instead, an edited colour reached the plot and
+    /// stopped there, leaving every selection, hover and link around it in the
+    /// shade the preset had chosen.
+    applied_colors: Option<crate::theme::SpectrumColors>,
     /// Whether a peak search clears the existing regions first (ROI/Auto Clear).
     pub auto_clear_roi: bool,
     /// Whether a logarithmic axis tops out at the next power of ten, the way
@@ -788,14 +798,19 @@ impl App {
     /// dresses the interface in its theme.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::headless();
-        if let Some(text) = cc
-            .storage
-            .and_then(|storage| storage.get_string(crate::APPLICATION_ID))
-            && let Ok(persisted) = serde_json::from_str::<Persisted>(&text)
+        // The key inside the file matters as much as the file's name. Moving
+        // the file across without also looking under the former key would read
+        // an entry that is not there and start with the defaults - which is
+        // the same loss the move was meant to prevent, one step further in.
+        if let Some(text) = cc.storage.and_then(|storage| {
+            storage
+                .get_string(crate::APPLICATION_ID)
+                .or_else(|| storage.get_string(crate::session::FORMER_NAME))
+        }) && let Ok(persisted) = serde_json::from_str::<Persisted>(&text)
         {
             app.restore(persisted);
         }
-        theme::apply(&cc.egui_ctx, app.theme);
+        theme::apply(&cc.egui_ctx, &app.colors);
         app
     }
 
@@ -804,6 +819,7 @@ impl App {
         Persisted {
             theme: self.theme,
             colors: self.colors,
+            schemes: self.schemes.clone(),
             recent: self.recent.clone(),
             time_scale: self.time_scale,
             auto_clear_roi: self.auto_clear_roi,
@@ -819,6 +835,7 @@ impl App {
     pub fn restore(&mut self, persisted: Persisted) {
         self.theme = persisted.theme;
         self.colors = persisted.colors;
+        self.schemes = persisted.schemes;
         self.recent = persisted
             .recent
             .into_iter()
@@ -921,6 +938,7 @@ impl App {
             },
             library_path: None,
             colors: theme.colors(),
+            schemes: Vec::new(),
             theme,
             history: UndoStack::default(),
             status: opening_advice.to_string(),
@@ -946,7 +964,7 @@ impl App {
             pending_collapse: None,
             pending_place: None,
             pending_clipboard: None,
-            applied_theme: None,
+            applied_colors: None,
             auto_clear_roi: false,
             log_decade_top: false,
             last_autosave: Instant::now(),
@@ -3231,6 +3249,13 @@ impl App {
                 self.apply_one(Action::PeakSearch);
                 return;
             }
+            "colours" => {
+                // The theme editor, open on a spectrum: the palette has to be
+                // judged against data, not against an empty plot.
+                self.apply_one(Action::PeakSearch);
+                self.dialogs.open(Dialog::Preferences);
+                return;
+            }
             "cal" => {
                 // The auto-calibration story, as a picture: strip the
                 // calibration, then recover it from the peaks.
@@ -3687,9 +3712,9 @@ impl App {
         self.take_dropped_files(ui.ctx());
         // Keep egui's own widgets dressed in the theme, however it was chosen -
         // Preferences, a restored session, or a demo state.
-        if self.applied_theme != Some(self.theme) {
-            theme::apply(ui.ctx(), self.theme);
-            self.applied_theme = Some(self.theme);
+        if self.applied_colors != Some(self.colors) {
+            theme::apply(ui.ctx(), &self.colors);
+            self.applied_colors = Some(self.colors);
         }
 
         let ctx = ui.ctx().clone();

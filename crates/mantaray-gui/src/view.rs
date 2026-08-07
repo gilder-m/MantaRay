@@ -1512,13 +1512,9 @@ fn draw_peak_info(
         ],
         Stroke::new(1.0, colors.roi.with_alpha(0.55)),
     );
-    // A dark card, so the peak stays visible behind it, with a region-coloured
-    // spine tying it to the peak it describes.
-    painter.rect_filled(
-        box_rect,
-        CornerRadius::same(4),
-        colors.panel.to_color().gamma_multiply(1.45),
-    );
+    // A card lifted off the plot it sits on, with a region-coloured spine tying
+    // it to the peak it describes.
+    painter.rect_filled(box_rect, CornerRadius::same(4), colors.card().to_color());
     painter.rect_stroke(
         box_rect,
         CornerRadius::same(4),

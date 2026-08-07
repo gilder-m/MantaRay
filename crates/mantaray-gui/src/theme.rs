@@ -27,8 +27,83 @@
 use serde::{Deserialize, Serialize};
 
 /// A colour as red, green and blue.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Written as `"#0b1020"` when saved, because a scheme is meant to be shared
+/// and edited by hand, and `[11, 16, 32]` is not a colour anybody can read.
+/// Both forms are accepted when reading, so a palette saved by an earlier
+/// version still loads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl std::fmt::Display for Rgb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{:02x}{:02x}{:02x}", self.0, self.1, self.2)
+    }
+}
+
+impl std::str::FromStr for Rgb {
+    type Err = String;
+
+    /// Reads `#rrggbb`, `rrggbb`, `#rgb` or `rgb`.
+    ///
+    /// The three-digit form doubles each digit, the way it does everywhere
+    /// else: `#f80` is `#ff8800`.
+    ///
+    /// The digits are collected character by character rather than sliced out
+    /// by position. This field is typed into and pasted into, so it will see
+    /// text that is not hexadecimal and not even ASCII, and byte offsets into
+    /// a string of anything else land in the middle of a character and panic.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let refuse = || format!("{text:?} is not a colour - expected #rrggbb or #rgb");
+        let digits: Vec<u8> = text
+            .trim()
+            .trim_start_matches('#')
+            .chars()
+            .map(|c| c.to_digit(16).map(|value| value as u8).ok_or_else(refuse))
+            .collect::<Result<_, _>>()?;
+        match digits[..] {
+            [r, g, b] => Ok(Self(r * 17, g * 17, b * 17)),
+            [r1, r0, g1, g0, b1, b0] => Ok(Self(r1 * 16 + r0, g1 * 16 + g0, b1 * 16 + b0)),
+            _ => Err(refuse()),
+        }
+    }
+}
+
+impl Serialize for Rgb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgb {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Either;
+
+        impl<'de> serde::de::Visitor<'de> for Either {
+            type Value = Rgb;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a colour as \"#rrggbb\" or as three numbers")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Rgb, E> {
+                text.parse().map_err(E::custom)
+            }
+
+            /// The form earlier versions wrote. Kept so that a palette somebody
+            /// tuned by hand is not thrown away by an upgrade.
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Rgb, A::Error> {
+                let mut channel = || {
+                    seq.next_element::<u8>()?
+                        .ok_or_else(|| serde::de::Error::custom("a colour needs three channels"))
+                };
+                Ok(Rgb(channel()?, channel()?, channel()?))
+            }
+        }
+
+        deserializer.deserialize_any(Either)
+    }
+}
 
 impl Rgb {
     /// As an egui colour.
@@ -141,6 +216,13 @@ pub enum Theme {
     AmberCrt,
     /// Light, for bright rooms and printing.
     Paper,
+    /// Grey chrome around a black plot: what instrument software looked like
+    /// when it ran on Windows 95 and nobody had thought to question it.
+    Conductor,
+    /// Ink on drafting paper - light, cool, and quiet enough to print.
+    Blueprint,
+    /// Maximum separation, for poor light and poor eyes.
+    HighContrast,
 }
 
 impl Theme {
@@ -150,7 +232,10 @@ impl Theme {
             Theme::DeepSpace,
             Theme::Midnight,
             Theme::AmberCrt,
+            Theme::Conductor,
+            Theme::HighContrast,
             Theme::Paper,
+            Theme::Blueprint,
         ]
     }
 
@@ -161,12 +246,10 @@ impl Theme {
             Theme::Midnight => "Midnight",
             Theme::AmberCrt => "Amber CRT",
             Theme::Paper => "Paper",
+            Theme::Conductor => "Conductor",
+            Theme::Blueprint => "Blueprint",
+            Theme::HighContrast => "High contrast",
         }
-    }
-
-    /// Whether the scheme is a dark one.
-    pub fn is_dark(&self) -> bool {
-        !matches!(self, Theme::Paper)
     }
 
     /// The colours of the scheme.
@@ -176,6 +259,9 @@ impl Theme {
             Theme::Midnight => SpectrumColors::midnight(),
             Theme::AmberCrt => SpectrumColors::amber_crt(),
             Theme::Paper => SpectrumColors::paper(),
+            Theme::Conductor => SpectrumColors::conductor(),
+            Theme::Blueprint => SpectrumColors::blueprint(),
+            Theme::HighContrast => SpectrumColors::high_contrast(),
         }
     }
 }
@@ -288,6 +374,106 @@ impl SpectrumColors {
         }
     }
 
+    /// Whether the chrome around the plot wants light text on it.
+    ///
+    /// Read from the panel colour rather than carried alongside it, because a
+    /// scheme somebody edited has no preset left to ask - and a flag that can
+    /// disagree with the colours it describes will, eventually. It is the panel
+    /// rather than the plot because these are the colours the menus, sidebar
+    /// and dialogs are drawn on: a scheme can legitimately put light chrome
+    /// around a black plot, which is what most instrument software did.
+    pub fn chrome_is_dark(&self) -> bool {
+        self.panel.luminance() < 0.35
+    }
+
+    /// Grey chrome around a black plot, in the manner of the software that
+    /// used to drive these instruments.
+    ///
+    /// The look is period-accurate and the palette is not: the original put
+    /// red regions on a black field beside a red alarm, which is exactly the
+    /// collision the rules here exist to prevent. Regions are pulled to orange
+    /// so that "look at me" red still means only one thing.
+    pub fn conductor() -> Self {
+        Self {
+            background: Rgb(0, 0, 0),
+            foreground: Rgb(0, 230, 60),
+            roi: Rgb(255, 105, 0),
+            compare: Rgb(80, 170, 255),
+            composite: Rgb(255, 180, 60),
+            axes: Rgb(120, 120, 110),
+            marker: Rgb(255, 255, 240),
+            library: Rgb(230, 110, 230),
+            view_box: Rgb(150, 150, 140),
+            panel: Rgb(198, 198, 190),
+            alarm: Rgb(220, 0, 0),
+            healthy: Rgb(0, 150, 70),
+        }
+    }
+
+    /// Ink on drafting paper: light and cool, and quiet enough to print.
+    pub fn blueprint() -> Self {
+        Self {
+            background: Rgb(238, 243, 248),
+            foreground: Rgb(12, 62, 122),
+            roi: Rgb(168, 74, 0),
+            compare: Rgb(104, 44, 160),
+            composite: Rgb(176, 52, 52),
+            axes: Rgb(104, 116, 132),
+            marker: Rgb(20, 26, 36),
+            library: Rgb(158, 26, 116),
+            view_box: Rgb(150, 168, 190),
+            panel: Rgb(224, 231, 238),
+            alarm: Rgb(184, 24, 24),
+            healthy: Rgb(14, 110, 74),
+        }
+    }
+
+    /// Maximum separation: dark ink on white, for bright rooms and projectors.
+    ///
+    /// Light rather than dark on purpose. On black every "maximum contrast"
+    /// colour ends up crowding white, and the cursor - which has to be the one
+    /// thing always findable - was within 1.25:1 in lightness of the trace it
+    /// sits on. White leaves room underneath for four saturated hues and a
+    /// black cursor that none of them can be confused with.
+    pub fn high_contrast() -> Self {
+        Self {
+            background: Rgb(255, 255, 255),
+            foreground: Rgb(0, 0, 160),
+            roi: Rgb(170, 60, 0),
+            compare: Rgb(90, 0, 140),
+            composite: Rgb(160, 40, 40),
+            axes: Rgb(60, 60, 60),
+            marker: Rgb(0, 0, 0),
+            library: Rgb(150, 0, 90),
+            view_box: Rgb(120, 120, 130),
+            panel: Rgb(245, 245, 245),
+            alarm: Rgb(200, 0, 0),
+            healthy: Rgb(0, 110, 50),
+        }
+    }
+
+    /// The fill of a card floating over the plot, such as the peak readout.
+    ///
+    /// Lifted off the plot background rather than derived from the panel. The
+    /// card is drawn on the plot, so the plot is what it has to be legible
+    /// against, and everything written on it is already chosen to contrast
+    /// with that. Taking it from the panel tied the two together for no
+    /// reason, and ruled out a scheme with light chrome around a dark plot -
+    /// which is what most instrument software of the era actually looked like,
+    /// and would have put near-white text on a near-white card.
+    pub fn card(&self) -> Rgb {
+        // Toward the panel, so the card still belongs to the scheme, but only
+        // a quarter of the way: the peak behind it must stay visible.
+        self.background.mix(self.panel, 0.25).mix(
+            if self.chrome_is_dark() {
+                Rgb(255, 255, 255)
+            } else {
+                Rgb(0, 0, 0)
+            },
+            0.10,
+        )
+    }
+
     /// The far end of the plot's background wash: the background carrying a
     /// trace of the data hue, so the plot has depth.
     ///
@@ -352,29 +538,113 @@ impl SpectrumColors {
     }
 }
 
+/// A named palette, as it is saved, shared and edited by hand.
+///
+/// The built-in themes are presets that produce one of these; everything past
+/// that point treats a scheme the same whether it came from a preset, from the
+/// colour editor, or from a file somebody was sent.
+///
+/// ```json
+/// {
+///   "name": "Bench",
+///   "colors": { "background": "#0b1020", "foreground": "#40e0d0", ... }
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scheme {
+    /// What to call it in the picker.
+    pub name: String,
+    /// The palette itself.
+    pub colors: SpectrumColors,
+}
+
+impl Scheme {
+    /// A named scheme.
+    pub fn new(name: impl Into<String>, colors: SpectrumColors) -> Self {
+        Self {
+            name: name.into(),
+            colors,
+        }
+    }
+
+    /// The scheme as a file, indented so it can be read and edited by hand.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// Reads a scheme from a file somebody was sent.
+    ///
+    /// The error is meant to be shown to whoever opened the file, so it says
+    /// what was wrong rather than that something was.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        let scheme: Self = serde_json::from_str(text).map_err(|error| {
+            // serde puts the position at the end of its own message; the line
+            // is worth keeping and the rest of that suffix is not, since it is
+            // about to be repeated.
+            let message = error.to_string();
+            let reason = message.split(" at line").next().unwrap_or(&message);
+            format!("line {}: {reason}", error.line())
+        })?;
+        if scheme.name.trim().is_empty() {
+            return Err("the scheme has no name".into());
+        }
+        Ok(scheme)
+    }
+
+    /// What is wrong with this palette, in the words the editor uses.
+    ///
+    /// A scheme is not refused for failing these - somebody may have a reason,
+    /// and a program that argues with its operator about colour is worse than
+    /// one that lets them see the problem. It is reported, not enforced.
+    pub fn complaints(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        for (role, contrast) in self.colors.contrast_report() {
+            if contrast < 4.5 {
+                found.push(format!(
+                    "{role} is only {contrast:.1}:1 against the plot, which will be hard to see"
+                ));
+            }
+        }
+        for (first, second, hue) in self.colors.clashes() {
+            found.push(format!(
+                "{first} and {second} are only {hue:.0} degrees apart and equally light"
+            ));
+        }
+        found
+    }
+}
+
 /// Applies a scheme to egui's own widgets, so the interface and the spectrum
 /// agree with each other.
-pub fn apply(ctx: &egui::Context, theme: Theme) {
-    let colors = theme.colors();
-    let mut visuals = if theme.is_dark() {
+///
+/// Takes the colours in use rather than the preset they came from. Deriving
+/// them from the preset meant an edited palette reached the plot and stopped
+/// there: the trace changed colour while every selection, hover, link and
+/// warning around it stayed the shade the preset had chosen.
+pub fn apply(ctx: &egui::Context, colors: &SpectrumColors) {
+    let dark = colors.chrome_is_dark();
+    let mut visuals = if dark {
         egui::Visuals::dark()
     } else {
         egui::Visuals::light()
     };
 
     let panel = colors.panel.to_color();
-    let window = if theme.is_dark() {
+    // A window sits above the panels, so it is lifted away from them - upward
+    // on a dark scheme and downward on a light one, since white has no room
+    // left above it.
+    let window = if dark {
         colors.panel.with_alpha(1.0).gamma_multiply(1.35)
     } else {
-        egui::Color32::from_rgb(248, 248, 246)
+        colors.panel.with_alpha(1.0).gamma_multiply(1.06)
     };
     visuals.panel_fill = panel;
     visuals.window_fill = window;
     visuals.extreme_bg_color = colors.background.to_color();
-    visuals.faint_bg_color = if theme.is_dark() {
+    visuals.faint_bg_color = if dark {
         panel.gamma_multiply(1.5)
     } else {
-        egui::Color32::from_rgb(242, 242, 240)
+        panel.gamma_multiply(0.96)
     };
     visuals.window_corner_radius = 7.into();
     visuals.menu_corner_radius = 5.into();
@@ -382,7 +652,7 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         offset: [0, 8],
         blur: 24,
         spread: 0,
-        color: egui::Color32::from_black_alpha(if theme.is_dark() { 150 } else { 40 }),
+        color: egui::Color32::from_black_alpha(if dark { 150 } else { 40 }),
     };
     visuals.popup_shadow = visuals.window_shadow;
 
@@ -397,10 +667,10 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
 
     let stroke_colour = colors.axes.with_alpha(0.5);
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, stroke_colour);
-    visuals.widgets.inactive.bg_fill = if theme.is_dark() {
+    visuals.widgets.inactive.bg_fill = if dark {
         panel.gamma_multiply(1.9)
     } else {
-        egui::Color32::from_rgb(228, 228, 226)
+        panel.gamma_multiply(0.9)
     };
     visuals.widgets.inactive.weak_bg_fill = visuals.widgets.inactive.bg_fill;
     visuals.widgets.hovered.bg_fill = accent.gamma_multiply(0.28);
@@ -430,6 +700,65 @@ mod tests {
     const MIN_SPECTRUM_CONTRAST: f64 = 7.0;
     /// How far apart two data hues must sit to be told apart at a glance.
     const MIN_HUE_SEPARATION: f64 = 28.0;
+
+    /// A theme that is not in `all()` is in no picker and in no test below.
+    #[test]
+    fn every_theme_is_offered_and_named_distinctly() {
+        // Listed here as well as in `all()` on purpose: adding a variant
+        // already fails to compile in `label()` and `colors()`, which are
+        // exhaustive matches, and this is the third place that has to agree.
+        let every = [
+            Theme::DeepSpace,
+            Theme::Midnight,
+            Theme::AmberCrt,
+            Theme::Conductor,
+            Theme::HighContrast,
+            Theme::Paper,
+            Theme::Blueprint,
+        ];
+        for theme in every {
+            assert!(
+                Theme::all().contains(&theme),
+                "{} is not offered in the picker",
+                theme.label()
+            );
+        }
+        assert_eq!(
+            Theme::all().len(),
+            every.len(),
+            "the picker and this list have drifted apart"
+        );
+        // Two schemes with one name is a picker nobody can use.
+        let mut labels: Vec<&str> = Theme::all().iter().map(|theme| theme.label()).collect();
+        labels.sort_unstable();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), before, "two themes share a name");
+    }
+
+    /// A scheme with light chrome around a dark plot is a real arrangement.
+    #[test]
+    fn chrome_darkness_follows_the_panel_not_the_plot() {
+        // Conductor is the case this exists for: a black plot inside grey
+        // chrome, which is what the software these instruments shipped with
+        // looked like. Reading darkness from the plot would put light text on
+        // that grey and make every menu unreadable.
+        let conductor = SpectrumColors::conductor();
+        assert!(
+            !conductor.chrome_is_dark(),
+            "grey chrome wants dark text on it"
+        );
+        assert!(
+            conductor.background.luminance() < 0.05,
+            "even though the plot behind it is black"
+        );
+        for theme in [Theme::DeepSpace, Theme::Midnight, Theme::AmberCrt] {
+            assert!(theme.colors().chrome_is_dark(), "{}", theme.label());
+        }
+        for theme in [Theme::Paper, Theme::Blueprint] {
+            assert!(!theme.colors().chrome_is_dark(), "{}", theme.label());
+        }
+    }
 
     #[test]
     fn every_theme_puts_the_data_above_the_background() {
@@ -486,16 +815,13 @@ mod tests {
 
     #[test]
     fn the_peak_card_text_is_readable_on_every_theme() {
-        // The card behind the peak information is the panel colour brightened;
-        // every colour written on it must survive that. On Paper this once
-        // failed silently: white text on a white card.
+        // Asked of the card colour itself rather than of a copy of the formula
+        // that produces it, so that changing how the card is mixed cannot leave
+        // this test checking something the program no longer draws. On Paper
+        // this once failed for real: white text on a white card.
         for theme in Theme::all() {
             let colors = theme.colors();
-            let card = Rgb(
-                ((colors.panel.0 as f32 * 1.45).min(255.0)) as u8,
-                ((colors.panel.1 as f32 * 1.45).min(255.0)) as u8,
-                ((colors.panel.2 as f32 * 1.45).min(255.0)) as u8,
-            );
+            let card = colors.card();
             for (role, colour) in [
                 ("numbers (spectrum colour)", colors.foreground),
                 ("headline (marker colour)", colors.marker),
@@ -633,6 +959,137 @@ mod tests {
         assert!((Rgb(0, 0, 255).hue() - 240.0).abs() < 0.5);
         assert!((Rgb(0, 255, 255).hue_distance(Rgb(255, 0, 0)) - 180.0).abs() < 0.5);
         assert_eq!(Rgb(10, 10, 10).hue(), 0.0, "grey has no hue");
+    }
+
+    #[test]
+    fn a_scheme_survives_being_written_out_and_read_back() {
+        let scheme = Scheme::new("Bench", SpectrumColors::conductor());
+        let text = scheme.to_json();
+        // Readable by a person, because the point of the format is sharing it.
+        assert!(text.contains("\"name\": \"Bench\""), "{text}");
+        assert!(text.contains("\"background\": \"#000000\""), "{text}");
+        assert_eq!(Scheme::from_json(&text).expect("read back"), scheme);
+    }
+
+    #[test]
+    fn a_scheme_file_that_is_wrong_says_what_is_wrong_with_it() {
+        // Nameless: it would appear in the picker as a blank row.
+        let nameless = r#"{"name": "  ", "colors": {}}"#;
+        assert!(Scheme::from_json(nameless).is_err());
+
+        // Truncated, misspelt, or simply not a scheme at all. The message
+        // reaches the operator, so it has to say something they can act on.
+        for text in ["", "{}", "not json", r#"{"name": "x"}"#] {
+            let error = Scheme::from_json(text).expect_err("should be refused");
+            assert!(!error.is_empty(), "{text:?} gave an empty reason");
+        }
+
+        // A colour that is not a colour names the field it was found in.
+        let bad_colour = format!(
+            r#"{{"name": "x", "colors": {}}}"#,
+            serde_json::to_string(&SpectrumColors::deep_space())
+                .expect("a palette")
+                .replace("\"#0b1020\"", "\"not a colour\"")
+        );
+        let error = Scheme::from_json(&bad_colour).expect_err("should be refused");
+        assert!(
+            error.contains("colour") || error.contains("background"),
+            "unhelpful message: {error}"
+        );
+    }
+
+    #[test]
+    fn a_scheme_reports_what_is_wrong_without_refusing_it() {
+        // Every built-in is beyond reproach, by the rules the tests above set.
+        for theme in Theme::all() {
+            let scheme = Scheme::new(theme.label(), theme.colors());
+            assert!(
+                scheme.complaints().is_empty(),
+                "{}: {:?}",
+                theme.label(),
+                scheme.complaints()
+            );
+        }
+        // A palette somebody made unreadable is described, not rejected: they
+        // may have a reason, and arguing with an operator about colour is
+        // worse than letting them see the problem.
+        let mut washed = SpectrumColors::deep_space();
+        washed.foreground = washed.background;
+        let scheme = Scheme::new("Invisible", washed);
+        assert!(!scheme.complaints().is_empty());
+        assert!(
+            scheme
+                .complaints()
+                .iter()
+                .any(|note| note.contains("spectrum")),
+            "{:?}",
+            scheme.complaints()
+        );
+    }
+
+    #[test]
+    fn a_colour_is_written_as_hex_and_read_back() {
+        let colour = Rgb(11, 16, 32);
+        assert_eq!(colour.to_string(), "#0b1020");
+        let json = serde_json::to_string(&colour).expect("write");
+        assert_eq!(json, "\"#0b1020\"");
+        assert_eq!(serde_json::from_str::<Rgb>(&json).expect("read"), colour);
+    }
+
+    #[test]
+    fn a_colour_is_read_however_it_is_written() {
+        for (text, expected) in [
+            ("#0b1020", Rgb(11, 16, 32)),
+            ("0b1020", Rgb(11, 16, 32)),
+            ("#FFFFFF", Rgb(255, 255, 255)),
+            ("  #40e0d0  ", Rgb(64, 224, 208)),
+            // The short form doubles each digit, the way it does everywhere.
+            ("#f80", Rgb(255, 136, 0)),
+            ("fff", Rgb(255, 255, 255)),
+        ] {
+            assert_eq!(text.parse::<Rgb>(), Ok(expected), "{text:?}");
+        }
+        // And a typo is refused rather than silently becoming black, which
+        // would be a scheme that looks broken with nothing to explain it.
+        for text in ["", "#", "#12", "#12345", "#gggggg", "not a colour"] {
+            assert!(text.parse::<Rgb>().is_err(), "{text:?} should be refused");
+        }
+        // Refused, not panicked on. This is a field people paste into, so it
+        // will see text that is neither hexadecimal nor ASCII. Slicing it by
+        // byte offset put the cut inside a character: "#a\u{20ac}12" is six
+        // bytes and four characters, so it took the six-digit branch and split
+        // the euro sign in half.
+        for text in [
+            "#a\u{20ac}12",
+            "#\u{e9}\u{e9}\u{e9}",
+            "\u{20ac}\u{20ac}",
+            "#\u{1f600}",
+        ] {
+            assert!(
+                text.parse::<Rgb>().is_err(),
+                "{text:?} should be refused rather than panic"
+            );
+        }
+    }
+
+    /// A palette somebody tuned by hand must survive the change of format.
+    #[test]
+    fn the_older_array_form_still_loads() {
+        assert_eq!(
+            serde_json::from_str::<Rgb>("[11, 16, 32]").expect("the older form"),
+            Rgb(11, 16, 32)
+        );
+        // Including inside a whole scheme, which is how it is actually stored.
+        let older = r#"{
+            "background": [11, 16, 32], "foreground": [64, 224, 208],
+            "roi": [255, 176, 32], "compare": [167, 139, 250],
+            "composite": [251, 146, 130], "axes": [138, 148, 172],
+            "marker": [255, 247, 220], "library": [244, 114, 182],
+            "view_box": [96, 116, 168], "panel": [20, 24, 34],
+            "alarm": [239, 68, 68], "healthy": [52, 211, 153]
+        }"#;
+        let colors: SpectrumColors = serde_json::from_str(older).expect("an older palette");
+        assert_eq!(colors, SpectrumColors::deep_space());
     }
 
     #[test]
