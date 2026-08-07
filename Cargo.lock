@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-device"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "mantaray-core",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-formats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "mantaray-core",
@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-jobs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mantaray-core",
  "thiserror 2.0.19",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-mcb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "mantaray-core",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "mantaray-report"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "mantaray-core",

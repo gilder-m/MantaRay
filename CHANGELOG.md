@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.0-alpha (2026-08-07)
+
+**The project is now MantaRay.** Gamma rays, manta rays. The crates and binaries
+are `mantaray-*` and the environment variables are `MANTARAY_*`; the former name
+stays in the history, where it is a record rather than a claim. Settings, the
+tuned palette, the recent files and any snapshot of unfinished work are carried
+across on first run, under both the old directory and the old key inside it -
+without which a renamed build would have started as though it had never run.
+
+**The look is the operator's.** A colour scheme is no longer only a palette: it
+carries how the program draws, and it travels as a small JSON file that can be
+sent to somebody. Seven schemes ship, including Conductor, whose colours were
+sampled from a screenshot of the software these instruments have traditionally
+been driven with rather than remembered. Every colour is editable and the
+contrast of each against the plot is reported as it is edited.
+
+**Spectra are arranged in tabs**, one filling the working area, with any of them
+pulled out into a window when two must be watched at once. **Workspaces** decide
+what the sidebar shows for the job in hand - the clock and the presets while a
+count runs, the regions and the nuclide lookup afterwards.
+
+**A nuclide can be named.** Type `Cs-137`, `137Cs`, `cs137` or `Cs 137` and its
+lines are drawn over the spectrum, each labelled with its emission probability.
+When it is not found, the reason distinguishes no library loaded from not in
+this library from not a nuclide name.
+
+The toolbar can carry drawn icons instead of words. They are drawn rather than
+written because a character that looks right while writing the code arrives on
+somebody else's machine as an empty box, which has happened here twice.
+
+Also in this release, the nuclide-library work below, and a busy adapter now
+told apart from one there is no permission for - errno 16 rather than 13, where
+no udev rule has ever helped.
+
+Binaries for Linux and Windows are attached, with a SHA-256 for each. macOS is
+built and tested by CI and deliberately not released: nothing has run there
+against an instrument.
+
 ## Unreleased
 
 **No nuclide library ships any more, and there is a way to build one
