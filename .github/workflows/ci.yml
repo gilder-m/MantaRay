@@ -6,6 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run per branch. Pushing twice in a minute used to leave the first run
+# going to the end for a commit nobody would ever look at again, which is a
+# waste of a runner whether or not anybody is billed for it - and it puts the
+# answer for the commit that matters behind the one that does not.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings

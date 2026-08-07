@@ -62,15 +62,24 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
+# A settings directory of its own, thrown away afterwards. Two reasons, and
+# both matter: a capture then shows the program as it comes rather than as
+# whoever ran it has since tuned it, and - more importantly - a capture cannot
+# touch the operator's own settings or the snapshot of unfinished work that a
+# crash left behind. A screenshot must not be able to cost somebody a count.
+settings="$(mktemp -d)"
+
 # winit prefers Wayland when a Wayland socket is in the environment, and would
 # ignore the X server entirely.
 env -u WAYLAND_DISPLAY \
     DISPLAY="$display" \
+    XDG_DATA_HOME="$settings" \
+    XDG_CONFIG_HOME="$settings" \
     MANTARAY_DEMO="$demo" \
     WINIT_UNIX_BACKEND=x11 \
     "$exe" $files &
 app=$!
-trap 'kill "$app" 2>/dev/null || true; kill "$server" 2>/dev/null || true' EXIT
+trap 'kill "$app" 2>/dev/null || true; kill "$server" 2>/dev/null || true; rm -rf "$settings"' EXIT
 
 sleep "$settle"
 kill -0 "$app" 2>/dev/null || {

@@ -1,7 +1,12 @@
 name: Release
 
-# Pushing a v* tag builds the desktop application and the command-line tool
-# for the three platforms and attaches the archives to a GitHub release.
+# Pushing a v* tag builds the desktop application and the command-line tool and
+# attaches the archives to a GitHub release, with a SHA-256 for each so a
+# download can be checked against what was built here.
+#
+# Linux and Windows ship. macOS is built by CI on main and is not released yet:
+# nothing has run there on real hardware, and an untested binary for a platform
+# nobody has used is a promise this project cannot keep.
 on:
   push:
     tags: ["v*"]
@@ -27,9 +32,11 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: MantaRay-linux-x86_64.tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: MantaRay-macos-aarch64.tar.gz
+          # macOS is built by CI on every push and is deliberately not
+          # released. Nothing has been run there on real hardware, and an
+          # untested binary for a platform nobody has used is a promise this
+          # project cannot keep. Add it back when somebody has driven an
+          # instrument from one.
     steps:
       - uses: actions/checkout@v4
 
@@ -92,9 +99,33 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      # A sum per archive, and one file holding both, so a download can be
+      # checked against what was actually built here rather than trusted.
+      - name: Checksums
+        run: |
+          sha256sum MantaRay-*.zip MantaRay-*.tar.gz | tee SHA256SUMS.txt
+          {
+            echo '## Checksums'
+            echo
+            echo 'Verify a download against what this workflow built:'
+            echo
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+            echo
+            echo '`sha256sum -c SHA256SUMS.txt` on Linux, or'
+            echo '`Get-FileHash <file> -Algorithm SHA256` on Windows.'
+            echo
+            echo 'macOS is built by CI but not released: nothing has been run'
+            echo 'there against an instrument yet.'
+          } > release-notes.md
+
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
+          append_body: true
           files: |
             MantaRay-windows-x86_64.zip
             MantaRay-linux-x86_64.tar.gz
-            MantaRay-macos-aarch64.tar.gz
+            SHA256SUMS.txt
