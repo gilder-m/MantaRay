@@ -67,6 +67,10 @@ pub struct DisplayState {
     pub energy_axis: bool,
     /// Whether library lines are drawn (Display/Isotope Markers).
     pub isotope_markers: bool,
+    /// Whether a logarithmic axis tops out at the next power of ten rather
+    /// than the nearest 1-2-5 step. Set from the application's preference, so
+    /// every window follows the same rule.
+    pub log_decade_top: bool,
     /// Length of the spectrum this state belongs to.
     length: usize,
     /// Where the pointer went down, while a drag is in progress.
@@ -93,6 +97,7 @@ impl Default for DisplayState {
             fill: FillMode::default(),
             energy_axis: true,
             isotope_markers: false,
+            log_decade_top: false,
             length: 0,
             drag_origin: None,
             drag_in_inset: false,
@@ -271,6 +276,7 @@ impl DisplayState {
                     // top belongs on one of them rather than on whatever the
                     // tallest channel happens to be. Rounding up also stops the
                     // peak being clipped flat against the top of the plot.
+                    VerticalScale::Logarithmic if self.log_decade_top => decade_ceiling(peak),
                     VerticalScale::Logarithmic => logarithmic_ceiling(peak),
                     _ => peak,
                 }
@@ -420,6 +426,24 @@ impl DisplayState {
 /// room to breathe instead of being pressed flat against the frame. Strictly
 /// above, because a peak landing exactly on the top line is the thing being
 /// fixed.
+/// The next power of ten strictly above `peak`, as MAESTRO scales a log axis.
+///
+/// The point is the decade line itself: a peak of a thousand counts sits on
+/// the 1000 line with the 10,000 line drawn above it, so the eye reads the
+/// height against a labelled decade instead of against the top of the plot.
+/// It wastes vertical space compared with the 1-2-5 ceiling, which is why it
+/// is an option rather than the rule.
+fn decade_ceiling(peak: u64) -> u64 {
+    let mut decade = 1u64;
+    while decade <= peak {
+        let Some(next) = decade.checked_mul(10) else {
+            return u64::MAX;
+        };
+        decade = next;
+    }
+    decade
+}
+
 fn logarithmic_ceiling(peak: u64) -> u64 {
     let mut step = 1u64;
     loop {
@@ -441,6 +465,40 @@ fn logarithmic_ceiling(peak: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_decade_option_tops_out_on_the_next_power_of_ten() {
+        // The user's own example: a tallest bin of 1000 counts should leave
+        // the 10,000 line drawn above it, the way MAESTRO scales a log axis.
+        assert_eq!(decade_ceiling(1_000), 10_000);
+        assert_eq!(decade_ceiling(999), 1_000);
+        assert_eq!(decade_ceiling(1), 10);
+        assert_eq!(decade_ceiling(0), 1);
+        // Strictly above, so a peak never sits flat against the ceiling.
+        assert_eq!(decade_ceiling(10), 100);
+        assert_eq!(decade_ceiling(15_675), 100_000);
+    }
+
+    #[test]
+    fn the_decade_option_changes_the_axis_and_the_default_does_not() {
+        let mut spectrum = Spectrum::new(16);
+        spectrum.channels[4] = 1_000;
+        let mut display = DisplayState::for_length(16);
+        display.vertical = VerticalScale::Logarithmic;
+
+        // Left alone, the axis stops at the nearest step above the peak.
+        assert_eq!(display.full_scale(&spectrum), 2_000);
+
+        display.log_decade_top = true;
+        assert_eq!(
+            display.full_scale(&spectrum),
+            10_000,
+            "the decade above the peak is what MAESTRO draws to"
+        );
+        // And the peak is genuinely below the top rather than clipped to it.
+        let fraction = display.height_fraction(1_000, display.full_scale(&spectrum));
+        assert!(fraction > 0.0 && fraction < 1.0, "{fraction}");
+    }
 
     #[test]
     fn a_logarithmic_axis_tops_out_above_the_tallest_channel() {

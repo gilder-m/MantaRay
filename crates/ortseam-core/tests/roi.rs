@@ -74,6 +74,31 @@ fn clear_removes_only_the_region_under_the_marker() {
 }
 
 #[test]
+fn clearing_a_span_takes_every_region_it_touches() {
+    // What a dragged-out selection clears: everything inside it, and a region
+    // straddling the edge goes too - it was pointed at, and leaving half of
+    // one behind is a stranger result than removing it.
+    let mut set = RoiSet::default();
+    set.mark(Roi::new(10, 20));
+    set.mark(Roi::new(40, 50));
+    set.mark(Roi::new(60, 70));
+    set.mark(Roi::new(200, 210));
+
+    assert_eq!(set.clear_within(Roi::new(45, 100)), 2, "40-50 and 60-70");
+    assert_eq!(set.len(), 2);
+    assert_eq!(set.get(0), Some(&Roi::new(10, 20)));
+    assert_eq!(set.get(1), Some(&Roi::new(200, 210)));
+
+    // A span touching nothing removes nothing, and says so by returning zero.
+    assert_eq!(set.clear_within(Roi::new(100, 150)), 0);
+    assert_eq!(set.len(), 2);
+
+    // A single shared channel is enough to count as touched.
+    assert_eq!(set.clear_within(Roi::new(20, 20)), 1);
+    assert_eq!(set.len(), 1);
+}
+
+#[test]
 fn lookup_by_channel() {
     let mut set = RoiSet::default();
     set.mark(Roi::new(10, 20));

@@ -27,6 +27,35 @@ use crate::viewmodel::{DisplayState, FillMode, VerticalScale};
 /// How many files the File menu remembers.
 const RECENT_FILES: usize = 8;
 
+/// Which save a Ctrl+S press means.
+///
+/// Ctrl+S asks where to put the file, every time. It is the reflex key, and a
+/// reflex that silently replaces whatever a spectrum was last saved to is one
+/// keystroke away from losing a measurement that cannot be taken again -
+/// counting time is not free, and some sources decay while you fetch them.
+/// Overwriting in place is still available, on the chord nobody hits by habit.
+pub(crate) fn save_action(shift: bool) -> Action {
+    if shift { Action::Save } else { Action::SaveAs }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::{Action, save_action};
+
+    #[test]
+    fn ctrl_s_asks_where_rather_than_overwriting() {
+        // The bug this pins: Ctrl+S used to overwrite the last-saved file with
+        // no prompt, so a habitual save after any edit replaced the original
+        // measurement.
+        assert_eq!(save_action(false), Action::SaveAs);
+    }
+
+    #[test]
+    fn shift_is_the_deliberate_overwrite() {
+        assert_eq!(save_action(true), Action::Save);
+    }
+}
+
 #[cfg(test)]
 mod pin_tests {
     use super::pin_by_serial;
@@ -172,6 +201,9 @@ pub struct Persisted {
     /// Whether the last spectrum reopens at start.
     #[serde(default)]
     pub reopen_last: bool,
+    /// Whether a logarithmic axis tops out at the next power of ten.
+    #[serde(default)]
+    pub log_decade_top: bool,
 }
 
 fn default_peak_font() -> f32 {
@@ -660,6 +692,9 @@ pub struct App {
     applied_theme: Option<crate::theme::Theme>,
     /// Whether a peak search clears the existing regions first (ROI/Auto Clear).
     pub auto_clear_roi: bool,
+    /// Whether a logarithmic axis tops out at the next power of ten, the way
+    /// MAESTRO's does, rather than at the nearest 1-2-5 step above the peak.
+    pub log_decade_top: bool,
     /// Font size of the in-plot peak-information card.
     pub peak_font: f32,
     /// Extension offered first when saving a spectrum without a path.
@@ -698,6 +733,7 @@ impl App {
             recent: self.recent.clone(),
             time_scale: self.time_scale,
             auto_clear_roi: self.auto_clear_roi,
+            log_decade_top: self.log_decade_top,
             peak_font: self.peak_font,
             default_format: self.default_format.clone(),
             reopen_last: self.reopen_last,
@@ -723,6 +759,7 @@ impl App {
             self.time_scale = persisted.time_scale;
         }
         self.auto_clear_roi = persisted.auto_clear_roi;
+        self.log_decade_top = persisted.log_decade_top;
         self.peak_font = persisted.peak_font.clamp(9.0, 18.0);
         if !persisted.default_format.is_empty() {
             self.default_format = persisted.default_format;
@@ -816,6 +853,7 @@ impl App {
             pending_clipboard: None,
             applied_theme: None,
             auto_clear_roi: false,
+            log_decade_top: false,
             peak_font: 11.0,
             default_format: "chn".into(),
             reopen_last: false,
@@ -1509,12 +1547,29 @@ impl App {
             Action::MarkPeak => self.mark_peak_at_marker(),
             Action::ClearRoi => {
                 let marker = self.active_marker();
+                // Dragging out a span and clearing takes every region in it,
+                // in one undo step. Clearing them one at a time is the kind of
+                // tidying nobody should have to do by hand.
+                let selection = self
+                    .active
+                    .and_then(|index| self.windows.get(index))
+                    .and_then(|window| window.selection);
                 self.push_undo("Clear ROI");
                 if let Some(spectrum) = self.active_spectrum_mut() {
-                    if spectrum.rois.clear_at(marker) {
-                        self.status = "region cleared".into();
-                    } else {
-                        self.status = "no region at the marker".into();
+                    match selection {
+                        Some((low, high)) => {
+                            let span = Roi::new(low.min(high), high.max(low));
+                            let cleared = spectrum.rois.clear_within(span);
+                            self.status = match cleared {
+                                0 => "no regions in the selection".into(),
+                                1 => "region cleared".into(),
+                                many => format!("{many} regions cleared"),
+                            };
+                        }
+                        None if spectrum.rois.clear_at(marker) => {
+                            self.status = "region cleared".into();
+                        }
+                        None => self.status = "no region at the marker".into(),
                     }
                 }
             }
@@ -1822,34 +1877,41 @@ impl App {
     fn peak_info_at_marker(&mut self) {
         let Some(index) = self.active else { return };
         let marker = self.windows[index].display.marker;
+        let selection = self.windows[index].selection;
         let settings = self.settings;
         let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index) else {
             return;
         };
-        let region = spectrum.rois.at(marker).copied().or_else(|| {
-            // No region: use three FWHM about the peak, as Peak Info does. The
-            // width comes from the shape calibration when there is one;
-            // otherwise the peak search measures the peak under the marker
-            // from the counts themselves, so an uncalibrated spectrum gets
-            // its whole peak - a NaI(Tl) line can be a hundred channels wide -
-            // rather than a guessed sliver of it.
-            let (centre, fwhm) = match spectrum.fwhm_at(marker as f64) {
-                Some(fwhm) => (marker as f64, fwhm),
-                None => ortseam_core::peak_search(spectrum, &settings)
-                    .into_iter()
-                    .map(|peak| ((peak.centroid - marker as f64).abs(), peak))
-                    .filter(|(distance, peak)| *distance <= peak.width.max(2.0))
-                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(_, peak)| (peak.centroid, peak.width))
-                    .unwrap_or((marker as f64, 8.0)),
-            };
-            // Never narrower than the background channels need, or the
-            // figures cannot be computed at all.
-            let width = (fwhm * 1.5).max(settings.background_points as f64 + 2.0);
-            let low = (centre - width).max(0.0) as usize;
-            let high = ((centre + width) as usize).min(spectrum.len().saturating_sub(1));
-            (high > low).then(|| Roi::new(low, high))
-        });
+        // A dragged-out span is the question being asked: fit over exactly
+        // that, and mark nothing. Measuring a peak should not leave a region
+        // behind to be tidied up afterwards.
+        let region = selection
+            .map(|(low, high)| Roi::new(low.min(high), high.max(low)))
+            .or_else(|| spectrum.rois.at(marker).copied())
+            .or_else(|| {
+                // No region: use three FWHM about the peak, as Peak Info does. The
+                // width comes from the shape calibration when there is one;
+                // otherwise the peak search measures the peak under the marker
+                // from the counts themselves, so an uncalibrated spectrum gets
+                // its whole peak - a NaI(Tl) line can be a hundred channels wide -
+                // rather than a guessed sliver of it.
+                let (centre, fwhm) = match spectrum.fwhm_at(marker as f64) {
+                    Some(fwhm) => (marker as f64, fwhm),
+                    None => ortseam_core::peak_search(spectrum, &settings)
+                        .into_iter()
+                        .map(|peak| ((peak.centroid - marker as f64).abs(), peak))
+                        .filter(|(distance, peak)| *distance <= peak.width.max(2.0))
+                        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(_, peak)| (peak.centroid, peak.width))
+                        .unwrap_or((marker as f64, 8.0)),
+                };
+                // Never narrower than the background channels need, or the
+                // figures cannot be computed at all.
+                let width = (fwhm * 1.5).max(settings.background_points as f64 + 2.0);
+                let low = (centre - width).max(0.0) as usize;
+                let high = ((centre + width) as usize).min(spectrum.len().saturating_sub(1));
+                (high > low).then(|| Roi::new(low, high))
+            });
         let Some(region) = region else {
             self.status = "could not fit a peak here".into();
             return;
@@ -3351,6 +3413,12 @@ impl App {
     /// Separate from [`eframe::App::ui`] so a test can run frames against a bare
     /// [`egui::Context`], with no window and no event loop.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        // One rule for every window, including ones opened since the setting
+        // was last touched: the axis preference lives on the application and
+        // the windows follow it.
+        for window in &mut self.windows {
+            window.display.log_decade_top = self.log_decade_top;
+        }
         crate::jobs::step(self);
         self.take_dropped_files(ui.ctx());
         // Keep egui's own widgets dressed in the theme, however it was chosen -
@@ -3675,7 +3743,7 @@ impl App {
                 }
             }
             if ctrl && input.key_pressed(Key::S) {
-                actions.push(if shift { Action::SaveAs } else { Action::Save });
+                actions.push(save_action(shift));
             }
             if alt && input.key_pressed(Key::Num1) {
                 actions.push(Action::Start);

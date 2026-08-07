@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+**Five things found by daily-driving it (2026-08-06).** All raised by the
+person using the program against a real detector, and all small enough to be
+felt every session.
+
+- *Ctrl+S asks where to save, every time.* It used to overwrite whatever the
+  spectrum was last saved to, with no prompt - a reflex keystroke away from
+  replacing a measurement that cannot be taken again. Ctrl+S is now Save As,
+  the File menu leads with it, and overwriting in place has moved to
+  Ctrl+Shift+S, where the menu entry says which file it will replace.
+- *The count rate is shown under the total counts*, over live time rather
+  than real, with the precision the size of the number deserves: a background
+  at a fraction of a count per second and a check source at thousands both
+  have to read sensibly from the same field.
+- *A logarithmic axis can top out on the next power of ten*, the way
+  MAESTRO's does, so a thousand-count peak is read against a drawn 10,000
+  line instead of against the ceiling. Display / "Log to the next decade",
+  off by default so the existing tighter scaling stays; the decade the axis
+  stops at is labelled, which is the whole point of scaling to one.
+- *Peak Info fits a dragged selection.* Drag a span, right-click, Peak Info,
+  and the fit is over exactly what was dragged - with no region marked.
+  Measuring a peak no longer edits the spectrum's regions as a side effect
+  and leaves them to be tidied up afterwards.
+- *Clear ROI over a selection clears every region in it*, in one undo step,
+  rather than only the one under the marker. A region straddling the edge of
+  the selection goes with the rest: it was pointed at, and half a region left
+  behind is a stranger result than none.
+
 **The bench check, run (2026-08-06).** The preset work below was written
 against doubles and marked as not yet run on the 926; it has been now, and it
 holds: `probe` finds the adapter, `SHOW_PRESETS` read back the very 300-second

@@ -1247,6 +1247,68 @@ fn renaming_a_detector_reaches_the_list_the_window_and_the_next_save() {
 }
 
 #[test]
+fn peak_info_over_a_selection_fits_it_and_marks_nothing() {
+    // Drag out a span, right-click, Peak Info: the fit is over what was
+    // dragged, and no region is left behind. Measuring a peak should not edit
+    // the spectrum's regions as a side effect.
+    let mut app = with_spectrum(1024);
+    let regions_before = app.active_spectrum().map(|s| s.rois.len()).unwrap_or(0);
+
+    app.apply_action(Action::Select(500, 524));
+    app.apply_action(Action::PeakInfoAtMarker);
+
+    let index = app.active.expect("active");
+    let info = app.windows[index]
+        .peak_info
+        .as_ref()
+        .expect("peak information over the selection");
+    assert!(
+        (info.centroid - 512.0).abs() < 3.0,
+        "the fit should sit on the peak inside the selection, got {}",
+        info.centroid
+    );
+    assert_eq!(
+        app.active_spectrum().map(|s| s.rois.len()),
+        Some(regions_before),
+        "measuring must not mark a region"
+    );
+}
+
+#[test]
+fn clear_roi_over_a_selection_takes_every_region_in_it() {
+    let mut app = with_spectrum(1024);
+    app.apply_action(Action::MarkMode(MarkMode::Mark));
+    app.apply_action(Action::MarkRange(100, 130));
+    app.apply_action(Action::MarkRange(300, 330));
+    app.apply_action(Action::MarkRange(700, 730));
+    assert_eq!(app.active_spectrum().map(|s| s.rois.len()), Some(3));
+
+    // A span covering the first two, and not the third.
+    app.apply_action(Action::Select(90, 400));
+    app.apply_action(Action::ClearRoi);
+
+    assert_eq!(
+        app.active_spectrum().map(|s| s.rois.len()),
+        Some(1),
+        "both regions in the selection should go: {}",
+        app.status
+    );
+    assert!(
+        app.active_spectrum()
+            .is_some_and(|s| s.rois.at(715).is_some()),
+        "the region outside the selection stays"
+    );
+
+    // And it is one undo step, not one per region.
+    app.apply_action(Action::Undo);
+    assert_eq!(
+        app.active_spectrum().map(|s| s.rois.len()),
+        Some(3),
+        "a single undo should bring all of them back"
+    );
+}
+
+#[test]
 fn a_local_instrument_without_a_detector_number_says_so() {
     // The description carries the number ORTEC's configuration gave the
     // instrument. Without it there is nothing to open, and guessing one would

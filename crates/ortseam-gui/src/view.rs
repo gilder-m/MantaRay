@@ -917,11 +917,18 @@ fn draw_axes(
             while decade <= full_scale {
                 let fraction = display.height_fraction(decade, full_scale);
                 let y = plot.bottom() - fraction * plot.height();
-                if fraction > 0.02 && fraction < 0.99 {
-                    painter.line_segment(
-                        [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
-                        Stroke::new(1.0, grid),
-                    );
+                // The decade the axis tops out at is labelled too. It sits on
+                // the plot's own edge, so it gets the number without a grid
+                // line drawn over the border - that top decade is the whole
+                // point of scaling to one.
+                let at_the_top = decade == full_scale;
+                if fraction > 0.02 && (fraction < 0.99 || at_the_top) {
+                    if !at_the_top {
+                        painter.line_segment(
+                            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+                            Stroke::new(1.0, grid),
+                        );
+                    }
                     painter.text(
                         Pos2::new(plot.left() - 6.0, y),
                         Align2::RIGHT_CENTER,
@@ -1793,6 +1800,23 @@ fn draw_library_lines(
     }
 }
 
+/// A count rate, with the precision the size of it deserves.
+///
+/// A background measurement runs at a fraction of a count per second and a
+/// check source at thousands, and neither reads well in the other's format:
+/// "0 /s" hides a real background, and "1234.56 /s" is five digits of noise on
+/// a number that moves by tens between polls.
+pub fn format_rate(rate: f64) -> String {
+    if !rate.is_finite() || rate < 0.0 {
+        return "-".into();
+    }
+    match rate {
+        rate if rate >= 100.0 => format!("{rate:.0} /s"),
+        rate if rate >= 10.0 => format!("{rate:.1} /s"),
+        _ => format!("{rate:.2} /s"),
+    }
+}
+
 /// Short count labels: 1234, 12.3k, 1.23M.
 pub fn format_counts(value: u64) -> String {
     match value {
@@ -1843,6 +1867,19 @@ pub(crate) fn format_axis_count(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_keeps_the_precision_its_size_deserves() {
+        // A background at a fraction of a count per second and a check source
+        // at thousands both have to read sensibly from the same field.
+        assert_eq!(format_rate(0.0), "0.00 /s");
+        assert_eq!(format_rate(0.42), "0.42 /s");
+        assert_eq!(format_rate(12.34), "12.3 /s");
+        assert_eq!(format_rate(1234.7), "1235 /s");
+        // Nothing measured is not a rate of zero.
+        assert_eq!(format_rate(f64::NAN), "-");
+        assert_eq!(format_rate(f64::INFINITY), "-");
+    }
 
     #[test]
     fn a_filled_area_fades_from_the_trace_to_the_baseline() {
