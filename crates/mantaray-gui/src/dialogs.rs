@@ -4236,6 +4236,27 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
 fn style_editor(app: &mut App, ui: &mut egui::Ui) {
     ui.label("Drawing");
     ui.horizontal(|ui| {
+        ui.label("Spectra");
+        for layout in crate::theme::Layout::all() {
+            if ui
+                .selectable_label(app.style.layout == *layout, layout.label())
+                .clicked()
+            {
+                app.style.layout = *layout;
+            }
+        }
+        ui.label(
+            egui::RichText::new(match app.style.layout {
+                crate::theme::Layout::Tabs => {
+                    "one fills the area; right-click a tab to pull it out"
+                }
+                crate::theme::Layout::Windows => "free to overlap, tile and cascade",
+            })
+            .weak()
+            .small(),
+        );
+    });
+    ui.horizontal(|ui| {
         ui.label("Under the trace");
         for fill in crate::theme::FillStyle::all() {
             if ui

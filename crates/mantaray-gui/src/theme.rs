@@ -631,6 +631,35 @@ impl FillStyle {
     }
 }
 
+/// How open spectra are arranged in the working area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Layout {
+    /// One at a time, filling the area, chosen from a strip of tabs.
+    ///
+    /// The default, because it is what a spectrum wants: the whole area, with
+    /// nothing overlapping the trace. Any one of them can still be pulled out
+    /// into a window when two need to be seen at once.
+    #[default]
+    Tabs,
+    /// Free-floating windows that can overlap, be tiled and be cascaded.
+    Windows,
+}
+
+impl Layout {
+    /// Both arrangements, for the picker.
+    pub fn all() -> &'static [Layout] {
+        &[Layout::Tabs, Layout::Windows]
+    }
+
+    /// Name for the picker.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Layout::Tabs => "Tabs",
+            Layout::Windows => "Windows",
+        }
+    }
+}
+
 /// How a scheme draws, as distinct from what it draws in.
 ///
 /// A palette on its own cannot reproduce a look. The programs these
@@ -640,6 +669,9 @@ impl FillStyle {
 /// are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemeStyle {
+    /// How open spectra are arranged in the working area.
+    #[serde(default)]
+    pub layout: Layout,
     /// How the area under the trace is filled.
     #[serde(default)]
     pub fill: FillStyle,
@@ -677,6 +709,7 @@ fn default_corners() -> u8 {
 impl Default for SchemeStyle {
     fn default() -> Self {
         Self {
+            layout: Layout::Tabs,
             fill: FillStyle::Gradient,
             grid: true,
             wash: true,
@@ -689,8 +722,12 @@ impl Default for SchemeStyle {
 
 impl SchemeStyle {
     /// Square, flat and unadorned: the way instrument software was drawn.
+    ///
+    /// Windows rather than tabs, because that software put each spectrum in
+    /// one and the arrangement is as much of the look as the colours.
     pub fn period() -> Self {
         Self {
+            layout: Layout::Windows,
             fill: FillStyle::Solid,
             grid: false,
             wash: false,

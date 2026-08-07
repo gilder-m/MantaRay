@@ -1330,6 +1330,159 @@ fn the_theme_dialog_offers_every_scheme() {
     );
 }
 
+/// Two named spectra, on top of whatever a bare application already holds.
+fn two_spectra() -> App {
+    let mut app = App::headless();
+    app.open_buffer("first.Spe".into(), realistic(1024), None);
+    app.open_buffer("second.Spe".into(), realistic(1024), None);
+    app
+}
+
+/// The window with a given title. Found by name rather than by position,
+/// because a bare application already has one and the indices are not what
+/// the order they were opened in suggests.
+fn window_id(app: &App, title: &str) -> usize {
+    app.windows
+        .iter()
+        .find(|window| window.title == title)
+        .unwrap_or_else(|| panic!("no window called {title:?}"))
+        .id
+}
+
+/// How many spectra were actually drawn: each one puts a marker readout under
+/// its plot, so counting those counts the spectra given room.
+fn spectra_drawn(text: &str) -> usize {
+    text.lines()
+        .filter(|line| line.starts_with("Marker:"))
+        .count()
+}
+
+/// Tabs by default: one spectrum fills the area, the rest are names in a strip.
+#[test]
+fn spectra_are_arranged_in_tabs_by_default() {
+    let ctx = egui::Context::default();
+    let mut app = two_spectra();
+
+    assert_eq!(
+        app.style.layout,
+        mantaray_gui::theme::Layout::Tabs,
+        "tabs are the default arrangement"
+    );
+
+    // Both are named in the strip, whichever one is being shown.
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("first.Spe"), "{text}");
+    assert!(text.contains("second.Spe"), "{text}");
+    assert_eq!(
+        spectra_drawn(&text),
+        1,
+        "exactly one spectrum should have the area:\n{text}"
+    );
+
+    // And clicking a tab shows that one.
+    let first = window_id(&app, "first.Spe");
+    assert_ne!(app.active.map(|index| app.windows[index].id), Some(first));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let tab = text_rect(&output, "first.Spe").expect("the first tab");
+    click_at_point(&mut app, &ctx, tab.center());
+    assert_eq!(
+        app.active.map(|index| app.windows[index].id),
+        Some(first),
+        "clicking a tab should show that spectrum"
+    );
+}
+
+/// A spectrum can be pulled out of the strip, and put back.
+#[test]
+fn a_tab_can_be_opened_in_a_window_of_its_own() {
+    let ctx = egui::Context::default();
+    let mut app = two_spectra();
+    let second = window_id(&app, "second.Spe");
+    let floating = |app: &App| {
+        app.windows
+            .iter()
+            .find(|window| window.id == second)
+            .expect("still open")
+            .floating
+    };
+
+    assert!(!floating(&app), "everything starts docked");
+    let before = spectra_drawn(&painted_text(&frame(&mut app, &ctx, [1400.0, 900.0])));
+
+    app.apply_action(Action::ToggleFloating(second));
+    assert!(floating(&app));
+
+    // Two frames: egui measures a window it has not placed before on one frame
+    // and paints it on the next. It settles itself, because a repaint is
+    // requested, but a test that draws once would see the measuring frame.
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    // Its tab stays in the strip, so the strip is still a complete list of
+    // what is open - a window behind another is otherwise hard to find.
+    assert!(text.contains("second.Spe"), "{text}");
+    // And one more spectrum is drawn than before: the tab that had the area,
+    // plus the one now in a window beside it.
+    assert_eq!(
+        spectra_drawn(&text),
+        before + 1,
+        "the pulled-out one should be drawn as well:\n{text}"
+    );
+
+    app.apply_action(Action::ToggleFloating(second));
+    assert!(!floating(&app), "and it can be put back");
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert_eq!(
+        spectra_drawn(&painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]))),
+        before,
+        "and the window goes with it"
+    );
+}
+
+/// The other arrangement puts every spectrum in a window, as before.
+#[test]
+fn the_window_arrangement_draws_them_all() {
+    let ctx = egui::Context::default();
+    let mut app = two_spectra();
+    let open = app.visible_windows().len();
+    assert!(open >= 3, "the two opened here, and the one already there");
+
+    app.style.layout = mantaray_gui::theme::Layout::Windows;
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert_eq!(
+        spectra_drawn(&text),
+        open,
+        "every window should be drawn:\n{text}"
+    );
+}
+
+/// Clicks once at a point and lets the queued action apply.
+fn click_at_point(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1400.0, 900.0),
+        )),
+        events: vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input, |ui| app.draw(ui));
+    frame(app, ctx, [1400.0, 900.0]);
+}
+
 /// The hex field can be typed into a character at a time.
 ///
 /// Rebuilt from the colour every frame, it could not be: `#0b1` is not a

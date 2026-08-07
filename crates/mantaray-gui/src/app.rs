@@ -268,6 +268,13 @@ pub struct SpectrumWindow {
     pub peak_info: Option<PeakInfo>,
     /// Whether the window is open.
     pub open: bool,
+    /// Pulled out of the tab strip into a window of its own.
+    ///
+    /// Per spectrum rather than per session: the usual reason to want a window
+    /// is to watch one spectrum while working on another, and that is a
+    /// statement about that one spectrum. Ignored when the scheme is already
+    /// arranging everything in windows.
+    pub floating: bool,
     /// Whether the data has changed since it was saved.
     pub modified: bool,
 }
@@ -289,6 +296,7 @@ impl SpectrumWindow {
             selection: None,
             peak_info: None,
             open: true,
+            floating: false,
             modified: false,
         }
     }
@@ -409,6 +417,8 @@ pub enum Action {
     /// Expand every collapsed window again.
     ExpandAll,
     ToggleMaximize(usize),
+    /// Pull a spectrum out of the tab strip into its own window, or put it back.
+    ToggleFloating(usize),
     MaximizeActive,
     /// Leave full-area mode, whatever window holds it (JOB ZOOM restore).
     RestoreWindows,
@@ -674,6 +684,103 @@ impl IsotopeCheck {
     pub fn nuclide<'a>(&self, library: &'a NuclideLibrary) -> Option<&'a Nuclide> {
         library.nuclide(self.found.as_deref()?)
     }
+}
+
+/// One tab per open spectrum, across the top of the working area.
+///
+/// The tab carries what the window's title bar carried: the name, an asterisk
+/// when there are unsaved changes, and a close button. Undocking is on the
+/// right-click menu rather than a button, because it is the rarer thing to
+/// want and a button for it on every tab would crowd out the names.
+///
+/// A spectrum already pulled out into a window keeps its tab, marked, so the
+/// strip stays a complete list of what is open - a window that has drifted
+/// behind another is otherwise hard to find again.
+fn tab_strip(
+    windows: &[SpectrumWindow],
+    shown: Option<usize>,
+    active: Option<usize>,
+    drawn: &[usize],
+    colors: &SpectrumColors,
+    ui: &mut egui::Ui,
+) -> Vec<Action> {
+    let mut actions = Vec::new();
+    if drawn.is_empty() {
+        return actions;
+    }
+    egui::ScrollArea::horizontal()
+        .max_height(28.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for index in drawn {
+                    let Some(window) = windows.get(*index) else {
+                        continue;
+                    };
+                    // A tab is marked when its spectrum has the area, or when
+                    // it is the window being worked on: the two are the same
+                    // until one is pulled out, and after that both deserve to
+                    // be findable in the strip.
+                    let selected = shown == Some(*index) || active == Some(*index);
+                    let label = format!(
+                        "{}{}{}",
+                        window.title,
+                        if window.modified { " *" } else { "" },
+                        if window.floating { "  \u{2197}" } else { "" }
+                    );
+                    let tab = ui.selectable_label(selected, label);
+                    if tab.clicked() {
+                        actions.push(Action::Activate(window.id));
+                    }
+                    if window.floating {
+                        tab.clone().on_hover_text("open in a window of its own");
+                    }
+                    tab.context_menu(|ui| {
+                        let (label, hint) = if window.floating {
+                            ("Put back in the tabs", "dock it here again")
+                        } else {
+                            ("Open in a window", "so two can be seen at once")
+                        };
+                        if ui.button(label).on_hover_text(hint).clicked() {
+                            actions.push(Action::ToggleFloating(window.id));
+                            ui.close();
+                        }
+                        if ui.button("Close").clicked() {
+                            actions.push(Action::CloseWindow(window.id));
+                            ui.close();
+                        }
+                    });
+                    // A close cross on the selected tab only. On every tab it
+                    // is a row of crosses to misclick; on none of them, closing
+                    // a spectrum means going to a menu.
+                    // A close cross on the tab holding the area, and only that
+                    // one. On every tab it is a row of crosses to misclick; a
+                    // pulled-out spectrum has its window's own close button.
+                    //
+                    // A multiplication sign rather than one of the prettier
+                    // crosses: those live in the emoji font, and the one that
+                    // is not there renders as an empty box.
+                    if shown == Some(*index)
+                        && ui
+                            .small_button("\u{00d7}")
+                            .on_hover_text("close this spectrum")
+                            .clicked()
+                    {
+                        actions.push(Action::CloseWindow(window.id));
+                    }
+                    ui.add_space(2.0);
+                }
+            });
+        });
+    // A rule under the strip, so the tabs read as attached to the spectrum
+    // below rather than floating above it.
+    let line = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        line.x_range(),
+        line.top() + 1.0,
+        egui::Stroke::new(1.0, colors.axes.with_alpha(0.35)),
+    );
+    ui.add_space(4.0);
+    actions
 }
 
 /// The application.
@@ -1061,6 +1168,10 @@ impl App {
             self.status = "no windows to arrange".into();
             return;
         }
+        // Arranging windows is a request for windows. In tabs there is only
+        // ever one spectrum on screen, so tiling would quietly do nothing and
+        // look broken; switching is what was actually being asked for.
+        self.style.layout = crate::theme::Layout::Windows;
         // The rects themselves are worked out at drawing time, from the area the
         // windows are actually drawn into that frame.
         self.pending_tiling = Some(tiling);
@@ -1940,6 +2051,27 @@ impl App {
             Action::ExpandAll => {
                 self.pending_collapse = Some(false);
                 self.status = "windows expanded".into();
+            }
+            Action::ToggleFloating(id) => {
+                if let Some(window) = self.windows.iter_mut().find(|window| window.id == id) {
+                    window.floating = !window.floating;
+                    self.status = if window.floating {
+                        // Never left maximised on the way out: a window pulled
+                        // out to sit beside another one, filling the area, is
+                        // not what anybody meant by it.
+                        format!("{} opened in a window", window.title)
+                    } else {
+                        format!("{} put back in the tabs", window.title)
+                    };
+                    let floating = window.floating;
+                    if floating && self.maximized == Some(id) {
+                        self.maximized = None;
+                    }
+                }
+                // Whichever way it went, it is the one being worked on.
+                if let Some(index) = self.windows.iter().position(|window| window.id == id) {
+                    self.focus_window(index);
+                }
             }
             Action::ToggleMaximize(id) => {
                 self.maximized = if self.maximized == Some(id) {
@@ -3208,6 +3340,16 @@ impl App {
                 self.apply_one(Action::PeakSearch);
                 return;
             }
+            "undocked" => {
+                // One spectrum pulled out of the strip while another fills the
+                // area: the arrangement the tabs exist to allow, and the one
+                // worth looking at because it is where the two paths meet.
+                if let Some(last) = self.windows.last().map(|window| window.id) {
+                    self.apply_one(Action::ToggleFloating(last));
+                }
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
             "nolabels" => {
                 // The same regions with the naming turned off, which is the
                 // pair worth looking at: sixty labels is the case the toggle
@@ -4166,6 +4308,30 @@ impl App {
             (area.height() * 0.78).clamp(260.0, 720.0),
         );
 
+        // The tab strip, when the scheme arranges spectra that way. Drawn first
+        // so that what is left of the area is what the chosen spectrum fills.
+        let tabbed = style.layout == crate::theme::Layout::Tabs;
+        // Which spectrum gets the area. Normally the active one - but the
+        // active one can be a window, because pulling a tab out focuses what
+        // you just acted on, and the area behind it must not go blank. So it
+        // falls back to whatever is still in the strip.
+        let shown = active
+            .filter(|index| windows.get(*index).is_some_and(|window| !window.floating))
+            .or_else(|| {
+                drawn
+                    .iter()
+                    .copied()
+                    .find(|index| !windows[*index].floating)
+            });
+        // Windows are kept below the strip rather than over it. A pulled-out
+        // spectrum that covers the tabs has hidden the only way back to them.
+        let area = if tabbed {
+            actions.extend(tab_strip(windows, shown, *active, &drawn, colors, ui));
+            ui.available_rect_before_wrap()
+        } else {
+            area
+        };
+
         for index in drawn {
             // Split the window out so its display can be borrowed mutably while
             // the spectrum - which may live in the detector - is borrowed shared.
@@ -4183,9 +4349,18 @@ impl App {
                 peak_info,
                 open: window_open,
                 modified,
+                floating,
                 ..
             } = window;
             let is_maximized = maximized_id == Some(*id);
+
+            // In tabs, one spectrum fills the area and the others are only
+            // names in the strip - except any that have been pulled out, which
+            // keep their windows alongside.
+            let docked = tabbed && !*floating;
+            if docked && shown != Some(index) {
+                continue;
+            }
 
             let spectrum = match *target {
                 Target::Buffer => buffer.as_ref(),
@@ -4210,26 +4385,10 @@ impl App {
             let mut open = *window_open;
             let title = format!("{}{}", window_title, if *modified { " *" } else { "" });
             let offset = 26.0 * (index % 6) as f32;
-            let mut window = egui::Window::new(title)
-                .id(egui::Id::new(("spectrum", *id)))
-                .constrain_to(area)
-                .open(&mut open);
-            window = if is_maximized {
-                window.fixed_rect(area.shrink(2.0))
-            } else if let Some(rect) = forced.remove(id) {
-                // A tile or cascade: forced for this one frame, which egui keeps,
-                // so the window stays free to move and resize afterwards.
-                // Constraining is off for the frame because egui would clamp the
-                // new position against the window's old size - the new size is
-                // not known until the frame ends - shoving tiled windows left.
-                // The rects are inside the area by construction.
-                window.fixed_rect(rect.intersect(area)).constrain(false)
-            } else {
-                window
-                    .default_size(default_size)
-                    .default_pos(area.min + egui::vec2(8.0 + offset, 8.0 + offset))
-            };
-            let response = window.show(ui.ctx(), |ui| {
+            // The same drawing either way. A docked spectrum is given the area
+            // directly; a floating one is given a window to put it in. Writing
+            // it once means the two arrangements cannot drift apart.
+            let draw_into = |ui: &mut egui::Ui| {
                 let events = crate::view::draw(
                     ui,
                     ViewInput {
@@ -4300,7 +4459,35 @@ impl App {
                         ViewEvent::ClosePeakInfo => *peak_info = None,
                     }
                 }
-            });
+            };
+
+            if docked {
+                // The whole area, with nothing over the trace. Only the chosen
+                // tab reaches here; the rest were skipped above.
+                draw_into(ui);
+                continue;
+            }
+
+            let mut window = egui::Window::new(title)
+                .id(egui::Id::new(("spectrum", *id)))
+                .constrain_to(area)
+                .open(&mut open);
+            window = if is_maximized {
+                window.fixed_rect(area.shrink(2.0))
+            } else if let Some(rect) = forced.remove(id) {
+                // A tile or cascade: forced for this one frame, which egui keeps,
+                // so the window stays free to move and resize afterwards.
+                // Constraining is off for the frame because egui would clamp the
+                // new position against the window's old size - the new size is
+                // not known until the frame ends - shoving tiled windows left.
+                // The rects are inside the area by construction.
+                window.fixed_rect(rect.intersect(area)).constrain(false)
+            } else {
+                window
+                    .default_size(default_size)
+                    .default_pos(area.min + egui::vec2(8.0 + offset, 8.0 + offset))
+            };
+            let response = window.show(ui.ctx(), draw_into);
             if response.is_some() {
                 *window_open = open;
             }
