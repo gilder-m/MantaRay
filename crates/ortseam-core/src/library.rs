@@ -302,6 +302,20 @@ impl NuclideLibrary {
             .find(|n| n.name.eq_ignore_ascii_case(name))
     }
 
+    /// Looks a nuclide up from whatever the operator typed.
+    ///
+    /// The name is read with [`parse_nuclide_name`] first, so `na22`, `22Na`,
+    /// `Na 22` and `Na-22` all find the same entry, and only then matched
+    /// against the library. Falls back to a plain lookup so a library using
+    /// some other naming can still be searched by typing a name from it
+    /// exactly.
+    pub fn find_typed(&self, typed: &str) -> Option<&Nuclide> {
+        nuclide_readings(typed)
+            .iter()
+            .find_map(|name| self.nuclide(name))
+            .or_else(|| self.nuclide(typed.trim()))
+    }
+
     /// Mutable case-insensitive lookup by name.
     pub fn nuclide_mut(&mut self, name: &str) -> Option<&mut Nuclide> {
         self.nuclides
@@ -605,4 +619,135 @@ impl<'a> IntoIterator for &'a NuclideLibrary {
     fn into_iter(self) -> Self::IntoIter {
         self.nuclides.iter()
     }
+}
+
+/// Reads a nuclide name the way somebody would write one, into `Na-22`.
+///
+/// There is no single convention. The symbol comes first in a lab notebook and
+/// on a source's label, last in a journal, and the separator is a hyphen, a
+/// space or nothing at all depending on who is typing. `Na22`, `22Na`, `Na-22`,
+/// `Na 22`, `na 22` and `22-NA` are all the same nuclide, and asking an
+/// operator to remember which one this program wants is asking them to get it
+/// wrong while holding a source.
+///
+/// A metastable state keeps its suffix wherever it is written: `Ba137m`,
+/// `137mBa` and `Ba-137m` all read as `Ba-137m`, and `m2` survives too.
+///
+/// Returns the most likely reading, or `None` when there is no symbol, no mass
+/// number, or anything else in the text - a typo is refused rather than turned
+/// into a lookup for something the operator did not ask about. Where a name
+/// has more than one reading, [`NuclideLibrary::find_typed`] tries them all.
+pub fn parse_nuclide_name(typed: &str) -> Option<String> {
+    nuclide_readings(typed).into_iter().next()
+}
+
+/// Every way the typed text could be read, likeliest first.
+///
+/// `22mg` is Mg-22 to anyone writing an element symbol first, and G-22m to
+/// anyone writing the state before the symbol. Both readings are returned and
+/// the library decides, which is more reliable than a rule: there is no reading
+/// of the text alone that gets Mg-22 and Ba-137m both right.
+fn nuclide_readings(typed: &str) -> Vec<String> {
+    /// A run of letters or a run of digits. Nothing else survives the scan.
+    enum Token {
+        Letters(String),
+        Digits(String),
+    }
+
+    let mut tokens: Vec<Token> = Vec::new();
+    // A separator between two runs of digits is a slip of the finger, not a
+    // name: closing the gap in `Na-22-3` reads it as Na-223, which is a
+    // different nuclide and no way to find out you mistyped. Between runs of
+    // letters it is just punctuation - `137m-Ba` is how a lot of people write
+    // it - so those are joined and sorted out below.
+    let mut after_separator = false;
+    for character in typed.trim().chars() {
+        // The separator is whatever the writer felt like, including none.
+        if matches!(character, '-' | '_' | ' ') {
+            after_separator = true;
+            continue;
+        }
+        let (is_digit, is_letter) = (character.is_ascii_digit(), character.is_ascii_alphabetic());
+        if !is_digit && !is_letter {
+            return Vec::new();
+        }
+        if after_separator && is_digit && matches!(tokens.last(), Some(Token::Digits(_))) {
+            return Vec::new();
+        }
+        after_separator = false;
+        match tokens.last_mut() {
+            Some(Token::Digits(run)) if is_digit => run.push(character),
+            Some(Token::Letters(run)) if is_letter => run.push(character),
+            _ if is_digit => tokens.push(Token::Digits(character.to_string())),
+            _ => tokens.push(Token::Letters(character.to_string())),
+        }
+    }
+
+    // The shapes a name can take, once the separators are gone. `Ba137m2` is
+    // letters-digits-letters-digits; `137m2Ba` is the same four the other way
+    // round. Anything else is not a nuclide name.
+    use Token::{Digits, Letters};
+    let (symbol, mass, state): (&str, &str, String) = match tokens.as_slice() {
+        [Letters(symbol), Digits(mass)] => (symbol, mass, String::new()),
+        [Letters(symbol), Digits(mass), Letters(state)] => (symbol, mass, state.clone()),
+        [
+            Letters(symbol),
+            Digits(mass),
+            Letters(state),
+            Digits(number),
+        ] => (symbol, mass, format!("{state}{number}")),
+        [Digits(mass), Letters(symbol)] => (symbol, mass, String::new()),
+        [
+            Digits(mass),
+            Letters(state),
+            Digits(number),
+            Letters(symbol),
+        ] => (symbol, mass, format!("{state}{number}")),
+        _ => return Vec::new(),
+    };
+
+    let mut readings = Vec::new();
+    // As written, if the symbol is a symbol and the state is a state.
+    if let Some(name) = assemble(symbol, mass, &state) {
+        readings.push(name);
+    }
+    // And the other reading of `137mBa`: the leading letter of the symbol is
+    // the state, written before the symbol rather than after it. Only worth
+    // considering when nothing else is claiming to be the state.
+    if state.is_empty()
+        && matches!(tokens.as_slice(), [Digits(_), Letters(_)])
+        && symbol.len() > 1
+        && symbol.starts_with(['m', 'M'])
+        && let Some(name) = assemble(&symbol[1..], mass, "m")
+    {
+        readings.push(name);
+    }
+    readings
+}
+
+/// Puts a symbol, a mass number and a state together, or refuses them.
+fn assemble(symbol: &str, mass: &str, state: &str) -> Option<String> {
+    // Checked against the element table rather than merely counted: `Xy-137`
+    // is a typo, and an empty result would leave the operator wondering
+    // whether the library was at fault.
+    let symbol = crate::elements::normalise(symbol)?;
+    if mass.is_empty() {
+        return None;
+    }
+    // A leading zero is a typo, not a mass number: `Na-022` must not find
+    // Na-22, because the two would be indistinguishable in a report.
+    if mass.len() > 1 && mass.starts_with('0') {
+        return None;
+    }
+    // The only state a gamma library names is a metastable one, numbered from
+    // the second onwards: `m`, `m2`, `m3`.
+    let state = state.to_ascii_lowercase();
+    if !state.is_empty() {
+        let mut letters = state.chars();
+        if letters.next() != Some('m') || !letters.all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+    }
+
+    Some(format!("{symbol}-{mass}{state}"))
 }

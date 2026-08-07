@@ -1493,6 +1493,8 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
     }
 
+    isotope_check(app, ui);
+
     ui.separator();
     ui.heading("Regions");
     // The regions of the active spectrum, with the energy and net area of each.
@@ -4525,6 +4527,116 @@ fn exit_dialog(app: &mut App, ctx: &egui::Context) {
         app.quit_confirmed = true;
     }
     app.dialogs.set(Dialog::Exit, open && !cancel);
+}
+
+/// "Is that peak the caesium?" - a nuclide by name, drawn over the spectrum.
+///
+/// The name is read however it is written, because at a detector nobody wants
+/// to be told their spelling of `Na22` was the wrong one. Nothing is looked up
+/// until the operator asks for it, by pressing Enter or clicking Show: a
+/// search that ran on every keystroke would flash "not found" through every
+/// prefix of the name being typed, which reads as a fault rather than as
+/// progress.
+fn isotope_check(app: &mut App, ui: &mut egui::Ui) {
+    ui.separator();
+    ui.heading("Isotope");
+
+    let mut look_up = false;
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut app.isotope.typed)
+                .desired_width(96.0)
+                .hint_text("Cs-137"),
+        );
+        look_up |= field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        look_up |= ui
+            .button("Show")
+            .on_hover_text("draw this nuclide's lines over the spectrum")
+            .clicked();
+        // The cutoff is the operator's setting, not part of the answer, so it
+        // survives clearing the nuclide.
+        if (app.isotope.found.is_some() || app.isotope.missing.is_some())
+            && ui.button("Clear").clicked()
+        {
+            app.isotope = crate::app::IsotopeCheck {
+                min_intensity: app.isotope.min_intensity,
+                ..Default::default()
+            };
+        }
+    });
+
+    if look_up {
+        app.isotope.resolve(&app.library);
+    }
+
+    // What was found, or plainly why not. The two failures are different
+    // problems with different fixes, so they are not given the same words.
+    if let Some(reason) = app.isotope.missing.clone() {
+        ui.colored_label(app.colors.alarm.to_color(), format!("\u{2717} {reason}"));
+        if reason.starts_with("no nuclide library") {
+            ui.label("Analyse / Library file... opens one");
+        }
+        return;
+    }
+    let Some(nuclide) = app.isotope.nuclide(&app.library).cloned() else {
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.strong(&nuclide.name);
+        ui.label(nuclide.half_life_display());
+    });
+
+    // Only the lines worth looking for. The cutoff is the operator's, because
+    // what counts as findable depends on the detector and the count length.
+    let mut lines: Vec<_> = nuclide
+        .peaks
+        .iter()
+        .filter(|peak| peak.yield_percent >= app.isotope.min_intensity)
+        .collect();
+    lines.sort_by(|a, b| {
+        b.yield_percent
+            .partial_cmp(&a.yield_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Above");
+        let cutoff = ui.add(
+            egui::DragValue::new(&mut app.isotope.min_intensity)
+                .speed(0.1)
+                .range(0.0..=100.0)
+                .suffix(" %"),
+        );
+        cutoff.on_hover_text("hide lines fainter than this, which no count would resolve");
+    });
+
+    if lines.is_empty() {
+        ui.label(format!(
+            "no line above {:.3} % - {} has {}",
+            app.isotope.min_intensity,
+            nuclide.name,
+            crate::view::count_of_lines(nuclide.peaks.len())
+        ));
+        return;
+    }
+
+    // The strongest first, with the rest under a scroll so a nuclide with
+    // forty lines cannot push the region list off the bottom of the sidebar.
+    egui::ScrollArea::vertical()
+        .max_height(110.0)
+        .show(ui, |ui| {
+            egui::Grid::new("isotope_lines")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    for peak in &lines {
+                        ui.label(format!("{:.2} keV", peak.energy));
+                        ui.label(format!("{:.2} %", peak.yield_percent));
+                        ui.end_row();
+                    }
+                });
+        });
 }
 
 /// How the count has behaved while it ran: rate, and dead time under it.

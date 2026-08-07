@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use ortseam_core::{
     AnalysisOptions, CalculationSettings, CalibrationPoint, CalibrationTable,
-    EfficiencyCalibration, NuclideLibrary, PeakInfo, QaChart, QuantitativeReport, Roi, SampleInfo,
-    Spectrum, StripFactor, UndoStack, analyse, mark_peaks, peak_info, smooth, strip,
+    EfficiencyCalibration, Nuclide, NuclideLibrary, PeakInfo, QaChart, QuantitativeReport, Roi,
+    SampleInfo, Spectrum, StripFactor, UndoStack, analyse, mark_peaks, peak_info, smooth, strip,
 };
 #[cfg(feature = "simulator")]
 use ortseam_device::SimulatedMcb;
@@ -606,6 +606,68 @@ impl InstrumentScan {
     }
 }
 
+/// Checking one named nuclide against what is on screen.
+///
+/// The everyday question at a detector is "is that peak the caesium?", and the
+/// shortest honest answer is to put the nuclide's lines on the spectrum and let
+/// the operator look. Drawing the whole library at once does not answer it -
+/// with a couple of thousand nuclides loaded, every channel has a line under
+/// it, and a coincidence becomes indistinguishable from an identification.
+#[derive(Clone, Debug, Default)]
+pub struct IsotopeCheck {
+    /// What the operator typed, kept exactly as typed.
+    pub typed: String,
+    /// The nuclide found, by the library's own name for it.
+    pub found: Option<String>,
+    /// Why nothing was found, when nothing was.
+    pub missing: Option<String>,
+    /// Lines below this emission probability are not drawn.
+    ///
+    /// A nuclide's faint lines are real but not usable for identifying it:
+    /// they sit under the background in any reasonable count, and drawn on the
+    /// spectrum they suggest agreement that a measurement cannot support.
+    pub min_intensity: f64,
+}
+
+impl IsotopeCheck {
+    /// Default cutoff: the lines a nuclide is actually recognised by.
+    pub const DEFAULT_MIN_INTENSITY: f64 = 1.0;
+
+    /// Looks up whatever has been typed, and says why if it is not there.
+    ///
+    /// The two failures are worth telling apart. "No library is loaded" is a
+    /// thing the operator can fix in one action, and reporting it as "not
+    /// found" would send them looking for a nuclide that was never searched
+    /// for.
+    pub fn resolve(&mut self, library: &NuclideLibrary) {
+        self.found = None;
+        self.missing = None;
+        let typed = self.typed.trim();
+        if typed.is_empty() {
+            return;
+        }
+        if library.is_empty() {
+            self.missing = Some("no nuclide library is loaded".into());
+            return;
+        }
+        match library.find_typed(typed) {
+            Some(nuclide) => self.found = Some(nuclide.name.clone()),
+            None => {
+                let read_as = ortseam_core::parse_nuclide_name(typed);
+                self.missing = Some(match read_as {
+                    Some(name) => format!("{name} is not in {}", library.name),
+                    None => format!("{typed:?} is not a nuclide name"),
+                });
+            }
+        }
+    }
+
+    /// The nuclide itself, when one was found.
+    pub fn nuclide<'a>(&self, library: &'a NuclideLibrary) -> Option<&'a Nuclide> {
+        library.nuclide(self.found.as_deref()?)
+    }
+}
+
 /// The application.
 pub struct App {
     /// What the last scan of local instruments found.
@@ -633,6 +695,8 @@ pub struct App {
     pub settings: CalculationSettings,
     /// Working nuclide library.
     pub library: NuclideLibrary,
+    /// The nuclide being checked against the spectrum, from the sidebar.
+    pub isotope: IsotopeCheck,
     /// Where the library came from.
     pub library_path: Option<PathBuf>,
     /// Display colours.
@@ -847,6 +911,10 @@ impl App {
             next_id: 1,
             settings: CalculationSettings::default(),
             library: NuclideLibrary::new(""),
+            isotope: IsotopeCheck {
+                min_intensity: IsotopeCheck::DEFAULT_MIN_INTENSITY,
+                ..IsotopeCheck::default()
+            },
             library_path: None,
             colors: theme.colors(),
             theme,
@@ -3124,6 +3192,20 @@ impl App {
                 }
                 return;
             }
+            "isotope" => {
+                // A nuclide checked against the spectrum by name, which is what
+                // the sidebar's Isotope box is for. ORTSEAM_DEMO_ISOTOPE picks
+                // the nuclide; the library is whatever was loaded, or the test
+                // sample when none was.
+                if self.library.is_empty() {
+                    self.library = NuclideLibrary::sample_for_tests();
+                }
+                self.isotope.typed =
+                    std::env::var("ORTSEAM_DEMO_ISOTOPE").unwrap_or_else(|_| "cs137".into());
+                self.isotope.resolve(&self.library);
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
             "cal" => {
                 // The auto-calibration story, as a picture: strip the
                 // calibration, then recover it from the peaks.
@@ -3998,6 +4080,7 @@ impl App {
             colors,
             mark_mode,
             library,
+            isotope,
             active,
             window_area,
             maximized,
@@ -4007,6 +4090,11 @@ impl App {
         let area = *window_area;
         let maximized_id = *maximized;
         let peak_font = *peak_font;
+        // Resolved once for the frame rather than per window: every window
+        // shows the same nuclide, because the question "is that the caesium?"
+        // is asked of whatever is on screen, not of one window.
+        let checked = isotope.nuclide(library);
+        let isotope_min_intensity = isotope.min_intensity;
         // Windows are staggered so several are usable at once, and sized to fit
         // the spectrum area.
         let default_size = egui::vec2(
@@ -4088,6 +4176,8 @@ impl App {
                         colors,
                         mark_mode: *mark_mode,
                         library: Some(library),
+                        isotope: checked,
+                        isotope_min_intensity,
                         selection: *selection,
                         peak_info: peak_info.as_ref(),
                         peak_font,

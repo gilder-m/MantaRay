@@ -21,6 +21,7 @@
 pub mod analysis;
 pub mod calibration;
 pub mod efficiency;
+pub mod elements;
 pub mod error;
 pub mod library;
 pub mod qa;
@@ -45,6 +46,7 @@ pub use efficiency::{
 pub use error::{AnalysisError, CalibrationError};
 pub use library::{
     LibraryHit, LibraryMatch, LibraryPeak, Nuclide, NuclideFlags, NuclideLibrary, PhotonKind,
+    parse_nuclide_name,
 };
 pub use qa::{ControlLimits, QaChart, QaMetric, QaRecord, QaStatistics, QaStatus};
 pub use quant::{
