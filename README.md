@@ -1,4 +1,21 @@
+# Written with AI but it works I swear!
+
+...and here is the evidence, because "trust me" is not evidence: 630 automated
+tests, file readers checked against genuine ORTEC files, and a hardware path
+validated against a real ORTEC 926 - all 8192 channels read back identically to
+ORTEC's own library, clocks matching to the millisecond. Where something could
+not be confirmed it is marked unverified rather than quietly assumed. The
+[How this was built](#how-this-was-built) section at the bottom is the honest
+version of this joke.
+
+---
+
 # ORTSEAM
+
+[![CI](https://github.com/gilder-m/ORTSEAM/actions/workflows/ci.yml/badge.svg)](https://github.com/gilder-m/ORTSEAM/actions/workflows/ci.yml)
+[![Licence: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/licence-PolyForm%20NC%201.0.0-blue)](LICENSE.md)
+[![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange)](https://www.rust-lang.org)
+[![Platforms: Linux, Windows, macOS](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)](#platforms)
 
 A modern, open multichannel-analyzer (MCA) emulator and gamma-spectroscopy
 workbench, written in Rust. It does what ORTEC's MAESTRO does - acquire, display,
@@ -198,7 +215,7 @@ it can be driven without a window on screen. Five suites run in
 
 | | builds | tests | hardware |
 |---|---|---|---|
-| Windows | yes | 551 | yes - USB, with only ORTEC's kernel driver |
+| Windows | yes | 630 | yes - USB, with only ORTEC's kernel driver |
 | Linux | yes | all but the Windows-only suites | yes - USB over libusb, with no driver at all |
 | macOS | type-checks | no machine to run them on | libusb path compiles; not yet run |
 
@@ -216,6 +233,29 @@ contents.
   manual, where it lives here, and what is deliberately different
 - [docs/formats.md](docs/formats.md) - file format details
 - [docs/architecture.md](docs/architecture.md) - how the crates fit together
+
+## Acknowledgements
+
+**Nuclear data.** ORTSEAM ships no nuclide library, deliberately: line energies
+and emission probabilities belong to whoever evaluated them, and a table with no
+evaluation, no date and nothing to cite is worse than no table at all, because a
+result computed from it cannot be defended. A library comes from a `.Lib` file
+you supply, or is built locally from an evaluated source. Those sources, and the
+people who make them reachable:
+
+- the **National Nuclear Data Center** at Brookhaven National Laboratory, for
+  NuDat and the ENSDF evaluations underneath it;
+- the **IAEA Nuclear Data Services**, whose Live Chart of Nuclides API serves the
+  same evaluations in machine-readable form;
+- **[carsus](https://github.com/tardis-sn/carsus)**, from the TARDIS project,
+  which retrieves and caches the NNDC tables;
+- **Dani Solakian** and the Berkeley **[RadWatch](https://github.com/RadWatch)**
+  `spectral-analysis` project, whose compiled NNDC gamma database ORTSEAM's
+  library builder is designed around, used here with permission.
+
+**Standing on.** [egui and eframe](https://github.com/emilk/egui) for the
+interface, [nusb](https://github.com/kevinmehall/nusb) for USB without a vendor
+driver, and the Rust project for the rest.
 
 ## Licence
 
@@ -242,7 +282,7 @@ than typed line by line. That is stated plainly because it should change how you
 read the code and how much you trust it before checking it yourself.
 
 What that does **not** mean is that it is unverified. The behaviour is pinned by
-about 550 automated tests, the file readers are checked against genuine ORTEC
+about 630 automated tests, the file readers are checked against genuine ORTEC
 files, and the hardware path was validated against a real ORTEC 926 - the
 in-house USB readout returns all 8192 channels identically to ORTEC's own
 library, with the clocks matching to the millisecond. Where something could not

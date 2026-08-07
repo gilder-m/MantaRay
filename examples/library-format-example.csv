@@ -1,0 +1,16 @@
+# FORMAT EXAMPLE - NOT A NUCLIDE LIBRARY. DO NOT USE FOR MEASUREMENTS.
+#
+# This file exists to show the shape of ORTSEAM's CSV library format, nothing
+# more. The numbers below are transcribed by hand and carry no evaluation, no
+# date and nothing to cite - a result computed from them could not be defended,
+# which is why ORTSEAM ships no nuclide library at all.
+#
+# For real work, load an ORTEC .Lib file, or build a library from an evaluated
+# source (NNDC/ENSDF, or the IAEA Live Chart). See the README.
+#
+# Columns: nuclide, half life in seconds, energy in keV, yield %
+Am-241, 13650777600, 59.541, 35.9
+Cs-137, 949252608, 661.657, 85.1
+Co-60, 166344000, 1173.228, 99.85
+Co-60, 166344000, 1332.492, 99.9826
+K-40, 39390336000000000, 1460.822, 10.66
