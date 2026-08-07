@@ -2053,3 +2053,69 @@ fn settings_saved_under_the_former_name_are_restored() {
         "and the palette with it"
     );
 }
+
+/// A spectrum pulled out of the tab strip stays out - across a change of
+/// workspace, and across a restart.
+///
+/// Both were asked in review, and they are different questions. Switching
+/// workspace changes what the sidebar shows and nothing about the windows, so
+/// nothing there could reset it. A restart is the one that was wrong: the
+/// snapshot did not carry the arrangement, so a spectrum deliberately pulled
+/// out to sit beside another came back docked, with no way to tell why.
+#[test]
+fn a_pulled_out_spectrum_stays_out() {
+    use mantaray_gui::workspace::Workspace;
+
+    let mut app = mantaray_gui::app::App::headless();
+    app.open_buffer("first.Spe".into(), spectrum_with_counts(), None);
+    app.open_buffer("second.Spe".into(), spectrum_with_counts(), None);
+    let second = app
+        .windows
+        .iter()
+        .find(|window| window.title == "second.Spe")
+        .expect("the second spectrum")
+        .id;
+    app.apply_action(mantaray_gui::app::Action::ToggleFloating(second));
+
+    let floating = |app: &mantaray_gui::app::App, title: &str| {
+        app.windows
+            .iter()
+            .find(|window| window.title == title)
+            .map(|window| window.floating)
+    };
+    assert_eq!(floating(&app, "second.Spe"), Some(true));
+
+    // A change of workspace decides what the sidebar shows, and leaves the
+    // arrangement of the spectra alone.
+    app.workspace = Workspace::acquisition();
+    assert_eq!(floating(&app, "second.Spe"), Some(true));
+    app.workspace = Workspace::analysis();
+    assert_eq!(
+        floating(&app, "second.Spe"),
+        Some(true),
+        "a workspace should not put a pulled-out spectrum back"
+    );
+
+    // And it survives the snapshot a crash leaves behind.
+    let session = app.snapshot_session();
+    let mut restored = mantaray_gui::app::App::headless();
+    restored.restore_session(session);
+    assert_eq!(
+        floating(&restored, "second.Spe"),
+        Some(true),
+        "and neither should a restart"
+    );
+    assert_eq!(
+        floating(&restored, "first.Spe"),
+        Some(false),
+        "while one that was never pulled out stays where it was"
+    );
+}
+
+/// A spectrum with something in it, so it is worth snapshotting.
+fn spectrum_with_counts() -> mantaray_core::Spectrum {
+    let mut spectrum = mantaray_core::Spectrum::new(256);
+    spectrum.live_time = 10.0;
+    spectrum.channels[100] = 500;
+    spectrum
+}

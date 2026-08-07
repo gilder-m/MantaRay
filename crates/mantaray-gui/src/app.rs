@@ -1301,6 +1301,7 @@ impl App {
                         display: window.display,
                         calibration: window.calibration.clone(),
                         modified: window.modified,
+                        floating: window.floating,
                     })
             })
             .collect();
@@ -1326,6 +1327,7 @@ impl App {
                 window.display.set_length(length);
                 window.calibration = saved.calibration;
                 window.modified = saved.modified;
+                window.floating = saved.floating;
                 window.path = saved.path;
             }
         }

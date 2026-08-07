@@ -235,6 +235,8 @@ contents.
 - [docs/architecture.md](docs/architecture.md) - how the crates fit together
 - [docs/nuclide-data.md](docs/nuclide-data.md) - why no nuclide library ships, and
   how to bring or build one
+- [docs/themes.md](docs/themes.md) - the rules a palette has to satisfy, the
+  scheme file, and where Conductor's colours were measured from
 
 ## Acknowledgements
 
