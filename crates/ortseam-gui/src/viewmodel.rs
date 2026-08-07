@@ -419,22 +419,36 @@ impl DisplayState {
     }
 }
 
-/// The next power of ten strictly above `peak`, as MAESTRO scales a log axis.
+/// One whole decade above `peak`, keeping the figure it leads with.
 ///
-/// The point is the decade line itself: a peak of a thousand counts sits on
-/// the 1000 line with the 10,000 line drawn above it, so the eye reads the
-/// height against a labelled decade instead of against the top of the plot.
-/// It wastes vertical space compared with the 1-2-5 ceiling, which is why it
-/// is an option rather than the rule.
+/// A peak of 300 tops the axis out at 3000, and one of 1000 at 10,000: the
+/// same leading digit, one decade up. That is a full decade of headroom, so
+/// the peak sits at a tenth of the height with the decade it belongs to drawn
+/// beneath it, and the eye reads the height against a labelled number instead
+/// of against the top of the plot.
+///
+/// Anything after the leading digit rounds it up - 347 tops out at 4000 -
+/// because a top of 3470 is a number nobody wants to read off an axis.
+///
+/// It spends vertical space freely compared with the 1-2-5 ceiling, which is
+/// why it is an option rather than the rule.
 fn decade_ceiling(peak: u64) -> u64 {
-    let mut decade = 1u64;
-    while decade <= peak {
-        let Some(next) = decade.checked_mul(10) else {
-            return u64::MAX;
-        };
-        decade = next;
+    if peak == 0 {
+        return 10;
     }
-    decade
+    // The largest power of ten at or below the peak: the decade it lives in.
+    let mut decade = 1u64;
+    while decade <= peak / 10 {
+        decade *= 10;
+    }
+    // The digit it leads with, rounded up if anything follows it.
+    let leading = peak / decade;
+    let leading = if peak.is_multiple_of(decade) {
+        leading
+    } else {
+        leading + 1
+    };
+    leading.saturating_mul(decade).saturating_mul(10)
 }
 
 /// The next 1, 2 or 5 times a power of ten strictly above `peak`.
@@ -467,16 +481,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_decade_option_tops_out_on_the_next_power_of_ten() {
-        // The user's own example: a tallest bin of 1000 counts should leave
-        // the 10,000 line drawn above it, the way MAESTRO scales a log axis.
+    fn the_decade_option_tops_out_one_decade_above_the_peak() {
+        // The rule, in the user's own words: a decade above the peak as it
+        // stands, so 300 counts tops out at 3000 rather than at 1000.
+        assert_eq!(decade_ceiling(300), 3_000);
         assert_eq!(decade_ceiling(1_000), 10_000);
-        assert_eq!(decade_ceiling(999), 1_000);
-        assert_eq!(decade_ceiling(1), 10);
-        assert_eq!(decade_ceiling(0), 1);
-        // Strictly above, so a peak never sits flat against the ceiling.
         assert_eq!(decade_ceiling(10), 100);
-        assert_eq!(decade_ceiling(15_675), 100_000);
+        assert_eq!(decade_ceiling(1), 10);
+        // Anything after the leading digit rounds it up: nobody wants to read
+        // 3470 off an axis.
+        assert_eq!(decade_ceiling(347), 4_000);
+        assert_eq!(decade_ceiling(999), 10_000);
+        assert_eq!(decade_ceiling(15_675), 200_000);
+        // Nothing counted yet still needs a scale to draw against.
+        assert_eq!(decade_ceiling(0), 10);
+        // A peak this big cannot be given a decade of headroom; it must still
+        // return, and the axis loop that walks decades must still terminate.
+        assert!(decade_ceiling(u64::MAX) >= u64::MAX / 10);
+    }
+
+    #[test]
+    fn the_peak_sits_a_tenth_of_the_way_up_its_own_decade() {
+        // What the extra headroom buys: the peak is read against a number
+        // below it rather than against the top of the plot.
+        let mut spectrum = Spectrum::new(16);
+        spectrum.channels[4] = 300;
+        let mut display = DisplayState::for_length(16);
+        display.vertical = VerticalScale::Logarithmic;
+        display.log_decade_top = true;
+
+        let full_scale = display.full_scale(&spectrum);
+        assert_eq!(full_scale, 3_000);
+        let fraction = display.height_fraction(300, full_scale);
+        assert!(
+            fraction > 0.5 && fraction < 0.95,
+            "the peak should sit clearly below the top, at {fraction}"
+        );
     }
 
     #[test]

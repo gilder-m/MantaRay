@@ -32,11 +32,13 @@ felt every session.
   than real, with the precision the size of the number deserves: a background
   at a fraction of a count per second and a check source at thousands both
   have to read sensibly from the same field.
-- *A logarithmic axis can top out on the next power of ten*, the way
-  MAESTRO's does, so a thousand-count peak is read against a drawn 10,000
-  line instead of against the ceiling. Display / "Log to the next decade",
-  off by default so the existing tighter scaling stays; the decade the axis
-  stops at is labelled, which is the whole point of scaling to one.
+- *A logarithmic axis can top out a whole decade above the peak*, keeping the
+  figure it leads with: 300 counts tops out at 3000, 1000 at 10,000. The peak
+  is then read against a number drawn below it rather than against the
+  ceiling. Display / "Log to the next decade", off by default so the existing
+  tighter scaling stays. Anything after the leading digit rounds it up - 347
+  tops out at 4000 - and because the axis can now stop between decades, the
+  number it stops at is labelled in its own right.
 - *Peak Info fits a dragged selection.* Drag a span, right-click, Peak Info,
   and the fit is over exactly what was dragged - with no region marked.
   Measuring a peak no longer edits the spectrum's regions as a side effect
