@@ -913,6 +913,25 @@ fn draw_axes(
     match display.vertical {
         VerticalScale::Logarithmic => {
             let minor = axis.gamma_multiply(0.14);
+            // The axis can now top out between decades - 300 counts tops out
+            // at 3000 - so the number the axis stops at is labelled in its own
+            // right when no decade line lands on it.
+            let tops_on_a_decade = {
+                let mut decade = 1u64;
+                while decade < full_scale {
+                    decade = decade.saturating_mul(10);
+                }
+                decade == full_scale
+            };
+            if !tops_on_a_decade {
+                painter.text(
+                    Pos2::new(plot.left() - 6.0, plot.top()),
+                    Align2::RIGHT_CENTER,
+                    format_axis_count(full_scale),
+                    label_font.clone(),
+                    axis,
+                );
+            }
             let mut decade = 1u64;
             while decade <= full_scale {
                 let fraction = display.height_fraction(decade, full_scale);

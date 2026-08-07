@@ -34,6 +34,23 @@ away, and a Clear starts the log over rather than drawing a line across the
 discontinuity. This is separate from the QA control charts, which compare
 check-source measurements across days; this is one acquisition, from inside.
 
+**Clearing lets the next count start again (2026-08-06).** Found by running
+the bench check against the 926: `CLEAR` resets the instrument's clocks, but
+the mirror kept the old ones until the next poll - and the start guard added
+with the preset work reads them. With a live preset held, Clear and then Start
+was refused as "the Live time preset is already reached - clear the spectrum,
+or change the preset", which told the operator to do the very thing they had
+just done; a job's `CLEAR` / `START` did not start at all. The mirror's clocks
+now go with the instrument's, as the simulator's always have. The whole
+sequence is pinned on the hardware now: count out a one-second preset, watch
+the instrument stop itself at LT=1.00, and see the next `START` refused by
+name - the first end-to-end proof of that guard on the instrument it was
+written for.
+
+Also here: a doc comment had been separated from what it documents by a
+function inserted between them, leaving `logarithmic_ceiling` undocumented and
+its text attached to `decade_ceiling`.
+
 **Five things found by daily-driving it (2026-08-06).** All raised by the
 person using the program against a real detector, and all small enough to be
 felt every session.
@@ -47,11 +64,13 @@ felt every session.
   than real, with the precision the size of the number deserves: a background
   at a fraction of a count per second and a check source at thousands both
   have to read sensibly from the same field.
-- *A logarithmic axis can top out on the next power of ten*, the way
-  MAESTRO's does, so a thousand-count peak is read against a drawn 10,000
-  line instead of against the ceiling. Display / "Log to the next decade",
-  off by default so the existing tighter scaling stays; the decade the axis
-  stops at is labelled, which is the whole point of scaling to one.
+- *A logarithmic axis can top out a whole decade above the peak*, keeping the
+  figure it leads with: 300 counts tops out at 3000, 1000 at 10,000. The peak
+  is then read against a number drawn below it rather than against the
+  ceiling. Display / "Log to the next decade", off by default so the existing
+  tighter scaling stays. Anything after the leading digit rounds it up - 347
+  tops out at 4000 - and because the axis can now stop between decades, the
+  number it stops at is labelled in its own right.
 - *Peak Info fits a dragged selection.* Drag a span, right-click, Peak Info,
   and the fit is over exactly what was dragged - with no region marked.
   Measuring a peak no longer edits the spectrum's regions as a side effect

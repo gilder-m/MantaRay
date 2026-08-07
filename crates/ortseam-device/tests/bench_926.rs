@@ -127,3 +127,62 @@ fn the_presets_the_instrument_holds_are_read_on_connecting() {
         }
     }
 }
+
+#[test]
+#[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
+fn a_preset_the_instrument_has_already_reached_refuses_the_next_start() {
+    // The whole point of reading the presets back, proven end to end on the
+    // instrument: count out a short preset, then try to start again. The 926
+    // answers START, leaves the clocks where they are and says nothing, so the
+    // refusal has to come from here - and it has to name the preset.
+    let mut instrument = open(None).expect("the 926 opens");
+    let held = *instrument.presets();
+    println!("holding: {held:?}");
+
+    // A preset short enough to watch reach, from a cleared spectrum.
+    instrument.clear().expect("clear");
+    let brief = ortseam_device::Presets {
+        live_time: Some(1.0),
+        ..Default::default()
+    };
+    instrument.set_presets(brief).expect("a one-second preset");
+    instrument.start().expect("start");
+
+    // The instrument stops itself; poll until it says so.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while instrument.is_active() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the instrument never stopped on a one-second live preset"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        instrument.poll(1.0).expect("poll");
+    }
+    let status = instrument.status();
+    println!(
+        "stopped itself at RT={:.2} LT={:.2}",
+        status.real_time, status.live_time
+    );
+    assert!(
+        status.live_time >= 1.0,
+        "the live preset should have been reached, got LT={}",
+        status.live_time
+    );
+
+    // Now the state that used to swallow a START.
+    let error = match instrument.start() {
+        Ok(()) => panic!("starting against a reached preset must not be accepted"),
+        Err(error) => error.to_string(),
+    };
+    println!("refused: {error}");
+    assert!(
+        error.contains("Live time"),
+        "the refusal should name the preset: {error}"
+    );
+
+    // Put the instrument back the way it was found.
+    instrument
+        .set_presets(held)
+        .expect("the held presets go back");
+    instrument.clear().expect("clear");
+}
