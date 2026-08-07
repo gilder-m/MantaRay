@@ -788,10 +788,15 @@ impl App {
     /// dresses the interface in its theme.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::headless();
-        if let Some(text) = cc
-            .storage
-            .and_then(|storage| storage.get_string(crate::APPLICATION_ID))
-            && let Ok(persisted) = serde_json::from_str::<Persisted>(&text)
+        // The key inside the file matters as much as the file's name. Moving
+        // the file across without also looking under the former key reads an
+        // entry that is not there and starts with the defaults - which is the
+        // same loss the move exists to prevent, one step further in.
+        if let Some(text) = cc.storage.and_then(|storage| {
+            storage
+                .get_string(crate::APPLICATION_ID)
+                .or_else(|| storage.get_string(crate::session::FORMER_NAME))
+        }) && let Ok(persisted) = serde_json::from_str::<Persisted>(&text)
         {
             app.restore(persisted);
         }
