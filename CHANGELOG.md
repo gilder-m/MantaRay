@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+**Work in progress survives a crash, and a count is watched while it runs
+(2026-08-06).**
+
+*Nothing used to persist the working session.* Instrument data survives
+anything, because the MCB owns its own memory - but a recalled file, a
+spectrum that had been smoothed or stripped, the buffer recovered from a
+Clear, calibration points half entered, all existed only in the process, and
+none of it is on disk until somebody saves. Nobody saves before a crash. A
+snapshot is now written every twenty seconds and deleted on a clean exit, so
+a snapshot found at start-up *is* the evidence that the last run did not
+finish; what it holds is offered back, listing each window and its counts,
+rather than reappearing unbidden - windows opening by themselves is how
+somebody ends up working on the wrong data. Detector windows are deliberately
+not snapshotted: they are a view onto instrument memory, and restoring a
+stale copy would show counts the instrument no longer has. The snapshot is
+written to a neighbouring file and renamed over the old one, so a crash
+*during* a write cannot destroy the thing that survives crashes.
+
+*A count now leaves a record of how it behaved.* The readout says what the
+rate is; it cannot say whether it has been that all along, and the things
+that quietly ruin a measurement - a source that shifted, a detector warming
+up, a shield left open - are all changes over time. The sidebar draws the
+count rate across the acquisition with dead time faint underneath, and states
+the drift between the first and last fifth of the run, coloured only once it
+is past what counting statistics explain. The rate plotted is the interval
+rate rather than the average since the start, because an average hides
+exactly what this is for. A long count is thinned rather than truncated, so
+the beginning - which a drift is measured against - is never the part thrown
+away, and a Clear starts the log over rather than drawing a line across the
+discontinuity. This is separate from the QA control charts, which compare
+check-source measurements across days; this is one acquisition, from inside.
+
 **Clearing lets the next count start again (2026-08-06).** Found by running
 the bench check against the 926: `CLEAR` resets the instrument's clocks, but
 the mirror kept the old ones until the next poll - and the start guard added

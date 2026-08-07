@@ -1247,6 +1247,121 @@ fn renaming_a_detector_reaches_the_list_the_window_and_the_next_save() {
 }
 
 #[test]
+fn a_running_count_builds_a_stability_trace_and_clear_starts_it_over() {
+    // The readout says what the rate is now; this is what says whether it has
+    // been that all along.
+    let mut app = App::headless();
+    let number = ortseam_device::Mcb::identity(&app.detectors[0]).number;
+    app.apply_action(Action::Start);
+    for _ in 0..40 {
+        app.advance_by(1.0);
+    }
+
+    let log = app
+        .stability
+        .get(&number)
+        .expect("the running detector is logged");
+    assert!(
+        log.len() > 5,
+        "forty seconds of counting should leave a trace: {} readings",
+        log.len()
+    );
+    assert!(log.peak_rate() > 0.0, "the simulator is producing counts");
+    assert!(
+        log.drift().is_some(),
+        "enough readings to compare the start against the end"
+    );
+
+    // Clearing is a different acquisition; drawing a line across it would be
+    // a lie about the data.
+    app.apply_action(Action::Clear);
+    app.advance_by(1.0);
+    assert!(
+        app.stability.get(&number).is_none_or(|log| log.len() <= 1),
+        "the log should start again after a Clear"
+    );
+}
+
+#[test]
+fn work_in_progress_survives_a_snapshot_and_comes_back() {
+    // What the crash on 2026-08-06 would have cost: a recalled file, a
+    // smoothed working copy, calibration points half entered. None of it is on
+    // disk until somebody saves, and nobody saves before a crash.
+    let mut app = with_spectrum(512);
+    app.apply_action(Action::MarkMode(MarkMode::Mark));
+    app.apply_action(Action::MarkRange(240, 270));
+    app.apply_action(Action::Smooth);
+    app.apply_action(Action::Marker(256));
+    let counts = app
+        .active_spectrum()
+        .map(|spectrum| spectrum.total_counts())
+        .expect("a spectrum");
+
+    let snapshot = app.snapshot_session();
+    assert_eq!(
+        snapshot.windows.len(),
+        1,
+        "the buffer window is what exists nowhere else"
+    );
+    assert!(!snapshot.saved_at.is_empty(), "the prompt quotes when");
+
+    // A fresh session, as after a crash, told to reopen what was found.
+    let mut after = App::headless();
+    let buffers_before = after
+        .windows
+        .iter()
+        .filter(|window| window.target == Target::Buffer)
+        .count();
+    after.restore_session(snapshot);
+
+    let restored = after
+        .windows
+        .iter()
+        .find(|window| window.target == Target::Buffer && window.title == "Test")
+        .expect("the window comes back under its own name");
+    assert_eq!(
+        restored.buffer.as_ref().map(|s| s.total_counts()),
+        Some(counts),
+        "with the smoothed counts, not the file's"
+    );
+    assert_eq!(
+        restored.buffer.as_ref().map(|s| s.rois.len()),
+        Some(1),
+        "and the regions that were marked"
+    );
+    assert_eq!(restored.display.marker, 256, "and where the marker was");
+    assert!(
+        restored.modified,
+        "it is unsaved work: coming back as saved would invite closing it"
+    );
+    assert_eq!(
+        after
+            .windows
+            .iter()
+            .filter(|window| window.target == Target::Buffer)
+            .count(),
+        buffers_before + 1
+    );
+}
+
+#[test]
+fn a_detector_window_is_not_snapshotted() {
+    // Instrument memory survives this process dying, and restoring a stale
+    // copy of it would put counts on screen that the instrument no longer has.
+    let app = App::headless();
+    assert!(
+        app.windows
+            .iter()
+            .any(|window| matches!(window.target, Target::Detector(_))),
+        "the headless session opens its detector"
+    );
+    assert!(
+        app.snapshot_session().is_empty(),
+        "a detector window is a view, not the data"
+    );
+}
+
+#[test]
 fn peak_info_over_a_selection_fits_it_and_marks_nothing() {
     // Drag out a span, right-click, Peak Info: the fit is over what was
     // dragged, and no region is left behind. Measuring a peak should not edit
@@ -1806,4 +1921,51 @@ fn a_calibration_point_will_not_take_a_number_that_is_not_one() {
         "and it says why: {}",
         app.status
     );
+}
+
+#[test]
+fn an_unanswered_offer_of_unfinished_work_is_not_thrown_away() {
+    // The data-loss path this closes. A run that crashed leaves a snapshot;
+    // the next start offers it back. But a session that has just started has
+    // no buffer windows, so the twenty-second autosave would take its
+    // "nothing open" branch and delete the snapshot - while the question is
+    // still on screen - and Escape would dismiss the question entirely. Either
+    // way the work existed nowhere else.
+    let mut app = App::headless();
+    app.recovered = Some(ortseam_gui::session::Session {
+        saved_at: "2026-08-06 21:14".into(),
+        windows: vec![],
+    });
+    app.dialogs.open(ortseam_gui::dialogs::Dialog::Recover);
+
+    assert!(
+        !app.may_replace_snapshot(),
+        "the snapshot on disk is the offer; it must not be written over"
+    );
+
+    // Escape peels dialogs off, but not this one: it is a question with two
+    // deliberate answers.
+    app.dialogs.close_all();
+    assert!(
+        app.dialogs.is_open(ortseam_gui::dialogs::Dialog::Recover),
+        "Escape must not dismiss the offer of unfinished work"
+    );
+    assert!(app.recovered.is_some());
+
+    // Answering it releases the snapshot again.
+    app.recovered = None;
+    assert!(app.may_replace_snapshot());
+}
+
+#[test]
+fn escape_still_closes_the_dialogs_that_are_only_panels() {
+    let mut app = App::headless();
+    app.dialogs.open(ortseam_gui::dialogs::Dialog::Calibration);
+    app.dialogs.open(ortseam_gui::dialogs::Dialog::Settings);
+    app.dialogs.close_all();
+    assert!(
+        !app.dialogs
+            .is_open(ortseam_gui::dialogs::Dialog::Calibration)
+    );
+    assert!(!app.dialogs.is_open(ortseam_gui::dialogs::Dialog::Settings));
 }
