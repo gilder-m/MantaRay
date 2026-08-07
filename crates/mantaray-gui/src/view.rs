@@ -122,6 +122,8 @@ pub struct ViewInput<'a> {
     pub display: &'a mut DisplayState,
     /// Colours.
     pub colors: &'a SpectrumColors,
+    /// How the scheme draws: fill, grid, glow.
+    pub style: crate::theme::SchemeStyle,
     /// Region-marking mode.
     pub mark_mode: MarkMode,
     /// Library whose lines are drawn when isotope markers are on.
@@ -155,6 +157,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
         compare_offset,
         display,
         colors,
+        style,
         mark_mode,
         library,
         isotope,
@@ -180,7 +183,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
         ui.allocate_painter(Vec2::new(available.x, plot_height), Sense::click_and_drag());
     let outer = response.rect;
     painter.rect_filled(outer, CornerRadius::same(3), colors.background.to_color());
-    draw_background_wash(&painter, outer, colors);
+    draw_background_wash(&painter, outer, colors, style);
     if header.active {
         painter.rect_stroke(
             outer,
@@ -208,7 +211,9 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     );
     let full_scale = display.full_scale(spectrum);
 
-    draw_axes(&painter, outer, plot, spectrum, display, colors, full_scale);
+    draw_axes(
+        &painter, outer, plot, spectrum, display, colors, full_scale, style,
+    );
     if let Some(compare) = compare {
         draw_trace(
             &painter,
@@ -220,6 +225,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
             compare_offset,
             FillMode::Points,
             None,
+            style,
         );
         draw_compare_legend(&painter, plot, compare, compare_offset, colors);
     }
@@ -233,6 +239,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
         0,
         display.fill,
         Some(colors.roi.to_color()),
+        style,
     );
     draw_peak_markers(
         &painter, plot, spectrum, display, colors, library, full_scale,
@@ -842,7 +849,10 @@ fn draw_full_view(
         let color = if in_roi {
             colors.roi.to_color().gamma_multiply(0.9)
         } else {
-            colors.foreground.to_color().gamma_multiply(0.55)
+            // The overview's own colour rather than the trace's. It answers a
+            // different question - where am I in the whole thing - and a scheme
+            // may want it quiet while the trace stays loud.
+            colors.overview.to_color()
         };
         fill.push(Shape::line_segment(
             [Pos2::new(x, inset.bottom() - 2.0), Pos2::new(x, y)],
@@ -898,9 +908,20 @@ fn draw_full_view(
 ///
 /// It gives the plot depth; the contrast tests in [`crate::theme`] keep it from
 /// ever competing with the trace drawn over it.
-fn draw_background_wash(painter: &egui::Painter, outer: Rect, colors: &SpectrumColors) {
+fn draw_background_wash(
+    painter: &egui::Painter,
+    outer: Rect,
+    colors: &SpectrumColors,
+    style: crate::theme::SchemeStyle,
+) {
     let top = colors.background.to_color();
-    let bottom = colors.background_wash().to_color();
+    // A flat field when the scheme asks for one: both ends the same colour, so
+    // the same mesh is drawn and there is no second path to keep in step.
+    let bottom = if style.wash {
+        colors.background_wash().to_color()
+    } else {
+        top
+    };
     let mut mesh = egui::Mesh::default();
     let inner = outer.shrink(1.0);
     mesh.colored_vertex(inner.left_top(), top);
@@ -913,6 +934,7 @@ fn draw_background_wash(painter: &egui::Painter, outer: Rect, colors: &SpectrumC
 }
 
 /// Axis frame, gridlines and labels.
+#[allow(clippy::too_many_arguments)]
 fn draw_axes(
     painter: &egui::Painter,
     outer: Rect,
@@ -921,9 +943,18 @@ fn draw_axes(
     display: &DisplayState,
     colors: &SpectrumColors,
     full_scale: u64,
+    style: crate::theme::SchemeStyle,
 ) {
     let axis = colors.axes.to_color();
-    let grid = axis.gamma_multiply(0.35);
+    // Transparent rather than absent when the scheme asks for no grid: the
+    // ticks and their labels are drawn by the same passes, and a spectrum with
+    // no numbers on its axes is a different and much worse thing than one with
+    // no lines across it.
+    let grid = if style.grid {
+        axis.gamma_multiply(0.35)
+    } else {
+        Color32::TRANSPARENT
+    };
     let label_font = FontId::monospace(10.0);
 
     // Vertical: decades in logarithmic mode, quarters otherwise.
@@ -1056,11 +1087,16 @@ fn draw_axes(
             ],
             Stroke::new(1.0, axis.gamma_multiply(0.8)),
         );
-        // A faint vertical gridline, matching the horizontal ones.
-        painter.line_segment(
-            [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
-            Stroke::new(1.0, axis.gamma_multiply(0.10)),
-        );
+        // A faint vertical gridline, matching the horizontal ones - and turned
+        // off with them. Written out separately here, it kept drawing after the
+        // horizontal ones had gone, which is the sort of half-off that looks
+        // like a rendering fault rather than a setting.
+        if style.grid {
+            painter.line_segment(
+                [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
+                Stroke::new(1.0, axis.gamma_multiply(0.10)),
+            );
+        }
         let text = if value.fract().abs() < 1e-9 {
             format!("{value:.0}")
         } else {
@@ -1116,6 +1152,7 @@ fn draw_trace(
     vertical_offset: i64,
     fill: FillMode,
     roi_color: Option<Color32>,
+    style: crate::theme::SchemeStyle,
 ) {
     let (start, end) = display.visible();
     let visible = end.saturating_sub(start) + 1;
@@ -1132,7 +1169,14 @@ fn draw_trace(
     let mut runs: Vec<(Vec<(Pos2, Color32)>, bool)> = Vec::new();
     let mut run: Vec<(Pos2, Color32)> = Vec::new();
     let mut run_in_roi = false;
-    let fill_color = color.gamma_multiply(0.55);
+    // A gradient fill is dimmed before it is faded, so that the trace stays the
+    // brightest thing on the plot with a soft body beneath it. A solid fill is
+    // the trace colour outright: dimming it as well would give a flat area that
+    // is neither the trace's colour nor anything the scheme asked for.
+    let fill_color = match style.fill {
+        crate::theme::FillStyle::Solid => color,
+        _ => color.gamma_multiply(0.55),
+    };
     // Regions tint the fill rather than replacing it. Replacing it means that on
     // a logarithmic scale, where the filled area reaches most of the way up the
     // plot, a marked region repaints the whole window in the region colour; a
@@ -1199,22 +1243,37 @@ fn draw_trace(
     if !run.is_empty() {
         runs.push((run, run_in_roi));
     }
+    // The scheme decides how the area under the trace is filled: fading to the
+    // baseline, flat all the way down, or not at all. A marked region is always
+    // filled to the foot whatever the trace does, because the fill is what says
+    // where the region is.
+    let (ribbon_top, ribbon_bottom) = style.fill.alphas();
     for (run, is_roi) in runs {
         let (top, bottom) = if is_roi {
-            (ROI_TOP_ALPHA, ROI_BOTTOM_ALPHA)
+            match style.fill {
+                crate::theme::FillStyle::Gradient => (ROI_TOP_ALPHA, ROI_BOTTOM_ALPHA),
+                _ => (1.0, 1.0),
+            }
         } else {
-            (RIBBON_TOP_ALPHA, RIBBON_BOTTOM_ALPHA)
+            (ribbon_top, ribbon_bottom)
         };
-        painter.add(gradient_ribbon(&run, baseline_y, top, bottom));
+        if top > 0.0 || bottom > 0.0 {
+            painter.add(gradient_ribbon(&run, baseline_y, top, bottom));
+        }
     }
     painter.extend(body);
     if outline.len() > 1 && !matches!(fill, FillMode::Points) {
         // A wide, faint stroke under a thin bright one reads as a glow, which
-        // makes the trace the brightest thing on the plot without washing it out.
-        painter.add(Shape::line(
-            outline.clone(),
-            Stroke::new(3.0, color.gamma_multiply(0.20)),
-        ));
+        // makes the trace the brightest thing on the plot without washing it
+        // out. A scheme reproducing a display that had no such thing turns it
+        // off; the trace is then drawn as one flat line, which is what a plotter
+        // or a phosphor actually produced.
+        if style.glow {
+            painter.add(Shape::line(
+                outline.clone(),
+                Stroke::new(3.0, color.gamma_multiply(0.20)),
+            ));
+        }
         painter.add(Shape::line(outline, Stroke::new(1.2, color)));
         if let Some(roi) = roi_color {
             if !roi_run.is_empty() {
@@ -1229,15 +1288,16 @@ fn draw_trace(
     }
 }
 
-/// How strongly a filled area is painted where it meets the trace, and where it
-/// meets the baseline.
-const RIBBON_TOP_ALPHA: f32 = 0.80;
-const RIBBON_BOTTOM_ALPHA: f32 = 0.10;
-
-/// The same, for a channel inside a region: full colour where it meets the
-/// trace, gone almost at once below it. A region marks the tops of its
-/// channels rather than colouring the column under them, which on a
-/// logarithmic scale would be most of the window.
+/// How strongly a channel inside a region is painted where it meets the trace,
+/// and where it meets the baseline.
+///
+/// Full colour at the top and gone almost at once below it: a region marks the
+/// tops of its channels rather than colouring the column under them, which on
+/// a logarithmic scale would be most of the window.
+///
+/// The trace's own pair is not here but on [`crate::theme::FillStyle`], because
+/// the scheme decides it - fading to the baseline, flat all the way down, or
+/// not drawn at all.
 const ROI_TOP_ALPHA: f32 = 1.0;
 const ROI_BOTTOM_ALPHA: f32 = 0.0;
 
@@ -1512,13 +1572,9 @@ fn draw_peak_info(
         ],
         Stroke::new(1.0, colors.roi.with_alpha(0.55)),
     );
-    // A dark card, so the peak stays visible behind it, with a region-coloured
-    // spine tying it to the peak it describes.
-    painter.rect_filled(
-        box_rect,
-        CornerRadius::same(4),
-        colors.panel.to_color().gamma_multiply(1.45),
-    );
+    // A card lifted off the plot it sits on, with a region-coloured spine tying
+    // it to the peak it describes.
+    painter.rect_filled(box_rect, CornerRadius::same(4), colors.card().to_color());
     painter.rect_stroke(
         box_rect,
         CornerRadius::same(4),
@@ -2045,8 +2101,8 @@ mod tests {
             (Pos2::new(1.0, 20.0), Color32::from_rgb(0, 200, 200)),
             (Pos2::new(2.0, 15.0), Color32::from_rgb(0, 200, 200)),
         ];
-        let Shape::Mesh(mesh) = gradient_ribbon(&run, 100.0, RIBBON_TOP_ALPHA, RIBBON_BOTTOM_ALPHA)
-        else {
+        let (top, bottom) = crate::theme::FillStyle::Gradient.alphas();
+        let Shape::Mesh(mesh) = gradient_ribbon(&run, 100.0, top, bottom) else {
             panic!("expected a mesh");
         };
         assert_eq!(mesh.vertices.len(), 6);
@@ -2065,8 +2121,9 @@ mod tests {
     #[test]
     fn a_single_column_area_is_still_drawn() {
         let run = [(Pos2::new(4.0, 10.0), Color32::WHITE)];
+        let (top, bottom) = crate::theme::FillStyle::Gradient.alphas();
         assert!(matches!(
-            gradient_ribbon(&run, 50.0, RIBBON_TOP_ALPHA, RIBBON_BOTTOM_ALPHA),
+            gradient_ribbon(&run, 50.0, top, bottom),
             Shape::LineSegment { .. }
         ));
     }

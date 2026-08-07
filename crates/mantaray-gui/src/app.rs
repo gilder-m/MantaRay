@@ -185,6 +185,18 @@ pub struct Persisted {
     pub theme: crate::theme::Theme,
     /// The working colours, which may be hand-edited from the scheme.
     pub colors: SpectrumColors,
+    /// How the display is drawn, which is as much of a scheme as its colours.
+    #[serde(default)]
+    pub style: crate::theme::SchemeStyle,
+    /// What is on screen, for the job in front of you.
+    #[serde(default)]
+    pub workspace: crate::workspace::Workspace,
+    /// Workspaces the operator kept, beside the built-in ones.
+    #[serde(default)]
+    pub workspaces: Vec<crate::workspace::Workspace>,
+    /// Schemes the operator saved or imported, beside the built-in ones.
+    #[serde(default)]
+    pub schemes: Vec<crate::theme::Scheme>,
     /// Files opened lately, most recent first.
     pub recent: Vec<PathBuf>,
     /// Simulation speed.
@@ -262,6 +274,13 @@ pub struct SpectrumWindow {
     pub peak_info: Option<PeakInfo>,
     /// Whether the window is open.
     pub open: bool,
+    /// Pulled out of the tab strip into a window of its own.
+    ///
+    /// Per spectrum rather than per session: the usual reason to want a window
+    /// is to watch one spectrum while working on another, and that is a
+    /// statement about that one spectrum. Ignored when the scheme is already
+    /// arranging everything in windows.
+    pub floating: bool,
     /// Whether the data has changed since it was saved.
     pub modified: bool,
 }
@@ -283,6 +302,7 @@ impl SpectrumWindow {
             selection: None,
             peak_info: None,
             open: true,
+            floating: false,
             modified: false,
         }
     }
@@ -403,6 +423,8 @@ pub enum Action {
     /// Expand every collapsed window again.
     ExpandAll,
     ToggleMaximize(usize),
+    /// Pull a spectrum out of the tab strip into its own window, or put it back.
+    ToggleFloating(usize),
     MaximizeActive,
     /// Leave full-area mode, whatever window holds it (JOB ZOOM restore).
     RestoreWindows,
@@ -670,6 +692,112 @@ impl IsotopeCheck {
     }
 }
 
+/// One tab per open spectrum, across the top of the working area.
+///
+/// The tab carries what the window's title bar carried: the name, an asterisk
+/// when there are unsaved changes, and a close button. Undocking is on the
+/// right-click menu rather than a button, because it is the rarer thing to
+/// want and a button for it on every tab would crowd out the names.
+///
+/// A spectrum already pulled out into a window keeps its tab, marked, so the
+/// strip stays a complete list of what is open - a window that has drifted
+/// behind another is otherwise hard to find again.
+fn tab_strip(
+    windows: &[SpectrumWindow],
+    shown: Option<usize>,
+    active: Option<usize>,
+    drawn: &[usize],
+    colors: &SpectrumColors,
+    ui: &mut egui::Ui,
+) -> Vec<Action> {
+    let mut actions = Vec::new();
+    if drawn.is_empty() {
+        return actions;
+    }
+    egui::ScrollArea::horizontal()
+        .max_height(28.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for index in drawn {
+                    let Some(window) = windows.get(*index) else {
+                        continue;
+                    };
+                    // A tab is marked when its spectrum has the area, or when
+                    // it is the window being worked on: the two are the same
+                    // until one is pulled out, and after that both deserve to
+                    // be findable in the strip.
+                    let selected = shown == Some(*index) || active == Some(*index);
+                    // The arrow marks a spectrum that has been pulled out. It is
+                    // a character rather than one of the drawn icons, which is
+                    // the thing that has bitten this program twice - so it was
+                    // checked on screen rather than assumed: U+2197 is in the
+                    // font egui bundles, where the cross that failed was not.
+                    let label = format!(
+                        "{}{}{}",
+                        window.title,
+                        if window.modified { " *" } else { "" },
+                        if window.floating { "  \u{2197}" } else { "" }
+                    );
+                    // Every tab says what it is, because a strip of them will
+                    // truncate the names long before it runs out of tabs.
+                    let hint = if window.floating {
+                        format!("{} - in a window of its own", window.title)
+                    } else {
+                        format!("{} - right-click to open it in a window", window.title)
+                    };
+                    let tab = ui.selectable_label(selected, label).on_hover_text(hint);
+                    if tab.clicked() {
+                        actions.push(Action::Activate(window.id));
+                    }
+                    tab.context_menu(|ui| {
+                        let (label, hint) = if window.floating {
+                            ("Put back in the tabs", "dock it here again")
+                        } else {
+                            ("Open in a window", "so two can be seen at once")
+                        };
+                        if ui.button(label).on_hover_text(hint).clicked() {
+                            actions.push(Action::ToggleFloating(window.id));
+                            ui.close();
+                        }
+                        if ui.button("Close").clicked() {
+                            actions.push(Action::CloseWindow(window.id));
+                            ui.close();
+                        }
+                    });
+                    // A close cross on the selected tab only. On every tab it
+                    // is a row of crosses to misclick; on none of them, closing
+                    // a spectrum means going to a menu.
+                    // A close cross on the tab holding the area, and only that
+                    // one. On every tab it is a row of crosses to misclick; a
+                    // pulled-out spectrum has its window's own close button.
+                    //
+                    // A multiplication sign rather than one of the prettier
+                    // crosses: those live in the emoji font, and the one that
+                    // is not there renders as an empty box.
+                    if shown == Some(*index)
+                        && ui
+                            .small_button("\u{00d7}")
+                            .on_hover_text("close this spectrum")
+                            .clicked()
+                    {
+                        actions.push(Action::CloseWindow(window.id));
+                    }
+                    ui.add_space(2.0);
+                }
+            });
+        });
+    // A rule under the strip, so the tabs read as attached to the spectrum
+    // below rather than floating above it.
+    let line = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        line.x_range(),
+        line.top() + 1.0,
+        egui::Stroke::new(1.0, colors.axes.with_alpha(0.35)),
+    );
+    ui.add_space(4.0);
+    actions
+}
+
 /// The application.
 pub struct App {
     /// What the last scan of local instruments found.
@@ -703,6 +831,14 @@ pub struct App {
     pub library_path: Option<PathBuf>,
     /// Display colours.
     pub colors: SpectrumColors,
+    /// How the display is drawn: fill, grid, glow, corners, shadows.
+    pub style: crate::theme::SchemeStyle,
+    /// What is on screen, for the job in front of you.
+    pub workspace: crate::workspace::Workspace,
+    /// Workspaces the operator kept, beside the built-in ones.
+    pub workspaces: Vec<crate::workspace::Workspace>,
+    /// Schemes the operator saved or imported, beside the built-in ones.
+    pub schemes: Vec<crate::theme::Scheme>,
     /// The colour scheme in force.
     pub theme: crate::theme::Theme,
     /// Undo history.
@@ -753,9 +889,14 @@ pub struct App {
     pending_place: Option<(usize, egui::Rect)>,
     /// Text bound for the clipboard on the next frame.
     pub pending_clipboard: Option<String>,
-    /// The theme egui's own widgets were last dressed in, so a programmatic
-    /// switch (restore, demo states) restyles the chrome on the next frame.
-    applied_theme: Option<crate::theme::Theme>,
+    /// The palette egui's own widgets were last dressed in.
+    ///
+    /// Compared against the whole palette rather than against the name of a
+    /// preset, so that editing a single colour re-dresses the chrome too. When
+    /// this held the preset instead, an edited colour reached the plot and
+    /// stopped there, leaving every selection, hover and link around it in the
+    /// shade the preset had chosen.
+    applied_look: Option<(crate::theme::SpectrumColors, crate::theme::SchemeStyle)>,
     /// Whether a peak search clears the existing regions first (ROI/Auto Clear).
     pub auto_clear_roi: bool,
     /// Whether a logarithmic axis tops out at the next power of ten, the way
@@ -800,7 +941,7 @@ impl App {
         {
             app.restore(persisted);
         }
-        theme::apply(&cc.egui_ctx, app.theme);
+        theme::apply(&cc.egui_ctx, &app.colors, &app.style);
         app
     }
 
@@ -809,6 +950,10 @@ impl App {
         Persisted {
             theme: self.theme,
             colors: self.colors,
+            style: self.style,
+            workspace: self.workspace.clone(),
+            workspaces: self.workspaces.clone(),
+            schemes: self.schemes.clone(),
             recent: self.recent.clone(),
             time_scale: self.time_scale,
             auto_clear_roi: self.auto_clear_roi,
@@ -824,6 +969,10 @@ impl App {
     pub fn restore(&mut self, persisted: Persisted) {
         self.theme = persisted.theme;
         self.colors = persisted.colors;
+        self.style = persisted.style;
+        self.workspace = persisted.workspace;
+        self.workspaces = persisted.workspaces;
+        self.schemes = persisted.schemes;
         self.recent = persisted
             .recent
             .into_iter()
@@ -926,6 +1075,10 @@ impl App {
             },
             library_path: None,
             colors: theme.colors(),
+            style: theme.style(),
+            workspace: crate::workspace::Workspace::default(),
+            workspaces: Vec::new(),
+            schemes: Vec::new(),
             theme,
             history: UndoStack::default(),
             status: opening_advice.to_string(),
@@ -951,7 +1104,7 @@ impl App {
             pending_collapse: None,
             pending_place: None,
             pending_clipboard: None,
-            applied_theme: None,
+            applied_look: None,
             auto_clear_roi: false,
             log_decade_top: false,
             last_autosave: Instant::now(),
@@ -1040,6 +1193,10 @@ impl App {
             self.status = "no windows to arrange".into();
             return;
         }
+        // Arranging windows is a request for windows. In tabs there is only
+        // ever one spectrum on screen, so tiling would quietly do nothing and
+        // look broken; switching is what was actually being asked for.
+        self.style.layout = crate::theme::Layout::Windows;
         // The rects themselves are worked out at drawing time, from the area the
         // windows are actually drawn into that frame.
         self.pending_tiling = Some(tiling);
@@ -1144,6 +1301,7 @@ impl App {
                         display: window.display,
                         calibration: window.calibration.clone(),
                         modified: window.modified,
+                        floating: window.floating,
                     })
             })
             .collect();
@@ -1169,6 +1327,7 @@ impl App {
                 window.display.set_length(length);
                 window.calibration = saved.calibration;
                 window.modified = saved.modified;
+                window.floating = saved.floating;
                 window.path = saved.path;
             }
         }
@@ -1919,6 +2078,27 @@ impl App {
             Action::ExpandAll => {
                 self.pending_collapse = Some(false);
                 self.status = "windows expanded".into();
+            }
+            Action::ToggleFloating(id) => {
+                if let Some(window) = self.windows.iter_mut().find(|window| window.id == id) {
+                    window.floating = !window.floating;
+                    self.status = if window.floating {
+                        // Never left maximised on the way out: a window pulled
+                        // out to sit beside another one, filling the area, is
+                        // not what anybody meant by it.
+                        format!("{} opened in a window", window.title)
+                    } else {
+                        format!("{} put back in the tabs", window.title)
+                    };
+                    let floating = window.floating;
+                    if floating && self.maximized == Some(id) {
+                        self.maximized = None;
+                    }
+                }
+                // Whichever way it went, it is the one being worked on.
+                if let Some(index) = self.windows.iter().position(|window| window.id == id) {
+                    self.focus_window(index);
+                }
             }
             Action::ToggleMaximize(id) => {
                 self.maximized = if self.maximized == Some(id) {
@@ -3073,6 +3253,11 @@ impl App {
             {
                 self.theme = *theme;
                 self.colors = theme.colors();
+                // The style as well as the palette. Taking only the colours
+                // showed Conductor with the default gradient, gridlines and
+                // glow - none of which that scheme has - and the picture was
+                // the only place it showed.
+                self.style = theme.style();
             }
             demo = rest.to_string();
         }
@@ -3182,6 +3367,16 @@ impl App {
                 self.apply_one(Action::PeakSearch);
                 return;
             }
+            "undocked" => {
+                // One spectrum pulled out of the strip while another fills the
+                // area: the arrangement the tabs exist to allow, and the one
+                // worth looking at because it is where the two paths meet.
+                if let Some(last) = self.windows.last().map(|window| window.id) {
+                    self.apply_one(Action::ToggleFloating(last));
+                }
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
             "nolabels" => {
                 // The same regions with the naming turned off, which is the
                 // pair worth looking at: sixty labels is the case the toggle
@@ -3234,6 +3429,34 @@ impl App {
                     std::env::var("MANTARAY_DEMO_ISOTOPE").unwrap_or_else(|_| "cs137".into());
                 self.isotope.resolve(&self.library);
                 self.apply_one(Action::PeakSearch);
+                return;
+            }
+            "acquisition" | "analysis" => {
+                // The two arrangements, side by side in the documentation: the
+                // difference between them is the whole point, and only a
+                // picture shows how much of the sidebar it is.
+                self.workspace = if demo == "acquisition" {
+                    crate::workspace::Workspace::acquisition()
+                } else {
+                    crate::workspace::Workspace::analysis()
+                };
+                self.library = mantaray_core::NuclideLibrary::sample_for_tests();
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
+            "outline" => {
+                // The trace with nothing under it, and regions that still fill.
+                // The one combination where those two decisions disagree, so
+                // the one worth a picture.
+                self.style.fill = crate::theme::FillStyle::None;
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
+            "colours" => {
+                // The theme editor, open on a spectrum: the palette has to be
+                // judged against data, not against an empty plot.
+                self.apply_one(Action::PeakSearch);
+                self.dialogs.open(Dialog::Preferences);
                 return;
             }
             "cal" => {
@@ -3692,9 +3915,9 @@ impl App {
         self.take_dropped_files(ui.ctx());
         // Keep egui's own widgets dressed in the theme, however it was chosen -
         // Preferences, a restored session, or a demo state.
-        if self.applied_theme != Some(self.theme) {
-            theme::apply(ui.ctx(), self.theme);
-            self.applied_theme = Some(self.theme);
+        if self.applied_look != Some((self.colors, self.style)) {
+            theme::apply(ui.ctx(), &self.colors, &self.style);
+            self.applied_look = Some((self.colors, self.style));
         }
 
         let ctx = ui.ctx().clone();
@@ -3734,6 +3957,12 @@ impl App {
 
         egui::Panel::bottom("supplementary").show(ui, |ui| {
             ui.horizontal(|ui| {
+                // The workspace first, in the corner, because it is the thing
+                // that changes what everything else on screen is - and it is
+                // where the eye goes last, which suits a control that is set
+                // when the job changes rather than while it is going on.
+                actions.extend(crate::dialogs::workspace_picker(self, ui));
+                ui.separator();
                 ui.label(&self.status);
             });
         });
@@ -4108,6 +4337,7 @@ impl App {
             windows,
             detectors,
             colors,
+            style,
             mark_mode,
             library,
             isotope,
@@ -4132,6 +4362,30 @@ impl App {
             (area.height() * 0.78).clamp(260.0, 720.0),
         );
 
+        // The tab strip, when the scheme arranges spectra that way. Drawn first
+        // so that what is left of the area is what the chosen spectrum fills.
+        let tabbed = style.layout == crate::theme::Layout::Tabs;
+        // Which spectrum gets the area. Normally the active one - but the
+        // active one can be a window, because pulling a tab out focuses what
+        // you just acted on, and the area behind it must not go blank. So it
+        // falls back to whatever is still in the strip.
+        let shown = active
+            .filter(|index| windows.get(*index).is_some_and(|window| !window.floating))
+            .or_else(|| {
+                drawn
+                    .iter()
+                    .copied()
+                    .find(|index| !windows[*index].floating)
+            });
+        // Windows are kept below the strip rather than over it. A pulled-out
+        // spectrum that covers the tabs has hidden the only way back to them.
+        let area = if tabbed {
+            actions.extend(tab_strip(windows, shown, *active, &drawn, colors, ui));
+            ui.available_rect_before_wrap()
+        } else {
+            area
+        };
+
         for index in drawn {
             // Split the window out so its display can be borrowed mutably while
             // the spectrum - which may live in the detector - is borrowed shared.
@@ -4149,9 +4403,18 @@ impl App {
                 peak_info,
                 open: window_open,
                 modified,
+                floating,
                 ..
             } = window;
             let is_maximized = maximized_id == Some(*id);
+
+            // In tabs, one spectrum fills the area and the others are only
+            // names in the strip - except any that have been pulled out, which
+            // keep their windows alongside.
+            let docked = tabbed && !*floating;
+            if docked && shown != Some(index) {
+                continue;
+            }
 
             let spectrum = match *target {
                 Target::Buffer => buffer.as_ref(),
@@ -4176,26 +4439,10 @@ impl App {
             let mut open = *window_open;
             let title = format!("{}{}", window_title, if *modified { " *" } else { "" });
             let offset = 26.0 * (index % 6) as f32;
-            let mut window = egui::Window::new(title)
-                .id(egui::Id::new(("spectrum", *id)))
-                .constrain_to(area)
-                .open(&mut open);
-            window = if is_maximized {
-                window.fixed_rect(area.shrink(2.0))
-            } else if let Some(rect) = forced.remove(id) {
-                // A tile or cascade: forced for this one frame, which egui keeps,
-                // so the window stays free to move and resize afterwards.
-                // Constraining is off for the frame because egui would clamp the
-                // new position against the window's old size - the new size is
-                // not known until the frame ends - shoving tiled windows left.
-                // The rects are inside the area by construction.
-                window.fixed_rect(rect.intersect(area)).constrain(false)
-            } else {
-                window
-                    .default_size(default_size)
-                    .default_pos(area.min + egui::vec2(8.0 + offset, 8.0 + offset))
-            };
-            let response = window.show(ui.ctx(), |ui| {
+            // The same drawing either way. A docked spectrum is given the area
+            // directly; a floating one is given a window to put it in. Writing
+            // it once means the two arrangements cannot drift apart.
+            let draw_into = |ui: &mut egui::Ui| {
                 let events = crate::view::draw(
                     ui,
                     ViewInput {
@@ -4204,6 +4451,7 @@ impl App {
                         compare_offset: *compare_offset,
                         display,
                         colors,
+                        style: *style,
                         mark_mode: *mark_mode,
                         library: Some(library),
                         isotope: checked,
@@ -4265,7 +4513,35 @@ impl App {
                         ViewEvent::ClosePeakInfo => *peak_info = None,
                     }
                 }
-            });
+            };
+
+            if docked {
+                // The whole area, with nothing over the trace. Only the chosen
+                // tab reaches here; the rest were skipped above.
+                draw_into(ui);
+                continue;
+            }
+
+            let mut window = egui::Window::new(title)
+                .id(egui::Id::new(("spectrum", *id)))
+                .constrain_to(area)
+                .open(&mut open);
+            window = if is_maximized {
+                window.fixed_rect(area.shrink(2.0))
+            } else if let Some(rect) = forced.remove(id) {
+                // A tile or cascade: forced for this one frame, which egui keeps,
+                // so the window stays free to move and resize afterwards.
+                // Constraining is off for the frame because egui would clamp the
+                // new position against the window's old size - the new size is
+                // not known until the frame ends - shoving tiled windows left.
+                // The rects are inside the area by construction.
+                window.fixed_rect(rect.intersect(area)).constrain(false)
+            } else {
+                window
+                    .default_size(default_size)
+                    .default_pos(area.min + egui::vec2(8.0 + offset, 8.0 + offset))
+            };
+            let response = window.show(ui.ctx(), draw_into);
             if response.is_some() {
                 *window_open = open;
             }

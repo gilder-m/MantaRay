@@ -11,7 +11,7 @@ use mantaray_device::{
 };
 
 use crate::app::{Action, App, Target};
-use crate::theme::{Rgb, Theme};
+use crate::theme::{Rgb, SpectrumColors, Theme};
 use crate::view::{MarkMode, format_counts, format_rate};
 use crate::viewmodel::{FillMode, VerticalScale};
 
@@ -50,6 +50,8 @@ pub enum Dialog {
     ListRange,
     /// Display/Preferences.
     Preferences,
+    /// Choosing what the current workspace shows.
+    Workspace,
     /// The multi-detector dashboard.
     Dashboard,
     /// Quality-assurance charts.
@@ -110,6 +112,10 @@ pub struct Dialogs {
     open: std::collections::HashSet<Dialog>,
     /// Selected tab of the MCB Properties dialog.
     pub properties_tab: usize,
+    /// Name being typed for a colour scheme about to be saved or exported.
+    pub scheme_name: String,
+    /// Name being typed for a workspace about to be kept.
+    pub workspace_name: String,
     /// Energy being entered in the Calibration dialog.
     pub calibration_energy: String,
     /// Units being entered in the Calibration dialog.
@@ -217,6 +223,8 @@ impl Default for Dialogs {
         Self {
             open: std::collections::HashSet::new(),
             properties_tab: 0,
+            scheme_name: String::new(),
+            workspace_name: String::new(),
             calibration_energy: String::new(),
             calibration_units: "keV".into(),
             report_columns: false,
@@ -473,6 +481,10 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let recent: Vec<PathBuf> = app.recent_files().to_vec();
             ui.add_enabled_ui(!recent.is_empty(), |ui| {
                 ui.menu_button("Recent", |ui| {
+                    // Same reason as the detector list: a file name is as long
+                    // as somebody made it, and a wrapped one in a submenu is
+                    // unreadable rather than merely narrow.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     for path in &recent {
                         let name = path
                             .file_name()
@@ -813,6 +825,13 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
 
         ui.menu_button("Display", |ui| {
             ui.menu_button("Detector", |ui| {
+                // A detector is named by the instrument it reaches - "Detector
+                // 1 - 0926-001 11217584" - and left to wrap, a submenu folds
+                // that into the width it already has, which is a few pixels.
+                // The name then comes out one character per line, a column of
+                // digits taller than the menu it hangs off. Sized to the text
+                // instead, so the menu is as wide as the longest name in it.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for (index, label) in &detectors {
                     if ui.button(label).clicked() {
                         actions.push(Action::OpenDetector(*index));
@@ -1042,17 +1061,16 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
 
     // Wrapped, so a narrow window folds the toolbar onto a second row
     // instead of clipping the buttons at the right edge.
+    let icons = app.style.icons;
     ui.horizontal_wrapped(|ui| {
         // Files.
-        if ui
-            .button("Recall…")
+        if crate::icons::button(ui, crate::icons::Icon::Open, "Recall…", icons, true)
             .on_hover_text("open a spectrum (Ctrl+O)")
             .clicked()
         {
             actions.push(Action::Recall);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Save"))
+        if crate::icons::button(ui, crate::icons::Icon::Save, "Save", icons, has_window)
             .on_hover_text("save the active spectrum (Ctrl+S)")
             .clicked()
         {
@@ -1063,104 +1081,121 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         // Acquisition. Start and Stop take their colours from the palette's
         // status roles: green means "will begin", red is reserved for the one
         // button that ends a measurement.
-        if ui
-            .add_enabled(
-                is_detector && !counting,
-                egui::Button::new(egui::RichText::new("▶ Start").color(
-                    if is_detector && !counting {
-                        app.colors.healthy.to_color()
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                )),
-            )
-            .on_hover_text("begin collecting (Alt+1)")
-            .clicked()
+        if crate::icons::tinted(
+            ui,
+            crate::icons::Icon::Start,
+            "▶ Start",
+            icons,
+            is_detector && !counting,
+            Some(app.colors.healthy.to_color()),
+        )
+        .on_hover_text("begin collecting (Alt+1)")
+        .clicked()
         {
             actions.push(Action::Start);
         }
-        if ui
-            .add_enabled(
-                is_detector && counting,
-                egui::Button::new(egui::RichText::new("■ Stop").color(
-                    if is_detector && counting {
-                        app.colors.alarm.to_color()
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                )),
-            )
-            .on_hover_text("stop collecting (Alt+2)")
-            .clicked()
+        if crate::icons::tinted(
+            ui,
+            crate::icons::Icon::Stop,
+            "■ Stop",
+            icons,
+            is_detector && counting,
+            Some(app.colors.alarm.to_color()),
+        )
+        .on_hover_text("stop collecting (Alt+2)")
+        .clicked()
         {
             actions.push(Action::Stop);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Clear"))
+        if crate::icons::button(ui, crate::icons::Icon::Clear, "Clear", icons, has_window)
             .on_hover_text("erase the data - Ctrl+Z brings it back (Alt+3)")
             .clicked()
         {
             actions.push(Action::Clear);
         }
-        if ui
-            .add_enabled(is_detector, egui::Button::new("→ Buffer"))
-            .on_hover_text("copy the detector data into a buffer window (Alt+5)")
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Buffer,
+            "→ Buffer",
+            icons,
+            is_detector,
+        )
+        .on_hover_text("copy the detector data into a buffer window (Alt+5)")
+        .clicked()
         {
             actions.push(Action::CopyToBuffer);
         }
         ui.separator();
 
-        // Undo and redo. Words, not arrow glyphs: the pretty curled arrows are
-        // not in egui's fonts and drew as empty boxes.
-        if ui
-            .add_enabled(app.history.can_undo(), egui::Button::new("Undo"))
-            .on_hover_text(match app.history.undo_label() {
-                Some(label) => format!("undo {label} (Ctrl+Z)"),
-                None => "nothing to undo".to_string(),
-            })
-            .clicked()
+        // Undo and redo. The words are words rather than curled arrow glyphs,
+        // which are not in egui's fonts and drew as empty boxes - the reason
+        // the symbols in this toolbar are drawn rather than written.
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Undo,
+            "Undo",
+            icons,
+            app.history.can_undo(),
+        )
+        .on_hover_text(match app.history.undo_label() {
+            Some(label) => format!("undo {label} (Ctrl+Z)"),
+            None => "nothing to undo".to_string(),
+        })
+        .clicked()
         {
             actions.push(Action::Undo);
         }
-        if ui
-            .add_enabled(app.history.can_redo(), egui::Button::new("Redo"))
-            .on_hover_text(match app.history.redo_label() {
-                Some(label) => format!("redo {label} (Ctrl+Y)"),
-                None => "nothing to redo".to_string(),
-            })
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Redo,
+            "Redo",
+            icons,
+            app.history.can_redo(),
+        )
+        .on_hover_text(match app.history.redo_label() {
+            Some(label) => format!("redo {label} (Ctrl+Y)"),
+            None => "nothing to redo".to_string(),
+        })
+        .clicked()
         {
             actions.push(Action::Redo);
         }
         ui.separator();
 
         // Analysis.
-        if ui
-            .add_enabled(has_window, egui::Button::new("Peaks"))
+        if crate::icons::button(ui, crate::icons::Icon::Peaks, "Peaks", icons, has_window)
             .on_hover_text("search for peaks and mark them")
             .clicked()
         {
             actions.push(Action::PeakSearch);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Peak Info"))
-            .on_hover_text("measure the peak at the marker")
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::PeakInfo,
+            "Peak Info",
+            icons,
+            has_window,
+        )
+        .on_hover_text("measure the peak at the marker")
+        .clicked()
         {
             actions.push(Action::PeakInfoAtMarker);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Report"))
+        if crate::icons::button(ui, crate::icons::Icon::Report, "Report", icons, has_window)
             .on_hover_text("ROI report")
             .clicked()
         {
             actions.push(Action::Show(Dialog::RoiReportOptions));
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Nuclides"))
-            .on_hover_text("identify nuclides and compute activities")
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Nuclides,
+            "Nuclides",
+            icons,
+            has_window,
+        )
+        .on_hover_text("identify nuclides and compute activities")
+        .clicked()
         {
             actions.push(Action::Analyse);
         }
@@ -1235,22 +1270,19 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         if ui.button("+").on_hover_text("zoom in (keypad +)").clicked() {
             actions.push(Action::ZoomIn);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Center"))
+        if crate::icons::button(ui, crate::icons::Icon::Centre, "Center", icons, has_window)
             .on_hover_text("put the marker in the middle (keypad 5)")
             .clicked()
         {
             actions.push(Action::Center);
         }
-        if ui
-            .add_enabled(!already_full, egui::Button::new("Full"))
+        if crate::icons::button(ui, crate::icons::Icon::Full, "Full", icons, !already_full)
             .on_hover_text("show the whole spectrum")
             .clicked()
         {
             actions.push(Action::FullView);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("⛶"))
+        if crate::icons::button(ui, crate::icons::Icon::Maximise, "⛶", icons, has_window)
             .on_hover_text("fill the spectrum area (Ctrl+M)")
             .clicked()
         {
@@ -1328,10 +1360,19 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         _ => (None, None, "Buffer".into()),
     };
 
+    // What this sidebar shows is the workspace's decision. Read once, so that
+    // a section cannot appear in one place and be hidden in another.
+    let sections = app.workspace.sections;
+
     ui.add_space(4.0);
-    ui.heading("Pulse Ht. Analysis");
-    ui.label(name);
+    if sections.counts {
+        ui.heading("Pulse Ht. Analysis");
+        ui.label(name);
+    }
     egui::Grid::new("times").num_columns(2).show(ui, |ui| {
+        if !sections.counts {
+            return;
+        }
         let spectrum = app.active_spectrum();
         ui.label("Start");
         ui.label(
@@ -1422,11 +1463,15 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.end_row();
     });
 
-    stability_trace(app, ui);
+    if sections.stability {
+        stability_trace(app, ui);
+    }
 
-    ui.separator();
-    ui.heading("Preset Limits");
-    match presets {
+    if sections.presets {
+        ui.separator();
+        ui.heading("Preset Limits");
+    }
+    match presets.filter(|_| sections.presets) {
         Some(presets) if !presets.is_empty() => {
             egui::Grid::new("presets").num_columns(2).show(ui, |ui| {
                 if let Some(value) = presets.real_time {
@@ -1474,13 +1519,14 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 );
             }
         }
-        _ => {
+        _ if sections.presets => {
             ui.label("none set");
         }
+        _ => {}
     }
 
     // Field mode: what the instrument itself is holding.
-    if let Some(detector) = app.active_detector_index() {
+    if let Some(detector) = app.active_detector_index().filter(|_| sections.instrument) {
         let stored = app.detectors[detector].stored_spectra();
         if stored > 0 {
             ui.separator();
@@ -1497,8 +1543,13 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
     }
 
-    isotope_check(app, ui);
+    if sections.isotope {
+        isotope_check(app, ui);
+    }
 
+    if !sections.regions {
+        return actions;
+    }
     ui.separator();
     ui.heading("Regions");
     // The regions of the active spectrum, with the energy and net area of each.
@@ -1702,7 +1753,7 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     });
 
     #[cfg(feature = "simulator")]
-    {
+    if sections.simulation {
         ui.separator();
         ui.heading("Simulation");
         ui.horizontal(|ui| {
@@ -1818,6 +1869,7 @@ pub fn windows(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
     strip_dialog(app, ctx, &mut actions);
     list_range_dialog(app, ctx, &mut actions);
     preferences_dialog(app, ctx);
+    workspace_dialog(app, ctx);
     dashboard_dialog(app, ctx, &mut actions);
     qa_dialog(app, ctx);
     batch_dialog(app, ctx, &mut actions);
@@ -2113,10 +2165,22 @@ fn dialog_window<R>(
         .position(|candidate| *candidate == dialog)
         .unwrap_or(0);
     let offset = (position % 6) as f32 * 48.0;
+    // Two guarantees, and both are needed. Bounded, because a window taller
+    // than the screen is slid up by egui until its own title bar - and the
+    // close button on it - is off the top, leaving no way to shut it but the
+    // keyboard. Scrolling, because a resizable window keeps the size it was
+    // first given: open a folded section in one and the new rows are simply cut
+    // off, with nothing to say they are there.
+    let room = (ctx.content_rect().height() - 120.0).max(180.0);
     egui::Window::new(title)
         .open(&mut open)
-        .resizable(true)
+        // Sized to its contents rather than resizable. A resizable window keeps
+        // whatever size it was first given, so opening a folded section inside
+        // one cuts the new rows off and leaves nothing to say they are there.
+        .resizable(false)
         .collapsible(false)
+        .max_height(room)
+        .vscroll(true)
         // Dialogs float above the spectrum windows. Without this they share a
         // layer with them, so clicking a spectrum - which is exactly what
         // calibrating asks you to do - buries the dialog behind it.
@@ -3989,154 +4053,659 @@ fn list_range_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
     );
 }
 
-fn preferences_dialog(app: &mut App, ctx: &egui::Context) {
-    dialog_window(app, ctx, Dialog::Preferences, "Colours", |app, ui| {
-        ui.label("Scheme");
-        ui.horizontal_wrapped(|ui| {
-            for theme in Theme::all() {
-                let colors = theme.colors();
-                let selected = app.theme == *theme;
-                // Each choice carries a swatch of its own data colours.
-                let response = ui.add(
-                    egui::Button::new(
-                        egui::RichText::new(theme.label()).color(colors.foreground.to_color()),
-                    )
-                    .fill(colors.background.to_color())
-                    .stroke(egui::Stroke::new(
-                        if selected { 2.0 } else { 1.0 },
-                        if selected {
-                            colors.foreground.to_color()
-                        } else {
-                            colors.axes.with_alpha(0.6)
-                        },
-                    )),
-                );
-                if response.clicked() {
-                    app.theme = *theme;
-                    app.colors = colors;
-                    crate::theme::apply(ui.ctx(), *theme);
-                }
-                // A row of dots showing the palette.
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(52.0, 12.0), egui::Sense::hover());
-                for (index, colour) in [
-                    colors.foreground,
-                    colors.roi,
-                    colors.compare,
-                    colors.library,
-                    colors.marker,
-                ]
-                .iter()
-                .enumerate()
+/// The workspace, in the corner: what is on screen, for the job in hand.
+///
+/// A picker rather than a menu, and in the status bar rather than up with the
+/// menus, because it is set when the job changes - once, at the start of a
+/// count or when the counting is over - and not while either is going on.
+///
+/// The built-in arrangements come first and any that have been kept follow
+/// them, exactly as the colour schemes are offered.
+pub fn workspace_picker(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let mut chosen: Option<crate::workspace::Workspace> = None;
+    egui::ComboBox::from_id_salt("workspace")
+        .selected_text(&app.workspace.name)
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            for workspace in crate::workspace::Workspace::built_in() {
+                let selected = app.workspace.name == workspace.name;
+                if ui
+                    .selectable_label(selected, &workspace.name)
+                    .on_hover_text(match workspace.name.as_str() {
+                        "Acquisition" => "the clock, the rate, and what will stop the count",
+                        "Analysis" => "the regions, the library and the nuclide lookup",
+                        _ => "every section at once",
+                    })
+                    .clicked()
                 {
-                    ui.painter().circle_filled(
-                        rect.left_center() + egui::vec2(5.0 + index as f32 * 10.0, 0.0),
-                        4.0,
-                        colour.to_color(),
-                    );
+                    chosen = Some(workspace);
                 }
             }
-        });
-
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Peak Info text size");
-            ui.add(egui::Slider::new(&mut app.peak_font, 9.0..=18.0).suffix(" px"));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Default save format");
-            egui::ComboBox::from_id_salt("default-save-format")
-                .selected_text(format!(".{}", app.default_format))
-                .show_ui(ui, |ui| {
-                    for extension in ["chn", "spe", "json", "txt", "csv"] {
-                        if ui
-                            .selectable_label(
-                                app.default_format == extension,
-                                format!(".{extension}"),
-                            )
-                            .clicked()
-                        {
-                            app.default_format = extension.into();
-                        }
+            if !app.workspaces.is_empty() {
+                ui.separator();
+                for workspace in &app.workspaces {
+                    let selected = app.workspace.name == workspace.name;
+                    if ui.selectable_label(selected, &workspace.name).clicked() {
+                        chosen = Some(workspace.clone());
                     }
-                });
-            ui.label(
-                egui::RichText::new("offered first when saving a new buffer")
-                    .weak()
-                    .small(),
-            );
-        });
-        ui.checkbox(
-            &mut app.reopen_last,
-            "Reopen the last spectrum when the application starts",
-        );
-
-        ui.separator();
-        ui.label("Individual colours");
-        let edit = |ui: &mut egui::Ui, label: &str, value: &mut Rgb| {
-            ui.horizontal(|ui| {
-                let mut color = value.to_color();
-                if ui.color_edit_button_srgba(&mut color).changed() {
-                    *value = Rgb::from_color(color);
                 }
-                ui.label(label);
-            });
-        };
-        edit(ui, "Background", &mut app.colors.background);
-        edit(ui, "Spectrum", &mut app.colors.foreground);
-        edit(ui, "Regions", &mut app.colors.roi);
-        edit(ui, "Comparison", &mut app.colors.compare);
-        edit(ui, "Composite", &mut app.colors.composite);
-        edit(ui, "Axes", &mut app.colors.axes);
-        edit(ui, "Marker", &mut app.colors.marker);
-        edit(ui, "Library lines", &mut app.colors.library);
+            }
+            ui.separator();
+            if ui
+                .button("Arrange...")
+                .on_hover_text("choose what this workspace shows, and keep it")
+                .clicked()
+            {
+                actions.push(Action::Show(Dialog::Workspace));
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("what is on screen, for the job in hand");
+    if let Some(workspace) = chosen {
+        app.status = format!("{} workspace", workspace.name);
+        app.workspace = workspace;
+    }
+    actions
+}
 
-        ui.separator();
-        ui.label("Contrast against the plot background");
+/// Choosing what a workspace shows, and keeping it under a name.
+fn workspace_dialog(app: &mut App, ctx: &egui::Context) {
+    dialog_window(app, ctx, Dialog::Workspace, "Workspace", |app, ui| {
         ui.label(
             egui::RichText::new(
-                "4.5:1 is the least a line should have; the spectrum wants 7:1 or more.",
+                "What the sidebar shows. Counting and interpreting are different \
+                 jobs and do not want the same panel.",
             )
             .weak()
             .small(),
         );
-        egui::Grid::new("contrast").num_columns(3).show(ui, |ui| {
-            for (role, ratio) in app.colors.contrast_report() {
-                ui.label(role);
-                ui.monospace(format!("{ratio:.1}:1"));
-                let (verdict, colour) = if ratio >= 7.0 {
-                    ("good", app.colors.healthy.to_color())
-                } else if ratio >= 4.5 {
-                    ("readable", app.colors.roi.to_color())
-                } else {
-                    ("too faint", app.colors.alarm.to_color())
-                };
-                ui.colored_label(colour, verdict);
-                ui.end_row();
-            }
-        });
-
-        let clashes = app.colors.clashes();
-        if clashes.is_empty() {
-            ui.colored_label(
-                app.colors.healthy.to_color(),
-                "every colour is distinguishable from the others",
-            );
-        } else {
-            for (first, second, hue) in clashes {
-                ui.colored_label(
-                    app.colors.alarm.to_color(),
-                    format!("{first} and {second} are only {hue:.0}° apart and equally light"),
-                );
-            }
+        ui.separator();
+        for (label, hint, shown) in app.workspace.sections.each() {
+            ui.checkbox(shown, label).on_hover_text(hint);
         }
 
         ui.separator();
-        if ui.button("Restore this scheme's colours").clicked() {
-            app.colors = app.theme.colors();
-            crate::theme::apply(ui.ctx(), app.theme);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut app.dialogs.workspace_name)
+                    .desired_width(120.0)
+                    .hint_text("name"),
+            );
+            let named = !app.dialogs.workspace_name.trim().is_empty();
+            if ui
+                .add_enabled(named, egui::Button::new("Keep"))
+                .on_hover_text("keep this arrangement under that name")
+                .on_disabled_hover_text("give the workspace a name first")
+                .clicked()
+            {
+                let name = app.dialogs.workspace_name.trim().to_string();
+                let kept = crate::workspace::Workspace::new(name.clone(), app.workspace.sections);
+                match app.workspaces.iter_mut().find(|other| other.name == name) {
+                    Some(existing) => *existing = kept.clone(),
+                    None => app.workspaces.push(kept.clone()),
+                }
+                app.workspace = kept;
+                app.dialogs.workspace_name.clear();
+                app.status = format!("kept the {name} workspace");
+            }
+        });
+        if !app.workspaces.is_empty() {
+            let mut remove = None;
+            ui.horizontal_wrapped(|ui| {
+                for (index, workspace) in app.workspaces.iter().enumerate() {
+                    if ui
+                        .small_button(format!("\u{00d7} {}", workspace.name))
+                        .on_hover_text("forget this workspace")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                }
+            });
+            if let Some(index) = remove {
+                let gone = app.workspaces.remove(index);
+                app.status = format!("forgot the {} workspace", gone.name);
+            }
         }
     });
+}
+
+/// Choosing, editing, saving and sharing a colour scheme.
+///
+/// The schemes are presets rather than modes: picking one loads its colours and
+/// every colour stays editable afterwards, so there is no state where the
+/// program owns the palette and the operator does not.
+fn preferences_dialog(app: &mut App, ctx: &egui::Context) {
+    dialog_window(
+        app,
+        ctx,
+        Dialog::Preferences,
+        "Theme & Colours",
+        |app, ui| {
+            scheme_picker(app, ui);
+            ui.separator();
+            style_editor(app, ui);
+            ui.separator();
+            colour_editor(app, ui);
+            ui.separator();
+            palette_checks(app, ui);
+            ui.separator();
+            other_preferences(app, ui);
+        },
+    );
+}
+
+/// One scheme, drawn as a chip of itself: its name over its own data colours,
+/// on its own plot background.
+///
+/// The swatch is the point. A list of names says nothing about what any of them
+/// looks like, and a scheme is chosen by eye or not at all.
+///
+/// Painted as one widget of a fixed size rather than assembled from a button
+/// and a row of dots. Side by side, the two wrapped independently and put one
+/// scheme's colours in front of the next scheme's name; stacked in a `vertical`
+/// inside a wrapping row, the block claimed no width and the name came out one
+/// letter per line. A widget that owns its own rectangle can do neither.
+fn scheme_swatch(
+    ui: &mut egui::Ui,
+    name: &str,
+    colors: &SpectrumColors,
+    selected: bool,
+) -> egui::Response {
+    const SIZE: egui::Vec2 = egui::vec2(116.0, 40.0);
+    let (rect, response) = ui.allocate_exact_size(SIZE, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(4),
+        colors.background.to_color(),
+    );
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(4),
+        egui::Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                colors.foreground.to_color()
+            } else {
+                colors
+                    .axes
+                    .with_alpha(if response.hovered() { 0.9 } else { 0.5 })
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    // The name in the scheme's own spectrum colour, which is the colour the
+    // operator will spend the most time looking at.
+    painter.text(
+        egui::Pos2::new(rect.center().x, rect.top() + 12.0),
+        egui::Align2::CENTER_CENTER,
+        name,
+        egui::FontId::proportional(12.0),
+        colors.foreground.to_color(),
+    );
+    let dots = [
+        colors.foreground,
+        colors.roi,
+        colors.compare,
+        colors.library,
+        colors.marker,
+    ];
+    let step = (rect.width() - 24.0) / (dots.len() - 1) as f32;
+    for (index, colour) in dots.into_iter().enumerate() {
+        painter.circle_filled(
+            egui::Pos2::new(
+                rect.left() + 12.0 + index as f32 * step,
+                rect.bottom() - 11.0,
+            ),
+            3.5,
+            colour.to_color(),
+        );
+    }
+    response
+}
+
+/// The built-in schemes, the saved ones, and the ways in and out.
+fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
+    ui.label("Scheme");
+    ui.horizontal_wrapped(|ui| {
+        for theme in Theme::all() {
+            let colors = theme.colors();
+            // Selected means "these are exactly its colours": once one is
+            // edited the palette is no longer that scheme, and saying it still
+            // is would be a lie the operator could act on.
+            let selected =
+                app.theme == *theme && app.colors == colors && app.style == theme.style();
+            if scheme_swatch(ui, theme.label(), &colors, selected).clicked() {
+                app.theme = *theme;
+                app.colors = colors;
+                app.style = theme.style();
+            }
+        }
+    });
+
+    if !app.schemes.is_empty() {
+        ui.label("Saved");
+        // Both decisions are taken during the loop and acted on after it. The
+        // alternative is a mutable borrow of the list while iterating it, which
+        // only a clone of the whole list per frame would satisfy - sixty copies
+        // a second of every saved scheme to answer one click.
+        let mut chosen = None;
+        let mut remove = None;
+        ui.horizontal_wrapped(|ui| {
+            for (index, scheme) in app.schemes.iter().enumerate() {
+                let selected = app.colors == scheme.colors && app.style == scheme.style;
+                let response = scheme_swatch(ui, &scheme.name, &scheme.colors, selected);
+                if response.clicked() {
+                    chosen = Some((scheme.colors, scheme.style));
+                }
+                response.context_menu(|ui| {
+                    if ui.button("Forget this scheme").clicked() {
+                        remove = Some(index);
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if let Some((colors, style)) = chosen {
+            app.colors = colors;
+            app.style = style;
+        }
+        if let Some(index) = remove {
+            app.schemes.remove(index);
+        }
+        ui.label(
+            egui::RichText::new("right-click a saved scheme to forget it")
+                .weak()
+                .small(),
+        );
+    }
+
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.dialogs.scheme_name)
+                .desired_width(120.0)
+                .hint_text("name"),
+        );
+        let named = !app.dialogs.scheme_name.trim().is_empty();
+        if ui
+            .add_enabled(named, egui::Button::new("Save"))
+            .on_hover_text("keep these colours under that name")
+            .on_disabled_hover_text("give the scheme a name first")
+            .clicked()
+        {
+            let name = app.dialogs.scheme_name.trim().to_string();
+            let scheme = crate::theme::Scheme::styled(name.clone(), app.colors, app.style);
+            // Saving twice under one name replaces it rather than making a
+            // second entry nobody can tell from the first.
+            match app.schemes.iter_mut().find(|kept| kept.name == name) {
+                Some(existing) => *existing = scheme,
+                None => app.schemes.push(scheme),
+            }
+            app.dialogs.scheme_name.clear();
+            app.status = format!("saved the scheme \"{name}\"");
+        }
+        if ui
+            .button("Import...")
+            .on_hover_text("open a scheme somebody sent")
+            .clicked()
+            && let Some(path) = pick_open_file(&[("Colour scheme", &["json"])])
+        {
+            match std::fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|text| crate::theme::Scheme::from_json(&text))
+            {
+                Ok(scheme) => {
+                    // Loaded either way, but said out loud when the palette
+                    // will be hard to read. This is the moment it matters: the
+                    // colours were chosen on somebody else's screen, for
+                    // somebody else's room, and the operator has not seen them
+                    // against data yet.
+                    app.status = match scheme.complaints().first() {
+                        Some(first) => format!("loaded \"{}\" - {first}", scheme.name),
+                        None => format!("loaded the scheme \"{}\"", scheme.name),
+                    };
+                    app.colors = scheme.colors;
+                    let name = scheme.name.clone();
+                    match app.schemes.iter_mut().find(|kept| kept.name == name) {
+                        Some(existing) => *existing = scheme,
+                        None => app.schemes.push(scheme),
+                    }
+                }
+                // Named as a scheme problem rather than a file problem: the
+                // operator opened a file they were sent and wants to know what
+                // is wrong with it.
+                Err(reason) => app.status = format!("that is not a usable scheme - {reason}"),
+            }
+        }
+        if ui
+            .button("Export...")
+            .on_hover_text("write these colours to a file to share")
+            .clicked()
+        {
+            let name = if app.dialogs.scheme_name.trim().is_empty() {
+                app.theme.label().to_string()
+            } else {
+                app.dialogs.scheme_name.trim().to_string()
+            };
+            let suggestion = format!("{}.json", name.to_lowercase().replace(' ', "-"));
+            if let Some(path) =
+                pick_save_file_named(&[("Colour scheme", &["json"])], Some(&suggestion))
+            {
+                let scheme = crate::theme::Scheme::styled(name, app.colors, app.style);
+                match std::fs::write(&path, scheme.to_json()) {
+                    Ok(()) => app.status = format!("wrote {}", path.display()),
+                    Err(error) => app.status = format!("could not write it - {error}"),
+                }
+            }
+        }
+    });
+}
+
+/// How the scheme draws, which is as much of a look as the colours are.
+///
+/// A palette alone cannot reproduce one. The software these instruments
+/// shipped with filled solid to the baseline, drew no grid, put no glow under
+/// the trace, and had square corners and no shadows - none of that is a
+/// colour, and together it is more of the difference than the colours are.
+fn style_editor(app: &mut App, ui: &mut egui::Ui) {
+    ui.label("Drawing");
+    ui.horizontal(|ui| {
+        ui.label("Spectra");
+        for layout in crate::theme::Layout::all() {
+            if ui
+                .selectable_label(app.style.layout == *layout, layout.label())
+                .clicked()
+            {
+                app.style.layout = *layout;
+            }
+        }
+        ui.label(
+            egui::RichText::new(match app.style.layout {
+                crate::theme::Layout::Tabs => {
+                    "one fills the area; right-click a tab to pull it out"
+                }
+                crate::theme::Layout::Windows => "free to overlap, tile and cascade",
+            })
+            .weak()
+            .small(),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Toolbar");
+        for style in crate::theme::IconStyle::all() {
+            if ui
+                .selectable_label(app.style.icons == *style, style.label())
+                .clicked()
+            {
+                app.style.icons = *style;
+            }
+        }
+        ui.label(
+            egui::RichText::new("symbols fit more into a row; words need no learning")
+                .weak()
+                .small(),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Under the trace");
+        for fill in crate::theme::FillStyle::all() {
+            if ui
+                .selectable_label(app.style.fill == *fill, fill.label())
+                .clicked()
+            {
+                app.style.fill = *fill;
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut app.style.grid, "Gridlines")
+            .on_hover_text("faint lines across the plot at each axis tick");
+        ui.checkbox(&mut app.style.wash, "Wash").on_hover_text(
+            "a trace of the data colour across the plot background, which reads as depth",
+        );
+        ui.checkbox(&mut app.style.glow, "Glow").on_hover_text(
+            "a wide faint stroke under the trace, so it reads as the brightest thing drawn",
+        );
+        ui.checkbox(&mut app.style.shadows, "Shadows")
+            .on_hover_text("under windows and menus");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Corners");
+        ui.add(
+            egui::Slider::new(&mut app.style.corners, 0..=12)
+                .suffix(" px")
+                .custom_formatter(|value, _| {
+                    if value <= 0.0 {
+                        "square".to_string()
+                    } else {
+                        format!("{value:.0}")
+                    }
+                }),
+        )
+        .on_hover_text("windows, menus and buttons; zero is square");
+    });
+}
+
+/// Every colour in the palette, grouped by what it is for.
+///
+/// All of them, not a chosen few. The four that used to be left out - the
+/// overview box, the panels, the alarm and the healthy colour - are exactly the
+/// ones a scheme for a particular room or projector needs to move, and leaving
+/// them out meant a scheme could never quite be finished.
+fn colour_editor(app: &mut App, ui: &mut egui::Ui) {
+    ui.label("Colours");
+    let edit = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut Rgb| {
+        ui.horizontal(|ui| {
+            let mut color = value.to_color();
+            if ui.color_edit_button_srgba(&mut color).changed() {
+                *value = Rgb::from_color(color);
+            }
+            // The hex beside the picker, because a colour is shared as text and
+            // matched against a house style as text.
+            //
+            // Half-typed text has to live somewhere across frames. Built from
+            // the colour every frame instead, the field could not be typed in
+            // at all: `#0b1` is not a colour, so the colour did not change, so
+            // the next frame overwrote what had been typed with the old value
+            // and every keystroke vanished as it was made.
+            let id = ui.make_persistent_id(("hex", label));
+            let mut text = ui
+                .data_mut(|data| data.get_temp::<String>(id))
+                .unwrap_or_else(|| value.to_string());
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .desired_width(72.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            if field.changed()
+                && let Ok(parsed) = text.parse::<Rgb>()
+            {
+                *value = parsed;
+            }
+            if field.has_focus() {
+                ui.data_mut(|data| data.insert_temp(id, text));
+            } else {
+                // Once it is left alone the field follows the colour again, so
+                // an abandoned typo does not sit there looking like the truth.
+                ui.data_mut(|data| data.remove_temp::<String>(id));
+            }
+            ui.label(label).on_hover_text(hint);
+        });
+    };
+
+    egui::CollapsingHeader::new("The plot")
+        .default_open(true)
+        .show(ui, |ui| {
+            edit(
+                ui,
+                "Background",
+                "behind the spectrum",
+                &mut app.colors.background,
+            );
+            edit(
+                ui,
+                "Spectrum",
+                "the trace itself",
+                &mut app.colors.foreground,
+            );
+            edit(
+                ui,
+                "Regions",
+                "channels inside a marked region",
+                &mut app.colors.roi,
+            );
+            edit(
+                ui,
+                "Comparison",
+                "a second spectrum drawn behind",
+                &mut app.colors.compare,
+            );
+            edit(
+                ui,
+                "Composite",
+                "where the first rises above the second",
+                &mut app.colors.composite,
+            );
+            edit(ui, "Axes", "axes, ticks and grid", &mut app.colors.axes);
+            edit(ui, "Marker", "the cursor line", &mut app.colors.marker);
+            edit(
+                ui,
+                "Library lines",
+                "where the library puts a nuclide's lines",
+                &mut app.colors.library,
+            );
+            edit(
+                ui,
+                "Overview",
+                "the whole spectrum drawn small, in the inset",
+                &mut app.colors.overview,
+            );
+            edit(
+                ui,
+                "Overview box",
+                "the expanded view's outline in the overview",
+                &mut app.colors.view_box,
+            );
+        });
+    egui::CollapsingHeader::new("Around it").show(ui, |ui| {
+        edit(
+            ui,
+            "Panels",
+            "menus, sidebar and window chrome",
+            &mut app.colors.panel,
+        );
+        ui.label(
+            egui::RichText::new(if app.colors.chrome_is_dark() {
+                "light text on dark chrome"
+            } else {
+                "dark text on light chrome"
+            })
+            .weak()
+            .small(),
+        );
+        edit(
+            ui,
+            "Alarm",
+            "limits exceeded, and errors",
+            &mut app.colors.alarm,
+        );
+        edit(ui, "Healthy", "within limits", &mut app.colors.healthy);
+    });
+
+    if ui
+        .button("Back to the scheme's own look")
+        .on_hover_text(app.theme.label())
+        .clicked()
+    {
+        app.colors = app.theme.colors();
+        app.style = app.theme.style();
+    }
+}
+
+/// What is wrong with the palette, if anything, in terms of what it will do.
+fn palette_checks(app: &mut App, ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new("Readability")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "4.5:1 is the least a line should have against the plot; \
+                     the spectrum wants 7:1 or more.",
+                )
+                .weak()
+                .small(),
+            );
+            egui::Grid::new("contrast").num_columns(3).show(ui, |ui| {
+                for (role, ratio) in app.colors.contrast_report() {
+                    ui.label(role);
+                    ui.monospace(format!("{ratio:.1}:1"));
+                    let (verdict, colour) = if ratio >= 7.0 {
+                        ("good", app.colors.healthy.to_color())
+                    } else if ratio >= 4.5 {
+                        ("readable", app.colors.roi.to_color())
+                    } else {
+                        ("too faint", app.colors.alarm.to_color())
+                    };
+                    ui.colored_label(colour, verdict);
+                    ui.end_row();
+                }
+            });
+
+            let clashes = app.colors.clashes();
+            if clashes.is_empty() {
+                ui.colored_label(
+                    app.colors.healthy.to_color(),
+                    "every colour is distinguishable from the others",
+                );
+            } else {
+                for (first, second, hue) in clashes {
+                    ui.colored_label(
+                        app.colors.alarm.to_color(),
+                        format!(
+                            "{first} and {second} are only {hue:.0} degrees apart and equally light"
+                        ),
+                    );
+                }
+            }
+        });
+}
+
+/// The settings that are not colours, kept out of the way of the ones that are.
+fn other_preferences(app: &mut App, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Peak Info text size");
+        ui.add(egui::Slider::new(&mut app.peak_font, 9.0..=18.0).suffix(" px"));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Default save format");
+        egui::ComboBox::from_id_salt("default-save-format")
+            .selected_text(format!(".{}", app.default_format))
+            .show_ui(ui, |ui| {
+                for extension in ["chn", "spe", "json", "txt", "csv"] {
+                    if ui
+                        .selectable_label(app.default_format == extension, format!(".{extension}"))
+                        .clicked()
+                    {
+                        app.default_format = extension.into();
+                    }
+                }
+            });
+        ui.label(
+            egui::RichText::new("offered first when saving a new buffer")
+                .weak()
+                .small(),
+        );
+    });
+    ui.checkbox(
+        &mut app.reopen_last,
+        "Reopen the last spectrum when the application starts",
+    );
 }
 
 fn dashboard_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {

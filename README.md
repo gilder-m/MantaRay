@@ -1,13 +1,5 @@
 # Written with AI but it works I swear!
 
-...and here is the evidence, because "trust me" is not evidence: 630 automated
-tests, file readers checked against genuine ORTEC files, and a hardware path
-validated against a real ORTEC 926 - all 8192 channels read back identically to
-ORTEC's own library, clocks matching to the millisecond. Where something could
-not be confirmed it is marked unverified rather than quietly assumed. The
-[How this was built](#how-this-was-built) section at the bottom is the honest
-version of this joke.
-
 ---
 
 # MantaRay
@@ -25,8 +17,9 @@ application, a command-line tool and libraries you can build on.
 ![A real Eu-152 spectrum with the in-plot peak information open](docs/screenshots/main.png)
 
 <details>
-<summary>More screenshots: tiled windows, the InSight oscilloscope, the Paper theme</summary>
+<summary>More screenshots: Conductor, tiled windows, the InSight oscilloscope, the Paper theme</summary>
 
+![Conductor, its colours measured from the software these instruments have traditionally been driven with](docs/screenshots/conductor.png)
 ![Three spectra tiled side by side](docs/screenshots/tiled.png)
 ![The InSight virtual oscilloscope](docs/screenshots/insight.png)
 ![The light Paper theme](docs/screenshots/paper.png)
@@ -55,10 +48,30 @@ on real time, live time, ROI peak, ROI integral, counting uncertainty and
 minimum detectable activity - plus field-mode spectrum storage, the automatic
 Optimize and pole-zero routines, and the InSight virtual oscilloscope.
 
-**Display.** Two views per window as MAESTRO has them - an expanded view and an
+**Display.** Two views per spectrum as MAESTRO has them - an expanded view and an
 inset full view showing where you are - with a marker, rubber-band selection,
 logarithmic, linear and automatic vertical scaling, baseline zoom, region
 colouring, library-line markers and a comparison trace.
+
+Spectra are arranged in **tabs** by default, one filling the working area, and
+any of them can be pulled out into a window when two need to be watched at once.
+**Workspaces** decide what the sidebar shows for the job in hand: Acquisition
+puts the clock, the dead time and the preset that will stop the run in front of
+you; Analysis puts the regions and the nuclide lookup there instead.
+
+**Look.** A colour scheme is not only a palette - it carries how the program
+draws: tabs or windows, words or icons on the toolbar, the fill under the trace,
+gridlines, the background wash, the glow, shadows and corner rounding. Seven
+schemes ship, including one measured from the software these instruments have
+traditionally been driven with. Every colour is editable, the contrast of each
+against the plot is reported as you edit, and a scheme is saved as a small JSON
+file you can send somebody. See [docs/themes.md](docs/themes.md).
+
+**Naming a nuclide.** Type `Cs-137`, `137Cs`, `cs137` or `Cs 137` into the
+sidebar and its lines are drawn over the spectrum, each labelled with its
+emission probability, above an intensity cutoff you choose. When it is not
+found, the reason says which kind of not-found it is: no library loaded, not in
+this library, or not a nuclide name.
 
 **Analysis.** Peak information (gross, adjusted gross, background, net and its
 uncertainty, centroid, FWHM, FW(1/x)M), a multi-scale Mariscotti peak search,
@@ -75,6 +88,27 @@ display keeps up) or headless from the command line.
 region edits, peak marking - can be taken back with Ctrl+Z. Instrument memory is
 never written back to: undoing a detector command recovers the data into a buffer
 window, exactly as recalling a file does.
+
+## Installing
+
+Built archives for **Linux** and **Windows** are attached to each
+[release](https://github.com/gilder-m/MantaRay/releases), together with a
+`SHA256SUMS.txt` covering them. Check a download against what the release
+workflow actually built:
+
+```sh
+sha256sum -c SHA256SUMS.txt              # Linux
+```
+```powershell
+Get-FileHash MantaRay-windows-x86_64.zip -Algorithm SHA256   # Windows
+```
+
+Each archive holds the desktop application, the `mantaray` command-line tool and
+the `mantaray-mcb` helper that reaches instruments. Keep the three together: the
+application looks for the helper beside itself.
+
+macOS is **coming soon** - it builds and passes its tests in CI, but nothing has
+run there against an instrument yet, so no binary is published.
 
 ## Building and running
 
@@ -161,10 +195,10 @@ record map was verified.
 
 Every feature in the MAESTRO v7 manual is implemented or deliberately improved -
 [docs/maestro-parity.md](docs/maestro-parity.md) is the section-by-section
-accounting. The last holdouts are in: window tiling and cascade, the
-unsaved-changes question, Download Spectra and field-mode instrument storage,
-the Optimize and pole-zero routines with an InSight virtual oscilloscope on the
-simulated preamplifier, printing through the browser's print dialog with the
+accounting, including what is different and why. The last pieces to land were
+window tiling and cascade, the unsaved-changes question, Download Spectra and
+field-mode instrument storage, the Optimize and pole-zero routines with an
+InSight virtual oscilloscope on the simulated preamplifier, printing with the
 plot and reports on one page, and the complete §6.5 JOB command set - including
 `RUN`/`WAIT "program"` launching real programs, `LOOP SPECTRA`/`VIEW` walking
 the instrument's stored spectra, and `ZOOM` placing windows.
@@ -187,45 +221,35 @@ socket and a local instrument are the same code above the seam. See
 [docs/ortec-hardware.md](docs/ortec-hardware.md), which records the wire format
 and marks what is verified and what is not.
 
-## Verified against real data
+## Checked against real data
 
 The readers and the analysis are tested against genuine instrument files, not
-only synthetic ones. Drop real spectra into
+only ones invented to pass. Drop real spectra into
 `crates/mantaray-formats/tests/fixtures/` and the suite will exercise them: every
 file must load, round-trip through the native format, and - for recognised
 sources - show the expected lines at the expected energies. On a real Cs-137
 spectrum from a MAESTRO Pro system, MantaRay reports the 661.657 keV line at
 661.98 keV with a 1.80 keV FWHM and a net area of 1 286 255 ± 1 185 (0.09 %).
 
-## How the application itself is tested
-
-The desktop application is a library with a small binary on top, so the whole of
-it can be driven without a window on screen. Five suites run in
-`crates/mantaray-gui/tests/`:
-
-| Suite | What it covers |
-|---|---|
-| `recall.rs` | opening spectra: every format, the command line, dropped files, files with meaningless names, and that what opens is **visible** |
-| `session.rs` | a working session: acquire, clear, undo into a buffer, mark, calibrate, strip, save, report |
-| `frames.rs` | real frames rendered headless - every theme, scale, fill mode, dialog and window size, a hundred frames of a running count, and a monkey firing hostile actions at the session |
-| `pointer.rs` | synthetic pointer input: clicking, dragging both ways, marking by drag, the wheel and a trackpad pinch |
-| `workflows.rs` | whole jobs, done the way a person does them: calibrate and save and reopen; smooth, look, undo; search, calibrate, analyse, report |
+`cargo test --workspace` runs everything.
+[docs/testing.md](docs/testing.md) says what each suite holds to account, and -
+more usefully - what the tests **cannot** cover.
 
 ## Platforms
 
 | | builds | tests | hardware |
 |---|---|---|---|
-| Windows | yes | 630 | yes - USB, with only ORTEC's kernel driver |
-| Linux | yes | all but the Windows-only suites | yes - USB over libusb, with no driver at all |
-| macOS | type-checks | no machine to run them on | libusb path compiles; not yet run |
+| **Linux** | yes | yes | yes - USB over libusb, with no vendor driver at all |
+| **Windows** | yes | yes | yes - USB, with only ORTEC's kernel driver |
+| macOS | yes | yes | never run against an instrument |
 
-The Linux run is smaller only because a few suites are about Windows itself -
-file-type registration, the crash report, the bridge to ORTEC's library. The
-desktop application builds and runs there, and every headless frame test passes.
+Linux and Windows are released. macOS is built and tested by CI on every push
+and is deliberately **not** released: nothing has been run there against real
+hardware, and an untested binary for a platform nobody has used is a promise
+this project cannot keep.
 
-The rule the suites follow is that a spectrum which loads into a window nothing
-draws has not opened, so the visibility of a window is asserted as directly as its
-contents.
+A few suites are about Windows itself - file-type registration, the crash
+report, the bridge to ORTEC's library - and are skipped elsewhere.
 
 ## Documentation
 
@@ -235,6 +259,10 @@ contents.
 - [docs/architecture.md](docs/architecture.md) - how the crates fit together
 - [docs/nuclide-data.md](docs/nuclide-data.md) - why no nuclide library ships, and
   how to bring or build one
+- [docs/themes.md](docs/themes.md) - the rules a palette has to satisfy, the
+  scheme file, workspaces, and where Conductor's colours were measured from
+- [docs/testing.md](docs/testing.md) - what each test suite holds to account,
+  and what the tests cannot cover
 
 ## Acknowledgements
 
@@ -285,12 +313,13 @@ than typed line by line. That is stated plainly because it should change how you
 read the code and how much you trust it before checking it yourself.
 
 What that does **not** mean is that it is unverified. The behaviour is pinned by
-about 630 automated tests, the file readers are checked against genuine ORTEC
-files, and the hardware path was validated against a real ORTEC 926 - the
-in-house USB readout returns all 8192 channels identically to ORTEC's own
-library, with the clocks matching to the millisecond. Where something could not
-be confirmed, it is marked unverified in the documentation rather than quietly
-assumed, and several formats are left unimplemented for exactly that reason.
+an automated suite that runs on every push, the file readers are checked against
+genuine ORTEC files, and the hardware path was validated against a real ORTEC
+926 - the in-house USB readout returns all 8192 channels identically to ORTEC's
+own library, with the clocks matching to the millisecond. Where something could
+not be confirmed, it is marked unverified in the documentation rather than
+quietly assumed: [docs/testing.md](docs/testing.md) ends with what the tests
+cannot cover, and several formats are left unimplemented for the same reason.
 
 What it does mean is the ordinary caution owed to any young instrument
 program: this is alpha software, it has not had a long shakedown across many

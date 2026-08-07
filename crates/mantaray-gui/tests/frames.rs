@@ -169,6 +169,97 @@ fn click_menu_item(app: &mut App, ctx: &egui::Context, menu: &str, item: &str) {
     frame(app, ctx, [1400.0, 900.0]);
 }
 
+/// Scrolls a dialog from the top, gathering everything it paints on the way.
+///
+/// A dialog is bounded to the screen and scrolls, so what is below the fold is
+/// not painted until it is scrolled to - which is the point. Asking "does this
+/// dialog offer X" therefore means looking at all of it, not at one frameful.
+fn painted_while_scrolling(
+    app: &mut App,
+    ctx: &egui::Context,
+    size: [f32; 2],
+    over: egui::Pos2,
+) -> String {
+    let mut seen = String::new();
+    for step in 0..14 {
+        let events = if step == 0 {
+            vec![egui::Event::PointerMoved(over)]
+        } else {
+            vec![
+                egui::Event::PointerMoved(over),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -90.0),
+                    modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
+                },
+            ]
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size[0], size[1]),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| app.draw(ui));
+        seen.push_str(&painted_text(&output));
+    }
+    seen
+}
+
+/// Scrolls a dialog until a piece of text is on screen, and says where it is.
+///
+/// The same idea as [`painted_while_scrolling`], but stopping at the thing
+/// wanted so that its position is the one it currently occupies - a rectangle
+/// from an earlier scroll position would be somewhere else by the time it was
+/// clicked.
+fn scroll_until(
+    app: &mut App,
+    ctx: &egui::Context,
+    size: [f32; 2],
+    over: egui::Pos2,
+    wanted: &str,
+) -> Option<egui::Rect> {
+    for step in 0..14 {
+        let mut events = vec![egui::Event::PointerMoved(over)];
+        if step > 0 {
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -90.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+            });
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size[0], size[1]),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| app.draw(ui));
+        if let Some(rect) = text_rect(&output, wanted) {
+            return Some(rect);
+        }
+    }
+    None
+}
+
+/// A context whose animations finish at once.
+///
+/// A headless frame does not advance the clock, so anything egui animates -
+/// a collapsing section opening, most of all - freezes part-way through and
+/// stays there however many frames are drawn. Tests that open a section and
+/// look inside it need the section open, not opening.
+fn still_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    ctx.all_styles_mut(|style| style.animation_time = 0.0);
+    ctx
+}
+
 /// A spectrum with a peak, a calibration and regions: the interesting case.
 fn realistic(channels: usize) -> Spectrum {
     let mut spectrum = Spectrum::new(channels);
@@ -1225,4 +1316,514 @@ fn the_display_menu_toggles_what_it_says_it_does() {
         Some(false),
         "and must not have put the peak names back"
     );
+}
+
+/// Editing a colour has to reach the chrome, not only the plot.
+///
+/// This is the defect the palette work started from. `apply` took the *preset*
+/// and asked it for its colours, so a hand-edited palette reached the trace and
+/// stopped there: every selection, hover, link and warning around it stayed the
+/// shade the preset had chosen. Worse, the chrome was only re-dressed when the
+/// preset changed, so editing a colour re-dressed nothing at all.
+#[test]
+fn editing_a_colour_redresses_the_interface_around_the_plot() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+
+    // A panel colour nothing would arrive at by accident.
+    app.colors.panel = mantaray_gui::theme::Rgb(90, 20, 40);
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert_eq!(
+        ctx.style_of(ctx.theme()).visuals.panel_fill,
+        egui::Color32::from_rgb(90, 20, 40),
+        "the panels should follow the edited colour"
+    );
+
+    // And the accent, which is taken from the spectrum colour, follows it too.
+    app.colors.foreground = mantaray_gui::theme::Rgb(255, 0, 255);
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert_eq!(
+        ctx.style_of(ctx.theme()).visuals.hyperlink_color,
+        egui::Color32::from_rgb(255, 0, 255),
+        "the accent should follow the edited spectrum colour"
+    );
+}
+
+/// A scheme with light chrome around a dark plot dresses itself correctly.
+#[test]
+fn light_chrome_around_a_dark_plot_gets_dark_text() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.theme = mantaray_gui::theme::Theme::Conductor;
+    app.colors = mantaray_gui::theme::SpectrumColors::conductor();
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+
+    assert!(
+        !ctx.style_of(ctx.theme()).visuals.dark_mode,
+        "grey chrome wants dark text, whatever colour the plot behind it is"
+    );
+    // The plot stays dark while the chrome around it is light: the two are
+    // separate decisions, which is the whole point of this scheme.
+    assert!(
+        app.colors.background.luminance() < 0.05,
+        "the plot should still be dark"
+    );
+    // And a text field belongs to the chrome, not to the plot. Filled from the
+    // plot colour - which is what it used to be - every field in the sidebar
+    // became a dark box with dark text written on it.
+    let field = ctx.style_of(ctx.theme()).visuals.extreme_bg_color;
+    let field = mantaray_gui::theme::Rgb(field.r(), field.g(), field.b());
+    assert!(
+        field.luminance() > 0.5,
+        "a text field in light chrome should be light, not {field}"
+    );
+    assert!(
+        field.contrast(app.colors.background) > 4.5,
+        "and clearly apart from the plot behind it"
+    );
+}
+
+/// Every scheme is offered in the dialog, by name.
+#[test]
+fn the_theme_dialog_offers_every_scheme() {
+    let ctx = still_context();
+    let mut app = with_data();
+    app.apply_action(Action::Show(Dialog::Preferences));
+    // Tall enough for the dialog with its colours opened out. Whether it fits
+    // a short screen is the business of the test below; this one asks what it
+    // offers.
+    // The dialog is bounded to the screen and scrolls, so everything it offers
+    // is gathered by scrolling through it rather than from one frame.
+    let screen = [1400.0, 900.0];
+    let text = painted_while_scrolling(&mut app, &ctx, screen, egui::pos2(400.0, 400.0));
+
+    for theme in mantaray_gui::theme::Theme::all() {
+        assert!(
+            text.contains(theme.label()),
+            "{} is missing from the dialog:\n{text}",
+            theme.label()
+        );
+    }
+    // Every colour in the palette is editable, including the four that used to
+    // be left out - they are the ones a scheme for a particular room needs.
+    for role in [
+        "Background",
+        "Spectrum",
+        "Regions",
+        "Comparison",
+        "Composite",
+        "Axes",
+        "Marker",
+        "Library lines",
+        "Overview box",
+    ] {
+        assert!(text.contains(role), "{role} is not editable:\n{text}");
+    }
+    // And the colours are shown as hex, which is how a scheme gets shared.
+    assert!(
+        text.contains(&app.colors.background.to_string()),
+        "the hex value should be shown and editable:\n{text}"
+    );
+}
+
+/// Two named spectra, on top of whatever a bare application already holds.
+fn two_spectra() -> App {
+    let mut app = App::headless();
+    app.open_buffer("first.Spe".into(), realistic(1024), None);
+    app.open_buffer("second.Spe".into(), realistic(1024), None);
+    app
+}
+
+/// The window with a given title. Found by name rather than by position,
+/// because a bare application already has one and the indices are not what
+/// the order they were opened in suggests.
+fn window_id(app: &App, title: &str) -> usize {
+    app.windows
+        .iter()
+        .find(|window| window.title == title)
+        .unwrap_or_else(|| panic!("no window called {title:?}"))
+        .id
+}
+
+/// How many spectra were actually drawn: each one puts a marker readout under
+/// its plot, so counting those counts the spectra given room.
+fn spectra_drawn(text: &str) -> usize {
+    text.lines()
+        .filter(|line| line.starts_with("Marker:"))
+        .count()
+}
+
+/// No dialog can grow tall enough to push its own close button off the screen.
+///
+/// This happened: the theme dialog gained a style section and a fuller colour
+/// list, egui pushed the window up to keep the bottom on screen, and the title
+/// bar went off the top with the close button on it. Escape still worked, and
+/// nothing else did.
+#[test]
+fn every_dialog_keeps_its_title_bar_on_screen() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.apply_action(Action::PeakSearch);
+
+    // A short screen, which is where a tall dialog goes wrong.
+    let screen = [1100.0, 620.0];
+    for dialog in Dialog::all() {
+        app.dialogs.close_all();
+        app.apply_action(Action::Show(*dialog));
+        // Two frames: egui measures a window it has not placed before on one
+        // and paints it on the next.
+        frame(&mut app, &ctx, screen);
+        let output = frame(&mut app, &ctx, screen);
+        if !app.dialogs.is_open(*dialog) {
+            continue;
+        }
+        let painted: Vec<egui::Rect> = {
+            fn walk(shape: &egui::Shape, into: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Text(text) => {
+                        into.push(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    egui::Shape::Vec(inner) => {
+                        for shape in inner {
+                            walk(shape, into);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut found);
+            }
+            found
+        };
+        // Nothing may be painted off either end of the screen. A dialog taller
+        // than the screen runs off the bottom, and egui then slides it up to
+        // compensate, taking the title bar and the close button with it.
+        for rect in painted {
+            assert!(
+                rect.top() >= -1.0 && rect.bottom() <= screen[1] + 1.0,
+                "{dialog:?} painted at {rect:?}, off a {screen:?} screen"
+            );
+        }
+    }
+}
+
+/// A workspace decides which sidebar sections are on screen.
+#[test]
+fn a_workspace_shows_the_sections_its_job_needs() {
+    use mantaray_gui::workspace::Workspace;
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.apply_action(Action::PeakSearch);
+
+    // Nothing is hidden until somebody asks for it to be.
+    assert_eq!(app.workspace.name, "Everything");
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    for section in ["Pulse Ht. Analysis", "Preset Limits", "Isotope", "Regions"] {
+        assert!(text.contains(section), "{section} should be shown:\n{text}");
+    }
+
+    // Counting: the clock and what will stop it, without the interpretation.
+    app.workspace = Workspace::acquisition();
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("Preset Limits"), "{text}");
+    assert!(
+        !text.contains("Isotope"),
+        "the nuclide lookup is not wanted mid-count:\n{text}"
+    );
+    assert!(!text.contains("Regions"), "nor the region list:\n{text}");
+
+    // Interpreting: the regions and the library, without the preset limits,
+    // which describe a run that has already finished.
+    app.workspace = Workspace::analysis();
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("Regions"), "{text}");
+    assert!(text.contains("Isotope"), "{text}");
+    assert!(
+        !text.contains("Preset Limits"),
+        "the presets are done with:\n{text}"
+    );
+    // The counts stay in both: they are what a spectrum is.
+    assert!(text.contains("Pulse Ht. Analysis"), "{text}");
+}
+
+/// The workspace is chosen from the corner, and kept across a restart.
+#[test]
+fn the_workspace_is_chosen_from_the_corner_and_remembered() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+
+    // It is named in the status bar, which is where it is chosen from.
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("Everything"), "{text}");
+
+    app.workspace = mantaray_gui::workspace::Workspace::analysis();
+    app.workspaces.push(mantaray_gui::workspace::Workspace::new(
+        "Bench",
+        app.workspace.sections,
+    ));
+
+    // Both survive the round trip through the settings file.
+    let written = serde_json::to_string(&app.persisted()).expect("write");
+    let persisted: mantaray_gui::app::Persisted = serde_json::from_str(&written).expect("read");
+    let mut restored = App::headless();
+    restored.restore(persisted);
+    assert_eq!(restored.workspace.name, "Analysis");
+    assert_eq!(restored.workspaces.len(), 1);
+    assert_eq!(restored.workspaces[0].name, "Bench");
+
+    // And settings written before workspaces existed still load, with the
+    // arrangement that hides nothing.
+    let older = r##"{"theme":"Paper","colors":{"background":"#fcfcfa","foreground":"#0b4e73",
+        "roi":"#a0480a","compare":"#603cb4","composite":"#b23c3c","axes":"#5a606e",
+        "marker":"#1e1e22","library":"#a02882","view_box":"#8c96af","panel":"#eeeeec",
+        "alarm":"#be1e1e","healthy":"#147850"},"recent":[],"time_scale":1.0}"##;
+    let persisted: mantaray_gui::app::Persisted =
+        serde_json::from_str(older).expect("settings from before workspaces existed");
+    assert_eq!(persisted.workspace.name, "Everything");
+    assert!(persisted.workspaces.is_empty());
+}
+
+/// Tabs by default: one spectrum fills the area, the rest are names in a strip.
+#[test]
+fn spectra_are_arranged_in_tabs_by_default() {
+    let ctx = egui::Context::default();
+    let mut app = two_spectra();
+
+    assert_eq!(
+        app.style.layout,
+        mantaray_gui::theme::Layout::Tabs,
+        "tabs are the default arrangement"
+    );
+
+    // Both are named in the strip, whichever one is being shown.
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("first.Spe"), "{text}");
+    assert!(text.contains("second.Spe"), "{text}");
+    assert_eq!(
+        spectra_drawn(&text),
+        1,
+        "exactly one spectrum should have the area:\n{text}"
+    );
+
+    // And clicking a tab shows that one.
+    let first = window_id(&app, "first.Spe");
+    assert_ne!(app.active.map(|index| app.windows[index].id), Some(first));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let tab = text_rect(&output, "first.Spe").expect("the first tab");
+    click_at(&mut app, &ctx, [1400.0, 900.0], tab.center());
+    assert_eq!(
+        app.active.map(|index| app.windows[index].id),
+        Some(first),
+        "clicking a tab should show that spectrum"
+    );
+}
+
+/// A spectrum can be pulled out of the strip, and put back.
+#[test]
+fn a_tab_can_be_opened_in_a_window_of_its_own() {
+    let ctx = egui::Context::default();
+    let mut app = two_spectra();
+    let second = window_id(&app, "second.Spe");
+    let floating = |app: &App| {
+        app.windows
+            .iter()
+            .find(|window| window.id == second)
+            .expect("still open")
+            .floating
+    };
+
+    assert!(!floating(&app), "everything starts docked");
+    let before = spectra_drawn(&painted_text(&frame(&mut app, &ctx, [1400.0, 900.0])));
+
+    app.apply_action(Action::ToggleFloating(second));
+    assert!(floating(&app));
+
+    // Two frames: egui measures a window it has not placed before on one frame
+    // and paints it on the next. It settles itself, because a repaint is
+    // requested, but a test that draws once would see the measuring frame.
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    // Its tab stays in the strip, so the strip is still a complete list of
+    // what is open - a window behind another is otherwise hard to find.
+    assert!(text.contains("second.Spe"), "{text}");
+    // And one more spectrum is drawn than before: the tab that had the area,
+    // plus the one now in a window beside it.
+    assert_eq!(
+        spectra_drawn(&text),
+        before + 1,
+        "the pulled-out one should be drawn as well:\n{text}"
+    );
+
+    app.apply_action(Action::ToggleFloating(second));
+    assert!(!floating(&app), "and it can be put back");
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert_eq!(
+        spectra_drawn(&painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]))),
+        before,
+        "and the window goes with it"
+    );
+}
+
+/// The other arrangement puts every spectrum in a window, as before.
+#[test]
+fn the_window_arrangement_draws_them_all() {
+    let ctx = egui::Context::default();
+    let mut app = two_spectra();
+    let open = app.visible_windows().len();
+    assert!(open >= 3, "the two opened here, and the one already there");
+
+    app.style.layout = mantaray_gui::theme::Layout::Windows;
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert_eq!(
+        spectra_drawn(&text),
+        open,
+        "every window should be drawn:\n{text}"
+    );
+}
+
+/// Clicks once at a point on a screen of a given size, and lets the queued
+/// action apply on the frame after.
+fn click_at(app: &mut App, ctx: &egui::Context, size: [f32; 2], at: egui::Pos2) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(size[0], size[1]),
+        )),
+        events: vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input, |ui| app.draw(ui));
+    frame(app, ctx, size);
+}
+
+/// The hex field can be typed into a character at a time.
+///
+/// Rebuilt from the colour every frame, it could not be: `#0b1` is not a
+/// colour, so the colour did not change, so the next frame overwrote what had
+/// been typed and every keystroke vanished as it was made. Nothing looked
+/// wrong in a screenshot and nothing failed in a test that only checked the
+/// hex was displayed - it had to be typed at to show.
+#[test]
+fn a_colour_can_be_typed_in_as_hex() {
+    let ctx = still_context();
+    let mut app = with_data();
+    app.apply_action(Action::Show(Dialog::Preferences));
+
+    // Scrolled to, the way a person reaches a row further down a dialog than
+    // the screen is tall.
+    let screen = [1400.0, 900.0];
+    let before = app.colors.foreground;
+    let field = scroll_until(
+        &mut app,
+        &ctx,
+        screen,
+        egui::pos2(400.0, 400.0),
+        &before.to_string(),
+    )
+    .expect("the spectrum colour's hex should be reachable");
+    type_into(&mut app, &ctx, screen, field.center(), "#ff00ff");
+
+    assert_eq!(
+        app.colors.foreground,
+        mantaray_gui::theme::Rgb(255, 0, 255),
+        "typing a colour into the field should set it"
+    );
+}
+
+/// Clicks at a point to focus whatever is there, then types, one character per
+/// frame - which is the case that matters, because the partial text has to
+/// survive between them.
+fn type_into(app: &mut App, ctx: &egui::Context, size: [f32; 2], at: egui::Pos2, text: &str) {
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]));
+    let run = |app: &mut App, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| app.draw(ui));
+    };
+    run(
+        app,
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    // Select what is there so the typing replaces it rather than appending.
+    run(
+        app,
+        vec![egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }],
+    );
+    for character in text.chars() {
+        run(app, vec![egui::Event::Text(character.to_string())]);
+    }
+}
+
+/// A saved scheme is kept, replaces itself under the same name, and persists.
+#[test]
+fn a_saved_scheme_is_kept_and_comes_back() {
+    let mut app = App::headless();
+    app.colors = mantaray_gui::theme::SpectrumColors::conductor();
+    app.schemes
+        .push(mantaray_gui::theme::Scheme::new("Bench", app.colors));
+
+    // It survives the round trip through the settings file.
+    let text = serde_json::to_string(&app.persisted()).expect("write");
+    let persisted: mantaray_gui::app::Persisted = serde_json::from_str(&text).expect("read");
+    let mut restored = App::headless();
+    restored.restore(persisted);
+    assert_eq!(restored.schemes.len(), 1);
+    assert_eq!(restored.schemes[0].name, "Bench");
+    assert_eq!(
+        restored.schemes[0].colors,
+        mantaray_gui::theme::SpectrumColors::conductor()
+    );
+
+    // Settings written before schemes existed still load, with none.
+    // A longer delimiter, because every colour in it contains `"#`, which would
+    // close an `r#"` string in the middle of the first one.
+    let older = r##"{"theme":"Paper","colors":{"background":"#fcfcfa","foreground":"#0b4e73",
+        "roi":"#a0480a","compare":"#603cb4","composite":"#b23c3c","axes":"#5a606e",
+        "marker":"#1e1e22","library":"#a02882","view_box":"#8c96af","panel":"#eeeeec",
+        "alarm":"#be1e1e","healthy":"#147850"},"recent":[],"time_scale":1.0}"##;
+    let persisted: mantaray_gui::app::Persisted =
+        serde_json::from_str(older).expect("settings from before schemes existed");
+    assert!(persisted.schemes.is_empty());
 }

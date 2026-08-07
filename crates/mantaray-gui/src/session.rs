@@ -37,6 +37,14 @@ pub struct SavedWindow {
     /// Whether it held unsaved changes.
     #[serde(default)]
     pub modified: bool,
+    /// Whether it had been pulled out of the tab strip into its own window.
+    ///
+    /// Part of what was on screen, like the zoom and the marker. Pulling a
+    /// spectrum out is a deliberate arrangement - it is done to watch one while
+    /// working on another - and putting it back unasked on the next start is
+    /// undoing a decision rather than restoring one.
+    #[serde(default)]
+    pub floating: bool,
 }
 
 /// Everything worth bringing back from an unfinished run.
@@ -171,6 +179,7 @@ mod tests {
             display: DisplayState::for_length(8),
             calibration: CalibrationTable::default(),
             modified: true,
+            floating: false,
         }
     }
 

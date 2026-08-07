@@ -11,16 +11,30 @@ unusual-but-possible input, **L** = practice/robustness.
 
 ## GUI (`crates/mantaray-gui`)
 
-### M: A debug-build freeze on Linux, seen once, remains unexplained
-During the 2026-08-05 bench run the GUI froze once under a **debug** build
-while a live detector window was polling. It did not recur under a release
-build (CPU fell 93% → 19%), and no root cause was established — a debugger
-could not attach without relaxing `ptrace_scope`. **Why it matters:** an
-unreproduced freeze is an undiagnosed bug, not a fixed one; if it is a real
-deadlock it may only be *slower* to appear in release. **Next step:** try to
-reproduce under a debug build with a live instrument; if it recurs, attach
-with `ptrace_scope` relaxed (or run under `gdb` from the start) and get a
-stack.
+### M: A freeze on Linux, seen twice including under release, remains unexplained
+The GUI has stalled twice with a live detector window polling: once on
+2026-08-05 under a **debug** build, and again on 2026-08-06 under a **release**
+one. The second occurrence rules out the first explanation — a debug build's
+saturated event loop — which was written here as though it settled the matter.
+It did not.
+
+What the second stall showed, while it was happening: the main thread was `R`
+in userspace rather than blocked, the `mantaray-mcb` helper was idle at
+`anon_pipe_read`, and the process held about half a core. It recovered on its
+own after some minutes without being signalled. No stack was captured, so
+there is still no root cause.
+
+**Why it matters:** a spinning main thread that is not blocked is a live loop
+somewhere in the frame, not a deadlock on the bridge — and the helper sitting
+idle says the instrument is not what is holding it. Under release, with real
+counting, this is a stall an operator meets mid-measurement.
+
+**Next step:** the obstacle is capture, not reproduction. `ptrace_scope=1` on
+the bench machine means gdb can only attach to its own descendant, so a
+debugger cannot be brought to a stall already in progress — the program has to
+be launched *from* gdb and left running, driven through a FIFO so the terminal
+stays free. Keep such a session up during bench work and take `thread apply all
+bt` the next time it stalls.
 
 ### L: Uncertainty and MDA presets stop a remote instrument only while the host runs
 These are host-side calculations no instrument carries. They *are* evaluated
