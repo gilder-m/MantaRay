@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+**Clearing lets the next count start again (2026-08-06).** Found by running
+the bench check against the 926: `CLEAR` resets the instrument's clocks, but
+the mirror kept the old ones until the next poll - and the start guard added
+with the preset work reads them. With a live preset held, Clear and then Start
+was refused as "the Live time preset is already reached - clear the spectrum,
+or change the preset", which told the operator to do the very thing they had
+just done; a job's `CLEAR` / `START` did not start at all. The mirror's clocks
+now go with the instrument's, as the simulator's always have. The whole
+sequence is pinned on the hardware now: count out a one-second preset, watch
+the instrument stop itself at LT=1.00, and see the next `START` refused by
+name - the first end-to-end proof of that guard on the instrument it was
+written for.
+
+Also here: a doc comment had been separated from what it documents by a
+function inserted between them, leaving `logarithmic_ceiling` undocumented and
+its text attached to `decade_ceiling`.
+
 **Five things found by daily-driving it (2026-08-06).** All raised by the
 person using the program against a real detector, and all small enough to be
 felt every session.

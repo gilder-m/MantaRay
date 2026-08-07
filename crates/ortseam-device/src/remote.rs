@@ -400,6 +400,14 @@ impl Mcb for RemoteMcb {
         self.command("CLEAR")?;
         self.spectrum.clear();
         self.status.total_counts = 0;
+        // CLEAR resets the instrument's clocks, so the mirror's must go with
+        // them rather than waiting for the next poll to notice. Anything that
+        // reads the clocks before then reads the count that has just been
+        // thrown away: with a live preset held, START is refused as already
+        // reached - telling the operator to clear the spectrum they have this
+        // moment cleared - and a job's CLEAR / START does not start at all.
+        self.status.real_time = 0.0;
+        self.status.live_time = 0.0;
         Ok(())
     }
 

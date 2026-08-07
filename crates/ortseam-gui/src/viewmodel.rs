@@ -419,13 +419,6 @@ impl DisplayState {
     }
 }
 
-/// The next 1, 2 or 5 times a power of ten strictly above `peak`.
-///
-/// This is the top of a logarithmic axis: a round number the eye can read off
-/// the gridlines, and far enough above the tallest channel that the peak has
-/// room to breathe instead of being pressed flat against the frame. Strictly
-/// above, because a peak landing exactly on the top line is the thing being
-/// fixed.
 /// The next power of ten strictly above `peak`, as MAESTRO scales a log axis.
 ///
 /// The point is the decade line itself: a peak of a thousand counts sits on
@@ -444,6 +437,13 @@ fn decade_ceiling(peak: u64) -> u64 {
     decade
 }
 
+/// The next 1, 2 or 5 times a power of ten strictly above `peak`.
+///
+/// This is the top of a logarithmic axis: a round number the eye can read off
+/// the gridlines, and far enough above the tallest channel that the peak has
+/// room to breathe instead of being pressed flat against the frame. Strictly
+/// above, because a peak landing exactly on the top line is the thing being
+/// fixed.
 fn logarithmic_ceiling(peak: u64) -> u64 {
     let mut step = 1u64;
     loop {
