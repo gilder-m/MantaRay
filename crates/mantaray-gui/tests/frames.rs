@@ -1272,10 +1272,24 @@ fn light_chrome_around_a_dark_plot_gets_dark_text() {
         !ctx.style_of(ctx.theme()).visuals.dark_mode,
         "grey chrome wants dark text, whatever colour the plot behind it is"
     );
-    assert_eq!(
-        ctx.style_of(ctx.theme()).visuals.extreme_bg_color,
-        egui::Color32::BLACK,
-        "and the plot itself stays black"
+    // The plot stays dark while the chrome around it is light: the two are
+    // separate decisions, which is the whole point of this scheme.
+    assert!(
+        app.colors.background.luminance() < 0.05,
+        "the plot should still be dark"
+    );
+    // And a text field belongs to the chrome, not to the plot. Filled from the
+    // plot colour - which is what it used to be - every field in the sidebar
+    // became a dark box with dark text written on it.
+    let field = ctx.style_of(ctx.theme()).visuals.extreme_bg_color;
+    let field = mantaray_gui::theme::Rgb(field.r(), field.g(), field.b());
+    assert!(
+        field.luminance() > 0.5,
+        "a text field in light chrome should be light, not {field}"
+    );
+    assert!(
+        field.contrast(app.colors.background) > 4.5,
+        "and clearly apart from the plot behind it"
     );
 }
 

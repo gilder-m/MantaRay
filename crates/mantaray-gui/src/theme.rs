@@ -386,27 +386,33 @@ impl SpectrumColors {
         self.panel.luminance() < 0.35
     }
 
-    /// Grey chrome around a black plot, in the manner of the software that
-    /// used to drive these instruments.
+    /// The look of the software that used to drive these instruments.
     ///
-    /// The look is period-accurate and the palette is not: the original put
-    /// red regions on a black field beside a red alarm, which is exactly the
-    /// collision the rules here exist to prevent. Regions are pulled to orange
-    /// so that "look at me" red still means only one thing.
+    /// Not reconstructed from memory: the values were sampled from a screenshot
+    /// of the real program running on this bench. Cyan filled to the baseline
+    /// over a navy field, red regions, a white cursor, and the overview drawn
+    /// in silver with a yellow cursor of its own - the VGA sixteen, which is
+    /// what everything of that era was drawn in.
+    ///
+    /// One departure. The original leaves red meaning both "region" and
+    /// "alarm"; here the alarm is taken round to crimson, because two reds
+    /// meaning two things is the collision the rules in this module exist to
+    /// prevent. It stays far enough from the regions to be told apart and
+    /// close enough to still read as an alarm.
     pub fn conductor() -> Self {
         Self {
-            background: Rgb(0, 0, 0),
-            foreground: Rgb(0, 230, 60),
-            roi: Rgb(255, 105, 0),
-            compare: Rgb(80, 170, 255),
-            composite: Rgb(255, 180, 60),
-            axes: Rgb(120, 120, 110),
-            marker: Rgb(255, 255, 240),
-            library: Rgb(230, 110, 230),
-            view_box: Rgb(150, 150, 140),
-            panel: Rgb(198, 198, 190),
-            alarm: Rgb(220, 0, 0),
-            healthy: Rgb(0, 150, 70),
+            background: Rgb(0, 0, 64),
+            foreground: Rgb(0, 255, 255),
+            roi: Rgb(255, 0, 0),
+            compare: Rgb(192, 192, 192),
+            composite: Rgb(0, 128, 128),
+            axes: Rgb(128, 128, 128),
+            marker: Rgb(255, 255, 255),
+            library: Rgb(255, 0, 255),
+            view_box: Rgb(255, 255, 0),
+            panel: Rgb(240, 240, 240),
+            alarm: Rgb(200, 0, 80),
+            healthy: Rgb(0, 128, 0),
         }
     }
 
@@ -499,8 +505,6 @@ impl SpectrumColors {
         let mut found = Vec::new();
         for (index, (name, colour)) in roles.iter().enumerate() {
             for (other_name, other) in roles.iter().skip(index + 1) {
-                // A near-grey has no hue to compare, so only lightness counts.
-                let comparable = colour.chroma() > 0.15 && other.chroma() > 0.15;
                 let hue = colour.hue_distance(*other);
                 let lightness = colour.contrast(*other);
                 // Two warm colours are the hardest pair to tell apart, so they
@@ -510,9 +514,18 @@ impl SpectrumColors {
                 } else {
                     1.4
                 };
-                let too_close = if comparable {
+                let too_close = if colour.chroma() > 0.15 && other.chroma() > 0.15 {
+                    // Both carry a hue, so the angle between them is meaningful.
                     hue < 25.0 && lightness < needed_lightness
+                } else if (colour.chroma() - other.chroma()).abs() > 0.35 {
+                    // One is a grey and the other is not, which is a difference
+                    // the eye reads immediately whatever their lightness. A
+                    // white cursor over a cyan trace is the case: barely 1.25:1
+                    // apart in lightness, and nobody has ever confused them.
+                    false
                 } else {
+                    // Two greys, or two colours of similar faintness. Neither
+                    // hue nor saturation separates them, so lightness must.
                     lightness < 1.4
                 };
                 if too_close {
@@ -640,11 +653,21 @@ pub fn apply(ctx: &egui::Context, colors: &SpectrumColors) {
     };
     visuals.panel_fill = panel;
     visuals.window_fill = window;
-    visuals.extreme_bg_color = colors.background.to_color();
+    // What egui fills a text field with. Taken from the chrome rather than
+    // from the plot: they are usually the same darkness and it never showed,
+    // until a scheme put light chrome around a black plot and every field in
+    // the sidebar became a black box with dark text written on it. A field is
+    // part of the chrome, and sinks below it - toward white where the chrome
+    // is light, because that is what a light interface does.
+    visuals.extreme_bg_color = if dark {
+        colors.panel.mix(Rgb(0, 0, 0), 0.45).to_color()
+    } else {
+        colors.panel.mix(Rgb(255, 255, 255), 0.6).to_color()
+    };
     visuals.faint_bg_color = if dark {
         panel.gamma_multiply(1.5)
     } else {
-        panel.gamma_multiply(0.96)
+        colors.panel.mix(Rgb(255, 255, 255), 0.35).to_color()
     };
     visuals.window_corner_radius = 7.into();
     visuals.menu_corner_radius = 5.into();
@@ -666,13 +689,27 @@ pub fn apply(ctx: &egui::Context, colors: &SpectrumColors) {
     visuals.error_fg_color = colors.alarm.to_color();
 
     let stroke_colour = colors.axes.with_alpha(0.5);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, stroke_colour);
-    visuals.widgets.inactive.bg_fill = if dark {
+    // A button is a surface raised off the panel, and it has to look like one.
+    // Lifting it ninety per cent worked on a dark scheme and the same code on a
+    // light one moved it ten per cent the other way, which is a difference
+    // nobody can see: every button in the toolbar read as bare text on grey.
+    // Light chrome gets a fill lifted toward white and a drawn edge, which is
+    // how a raised control was always made to look - highlight above, shadow
+    // below.
+    let raised = if dark {
         panel.gamma_multiply(1.9)
     } else {
-        panel.gamma_multiply(0.9)
+        colors.panel.mix(Rgb(255, 255, 255), 0.45).to_color()
     };
-    visuals.widgets.inactive.weak_bg_fill = visuals.widgets.inactive.bg_fill;
+    let edge = if dark {
+        stroke_colour
+    } else {
+        colors.panel.mix(Rgb(0, 0, 0), 0.35).to_color()
+    };
+    visuals.widgets.inactive.bg_fill = raised;
+    visuals.widgets.inactive.weak_bg_fill = raised;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, edge);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, edge);
     visuals.widgets.hovered.bg_fill = accent.gamma_multiply(0.28);
     visuals.widgets.hovered.weak_bg_fill = accent.gamma_multiply(0.22);
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent.gamma_multiply(0.8));
@@ -967,7 +1004,7 @@ mod tests {
         let text = scheme.to_json();
         // Readable by a person, because the point of the format is sharing it.
         assert!(text.contains("\"name\": \"Bench\""), "{text}");
-        assert!(text.contains("\"background\": \"#000000\""), "{text}");
+        assert!(text.contains("\"background\": \"#000040\""), "{text}");
         assert_eq!(Scheme::from_json(&text).expect("read back"), scheme);
     }
 
