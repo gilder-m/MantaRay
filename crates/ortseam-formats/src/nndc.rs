@@ -20,7 +20,7 @@
 //! | Column | Used for |
 //! |---|---|
 //! | `A`, `Element` | the nuclide's name |
-//! | `Metastable` | the `m` suffix |
+//! | `Parent E(level)` | which state decays, and its `m` suffix |
 //! | `T1/2 (sec)` | half life |
 //! | `Radiation` | `g` selects the photons; betas and electrons are dropped |
 //! | `Rad subtype` | gamma, X-ray or annihilation |
@@ -72,7 +72,7 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
     // Grouped by nuclide, and by energy within it, so the result is stable
     // whatever order the export happens to be in - two runs over the same file
     // must produce the same library, byte for byte.
-    let mut found: BTreeMap<String, Entry> = BTreeMap::new();
+    let mut found: BTreeMap<(String, Level), Entry> = BTreeMap::new();
     let mut rows_read = 0usize;
     let mut lines_kept = 0usize;
 
@@ -106,12 +106,22 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
             continue;
         }
 
-        let Some(name) = nuclide_name(get(columns.element), get(columns.mass), get(columns.meta))
-        else {
+        let Some(name) = nuclide_name(get(columns.element), get(columns.mass)) else {
             continue;
         };
-        let half_life = get(columns.half_life).parse::<f64>().unwrap_or(0.0);
-        let entry = found.entry(name).or_insert_with(|| Entry {
+        // Keyed by the state the radiation comes from, not only by the
+        // nuclide: two states of one nuclide have different half lives and
+        // different intensities for a line they both emit.
+        let level = Level::read(get(columns.level));
+        // The export writes -1 where the half life has not been determined,
+        // and a negative half life would give a decay correction that grows
+        // with time. Unknown is zero here, which the reader below treats as
+        // "not yet known" rather than as a measurement.
+        let half_life = match get(columns.half_life).parse::<f64>() {
+            Ok(seconds) if seconds > 0.0 => seconds,
+            _ => 0.0,
+        };
+        let entry = found.entry((name, level)).or_insert_with(|| Entry {
             half_life_seconds: half_life,
             peaks: BTreeMap::new(),
         });
@@ -143,7 +153,7 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
     }
 
     let mut library = NuclideLibrary::new("NNDC");
-    for (name, entry) in found {
+    for (name, entry) in name_states(found) {
         let mut peaks: Vec<LibraryPeak> = entry.peaks.into_values().collect();
         // Strongest first: the line a nuclide is recognised by should lead, and
         // the strongest gamma is the one to key the identification on.
@@ -206,6 +216,41 @@ fn split_row(row: &str, into: &mut Vec<String>) {
     into.push(field);
 }
 
+/// Gives every state its name: the ground one plain, the excited ones `m`.
+///
+/// Which state is `m` cannot be decided a row at a time - it depends on what
+/// else the nuclide has. Ordered by level, the ground state keeps the bare
+/// name and the excited ones take `m`, `m2`, `m3` in ascending energy, which
+/// is how the nomenclature reads: Tc-99 and Tc-99m, Ba-137 and Ba-137m. A
+/// nuclide the export knows only as an excited state - Ba-137m appears with no
+/// ground-state rows, because the ground state is stable and emits nothing -
+/// is still `m`, not the bare name.
+fn name_states(found: BTreeMap<(String, Level), Entry>) -> Vec<(String, Entry)> {
+    let mut named: Vec<(String, Entry)> = Vec::with_capacity(found.len());
+    let mut isomer = 0usize;
+    let mut current: Option<String> = None;
+    // The map is ordered by name and then by level, so the states of one
+    // nuclide arrive together, ground first.
+    for ((name, level), entry) in found {
+        if current.as_deref() != Some(name.as_str()) {
+            current = Some(name.clone());
+            isomer = 0;
+        }
+        let named_as = match level {
+            Level::Ground => name.clone(),
+            _ => {
+                isomer += 1;
+                match isomer {
+                    1 => format!("{name}m"),
+                    other => format!("{name}m{other}"),
+                }
+            }
+        };
+        named.push((named_as, entry));
+    }
+    named
+}
+
 /// One nuclide as it is being assembled.
 struct Entry {
     half_life_seconds: f64,
@@ -216,7 +261,7 @@ struct Entry {
 struct Columns {
     element: usize,
     mass: usize,
-    meta: usize,
+    level: usize,
     half_life: usize,
     radiation: usize,
     subtype: usize,
@@ -240,7 +285,7 @@ impl Columns {
         Ok(Self {
             element: at("element")?,
             mass: at("a")?,
-            meta: at("metastable")?,
+            level: at("parent e(level)")?,
             half_life: at("t1/2 (sec)")?,
             radiation: at("radiation")?,
             subtype: at("rad subtype")?,
@@ -250,8 +295,9 @@ impl Columns {
     }
 }
 
-/// `Cs`, `137`, `False` becomes `Cs-137`; a metastable one gains an `m`.
-fn nuclide_name(element: &str, mass: &str, metastable: &str) -> Option<String> {
+/// `Cs` and `137` become `Cs-137`. The isomer suffix is added later, by
+/// [`name_states`], because which state is `m` depends on the others.
+fn nuclide_name(element: &str, mass: &str) -> Option<String> {
     let element = element.trim();
     let mass: u32 = mass.trim().parse().ok()?;
     if element.is_empty() || !element.chars().all(|c| c.is_ascii_alphabetic()) {
@@ -265,10 +311,66 @@ fn nuclide_name(element: &str, mass: &str, metastable: &str) -> Option<String> {
     name.extend(letters.flat_map(|letter| letter.to_lowercase()));
     name.push('-');
     name.push_str(&mass.to_string());
-    if metastable.trim().eq_ignore_ascii_case("true") {
-        name.push('m');
-    }
     Some(name)
+}
+
+/// Which state of a nuclide a row belongs to.
+///
+/// The export gives one row per radiation per *parent state*, and two states of
+/// one nuclide have different half lives and different intensities for a line
+/// they both emit. Merging them takes whichever half life arrives first and,
+/// for the shared line, whichever intensity is larger: a 30% line from an
+/// isomer is not a 30% line from the ground state, and an understated yield
+/// overstates the activity computed from it.
+///
+/// The `Metastable` column cannot tell the states apart, and reading it as
+/// though it could is a quiet way to get that wrong. It is set on every row of
+/// a nuclide that *has* an isomer rather than on the isomer's own rows - Bi-190
+/// carries it on both its ground state and its 191 keV state - and it is false
+/// on states that plainly are not the ground one, such as Sc-56's `0+X`. The
+/// level a row decays from is what identifies its state, so that is the only
+/// thing read here.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Level {
+    /// The ground state: the level column places it at zero.
+    Ground,
+    /// An excited state, at this energy in thousandths of a keV, followed by
+    /// the letter of any offset the evaluation has not determined.
+    ///
+    /// Ordered by energy and then by that letter, which is what decides `m`
+    /// from `m2`. An undetermined offset sits on top of the energy that *is*
+    /// known - `169.56+X` is a state somewhere above 169.56 keV, not one near
+    /// the ground state - so the known part has to be read out and ordered on,
+    /// or Ho-160's two isomers come out the wrong way round.
+    Excited(i64, String),
+}
+
+impl Level {
+    /// Reads the level column.
+    ///
+    /// Four shapes appear in the export and all four are handled here: a plain
+    /// energy (`661.659`), an energy carrying an undetermined offset
+    /// (`169.56+X`), that offset alone (`X`, an unknown height above zero),
+    /// and the same thing written the other way round (`X+0.0`).
+    fn read(level: &str) -> Self {
+        let mut energy = 0.0f64;
+        let mut undetermined = String::new();
+        for part in level.split('+') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match part.parse::<f64>() {
+                Ok(value) => energy += value,
+                Err(_) => undetermined.push_str(part),
+            }
+        }
+        if energy <= 0.0 && undetermined.is_empty() {
+            Self::Ground
+        } else {
+            Self::Excited((energy * 1_000.0).round() as i64, undetermined)
+        }
+    }
 }
 
 /// The export names X-rays and the annihilation line in its subtype column;
@@ -293,15 +395,16 @@ mod tests {
     /// Rows in the shape the NNDC export has, with the real Cs-137 and Co-60
     /// values so a wrong column would show as wrong physics.
     const EXPORT: &str = "\
-Isotope,A,Element,Z,N,Metastable,T1/2 (sec),Daughter,Radiation,Rad subtype,Rad Energy,Rad Intensity
-Cs137,137,Cs,55,82,False,949252608.0,137Ba,g,,661.657,85.1
-Cs137,137,Cs,55,82,False,949252608.0,137Ba,g,XR ka1,32.194,3.64
-Cs137,137,Cs,55,82,False,949252608.0,137Ba,bm,,514.03,94.7
-Co60,60,Co,27,33,False,166344000.0,60Ni,g,,1173.228,99.85
-Co60,60,Co,27,33,False,166344000.0,60Ni,g,,1332.492,99.9826
-Co60,60,Co,27,33,False,166344000.0,60Ni,g,,347.14,0.0075
-Na22,22,Na,11,11,False,82053000.0,22Ne,g,Annihil.,511.0,180.7
-Al24,24,Al,13,11,True,131.3,24Mg,g,,1368.6,100.0
+Isotope,A,Element,Z,N,Parent E(level),Metastable,T1/2 (sec),Daughter,Radiation,Rad subtype,Rad Energy,Rad Intensity
+Cs137,137,Cs,55,82,0.0,False,949252608.0,137Ba,g,,661.657,85.1
+Cs137,137,Cs,55,82,0.0,False,949252608.0,137Ba,g,XR ka1,32.194,3.64
+Cs137,137,Cs,55,82,0.0,False,949252608.0,137Ba,bm,,514.03,94.7
+Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,1173.228,99.85
+Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,1332.492,99.9826
+Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,347.14,0.0075
+Na22,22,Na,11,11,0.0,False,82053000.0,22Ne,g,Annihil.,511.0,180.7
+Al24,24,Al,13,11,0.0,False,2.053,24Mg,g,,1368.6,100.0
+Al24,24,Al,13,11,425.81,True,0.1307,24Mg,g,,426.0,98.0
 ";
 
     fn built(min: f64) -> Built {
@@ -392,12 +495,157 @@ Al24,24,Al,13,11,True,131.3,24Mg,g,,1368.6,100.0
         assert!(built.rows_read > 0 && built.lines_kept > 0);
     }
 
+    /// Two states of one nuclide, as the real export has them.
+    ///
+    /// Sc-56 decays from the ground state and from `0+X` - an excited state the
+    /// evaluation cannot place - and Y-98 from `0.0` and from `465.7`. Neither
+    /// of the excited ones carries the `Metastable` flag, which is exactly why
+    /// keying on that flag was wrong: the two collapsed into one nuclide, which
+    /// then took whichever half life arrived first and, for the line both emit,
+    /// whichever intensity was larger.
+    const TWO_STATES: &str = "\
+Isotope,A,Element,Parent E(level),Metastable,T1/2 (sec),Radiation,Rad subtype,Rad Energy,Rad Intensity
+Sc56,56,Sc,0,False,0.026,g,,1128.7,18.0
+Sc56,56,Sc,0+X,False,0.075,g,,1128.7,30.0
+Sc56,56,Sc,775.1,True,0.00000029,g,,775.1,50.0
+Ba137,137,Ba,661.659,True,153.12,g,,661.657,89.9
+";
+
+    #[test]
+    fn two_states_of_one_nuclide_stay_apart() {
+        let library = build(TWO_STATES, 1.0).expect("the export reads").library;
+
+        // The ground state keeps its own half life and its own intensity for
+        // the line both states emit - 18%, not the isomer's 30%.
+        let ground = library.nuclide("Sc-56").expect("the ground state");
+        assert!((ground.half_life_seconds - 0.026).abs() < 1e-9);
+        let line = ground
+            .peaks
+            .iter()
+            .find(|peak| (peak.energy - 1128.7).abs() < 1e-6)
+            .expect("the 1128.7 keV line");
+        assert!(
+            (line.yield_percent - 18.0).abs() < 1e-9,
+            "the isomer's 30% must not be reported as the ground state's: {}",
+            line.yield_percent
+        );
+
+        // The unplaced state is an isomer in its own right, with its own half
+        // life, even though the export does not flag it as metastable.
+        let isomer = library
+            .nuclide("Sc-56m")
+            .expect("the 0+X state, which the Metastable flag calls False");
+        assert!((isomer.half_life_seconds - 0.075).abs() < 1e-9);
+        assert!(
+            (isomer.peaks[0].yield_percent - 30.0).abs() < 1e-9,
+            "{:?}",
+            isomer.peaks
+        );
+
+        // A second isomer is numbered rather than colliding with the first.
+        let second = library.nuclide("Sc-56m2").expect("the 775.1 keV state");
+        assert!((second.half_life_seconds - 2.9e-7).abs() < 1e-12);
+
+        // A nuclide the export knows only as an excited state is still `m`:
+        // Ba-137's ground state is stable and emits nothing, so only the
+        // isomer appears - and it is Ba-137m, not Ba-137.
+        assert!(
+            library.nuclide("Ba-137m").is_some(),
+            "names: {:?}",
+            library.names()
+        );
+        assert!(
+            library.nuclide("Ba-137").is_none(),
+            "the stable ground state emits nothing and must not be invented"
+        );
+    }
+
+    /// A half life the evaluation has not determined, written as -1.
+    #[test]
+    fn an_undetermined_half_life_is_not_a_negative_one() {
+        const NO_HALF_LIFE: &str = "\
+Isotope,A,Element,Parent E(level),T1/2 (sec),Radiation,Rad subtype,Rad Energy,Rad Intensity
+Ni58,58,Ni,16795,-1.0,g,,1454.0,20.0
+";
+        let library = build(NO_HALF_LIFE, 1.0).expect("the export reads").library;
+        let nuclide = library.nuclide("Ni-58m").expect("the 16795 keV state");
+        assert_eq!(
+            nuclide.half_life_seconds, 0.0,
+            "a negative half life would make a decay correction grow with time"
+        );
+    }
+
+    /// Levels the evaluation has not fully placed.
+    ///
+    /// Ho-160's two isomers are written `59.98` and `169.56+X`, and Os-183's
+    /// are `170.7` and `4180.2+X`. An undetermined offset does not mean "near
+    /// the ground state": it sits on top of the energy that is known, so the
+    /// known part decides the order. Reading `169.56+X` as though it were `0+X`
+    /// numbered Ho-160's isomers the wrong way round and gave `Ho-160m` a half
+    /// life of 3.2 s, which belongs to the other state.
+    const UNPLACED: &str = "\
+Isotope,A,Element,Parent E(level),T1/2 (sec),Radiation,Rad subtype,Rad Energy,Rad Intensity
+Ho160,160,Ho,59.98,18072.0,g,,879.0,30.0
+Ho160,160,Ho,169.56+X,3.2,g,,197.0,40.0
+Os183,183,Os,0.0,46800.0,g,,381.7,90.0
+Os183,183,Os,170.7,35640.0,g,,1101.9,50.0
+Os183,183,Os,4180.2+X,0.00000003,g,,102.0,20.0
+Ta178,178,Ta,X+0.0,8496.0,g,,213.4,80.0
+";
+
+    #[test]
+    fn an_undetermined_offset_is_ordered_by_the_energy_it_sits_on() {
+        let library = build(UNPLACED, 1.0).expect("the export reads").library;
+
+        // Ho-160 has no ground-state rows, so both states are isomers - and the
+        // 59.98 keV one is the first of them, not the one at 169.56+X.
+        let first = library.nuclide("Ho-160m").expect("the 59.98 keV state");
+        assert!(
+            (first.half_life_seconds - 18072.0).abs() < 1e-9,
+            "169.56+X sorted below 59.98 keV: {} s",
+            first.half_life_seconds
+        );
+        let second = library.nuclide("Ho-160m2").expect("the 169.56+X state");
+        assert!((second.half_life_seconds - 3.2).abs() < 1e-9);
+
+        // Os-183 does have a ground state, so the numbering starts after it.
+        assert!(library.nuclide("Os-183").is_some());
+        let isomer = library.nuclide("Os-183m").expect("the 170.7 keV state");
+        assert!(
+            (isomer.half_life_seconds - 35640.0).abs() < 1e-9,
+            "4180.2+X sorted below 170.7 keV: {} s",
+            isomer.half_life_seconds
+        );
+        assert!(library.nuclide("Os-183m2").is_some());
+
+        // The same notation written the other way round is the same level.
+        assert_eq!(Level::read("X+0.0"), Level::read("0.0+X"));
+        assert!(
+            library.nuclide("Ta-178m").is_some(),
+            "an offset alone is still an excited state: {:?}",
+            library.names()
+        );
+    }
+
+    /// Two unknown offsets are two different states, not one.
+    #[test]
+    fn different_offsets_are_different_states() {
+        assert_ne!(Level::read("0.0+X"), Level::read("0.0+Y"));
+        assert_eq!(Level::read("Y"), Level::read("0.0+Y"));
+        assert_eq!(Level::read("0"), Level::Ground);
+        assert_eq!(Level::read("0.0"), Level::Ground);
+        assert_eq!(Level::read(""), Level::Ground);
+        // A placed level sorts before the same energy carrying an offset.
+        assert!(Level::read("59.98") < Level::read("59.98+X"));
+        assert!(Level::read("0.0+X") < Level::read("59.98"));
+    }
+
     /// The shape the real export has: a quoted spin-parity holding a comma,
     /// with the columns that matter sitting after it.
     const QUOTED: &str = "\
-Isotope,A,Element,JPi,Metastable,T1/2 (sec),Radiation,Rad subtype,Rad Energy,Rad Intensity
-N22,22,N,\"(0-,1-)\",False,0.02,g,,1221.0,2.3
-Cs137,137,Cs,7/2+,False,949252608.0,g,,661.657,85.1
+Isotope,A,Element,JPi,Parent E(level),Metastable,T1/2 (sec),Radiation,Rad subtype,Rad Energy,Rad Intensity
+N22,22,N,\"(0-,1-)\",0.0,False,0.02,g,,1221.0,2.3
+Cs137,137,Cs,7/2+,0.0,False,949252608.0,g,,661.657,85.1
 ";
 
     #[test]

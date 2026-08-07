@@ -40,7 +40,7 @@ which prints what it did:
 ```
 National Nuclear Data Center (NuDat/ENSDF) radiation export, converted 2026-08-07;
 lines at or above 1% emission probability
-read 242295 rows, kept 27402 lines: 2043 nuclides, 27015 lines written to nuclides.json
+read 242295 rows, kept 27402 lines: 2163 nuclides, 27262 lines written to nuclides.json
 ```
 
 Then load `nuclides.json` like any other library.
@@ -54,13 +54,29 @@ nothing more.
 
 It selects photons — the `g` rows — and drops betas, conversion electrons and
 alphas, none of which make a peak in a gamma spectrum. It tells gammas, X-rays
-and the annihilation line apart from the export's own subtype column. It names
-nuclides `Cs-137`, with an `m` for a metastable state. Where the same line
-appears under more than one decay branch it keeps the strongest, and it marks
-each nuclide's strongest true gamma as the key line.
+and the annihilation line apart from the export's own subtype column. Where the
+same line appears under more than one decay branch it keeps the strongest, and
+it marks each nuclide's strongest true gamma as the key line.
+
+It keeps each **decaying state** separate, which matters more than it sounds.
+The export gives one row per emission per *parent state*, and a nuclide's
+isomer has its own half-life and its own emission probability for a line the
+two states share — Sc-56 emits 1128.7 keV at 18% from its ground state and at
+30% from the state above it. Merging them takes one half-life and the larger
+intensity, and an understated yield **overstates** the activity computed from
+it. States are told apart by the level they decay from, so the result is
+`Cs-137`, `Ba-137m`, `Ir-194m2`: the bare name for a state the export places at
+zero, then `m`, `m2`, `m3` upward in energy. The export's `Metastable` column is
+not read at all — it is set on every row of a nuclide that *has* an isomer,
+rather than on the isomer's own rows, so it cannot distinguish them.
+
+A nuclide the export never places at zero appears only as `m` — the evaluation
+has not determined which of its states is the ground one, and this will not
+guess.
 
 **It invents nothing.** Every energy, emission probability and half-life in the
-result is the evaluated value, unchanged.
+result is the evaluated value, unchanged. Where the export marks a half-life
+undetermined, the result says undetermined rather than substituting a number.
 
 ### Getting the export
 
