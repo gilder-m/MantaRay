@@ -150,6 +150,17 @@ impl RoiSet {
         }
     }
 
+    /// Removes every region sharing a channel with `span`, reporting how many.
+    ///
+    /// What a dragged-out selection clears. A region that straddles the edge of
+    /// the selection goes with the rest: it was pointed at, and leaving a
+    /// half-covered region behind would be a stranger result than removing it.
+    pub fn clear_within(&mut self, span: Roi) -> usize {
+        let before = self.rois.len();
+        self.rois.retain(|roi| !roi.overlaps(&span));
+        before - self.rois.len()
+    }
+
     /// Removes every region (ROI/Clear All).
     pub fn clear_all(&mut self) {
         self.rois.clear();

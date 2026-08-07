@@ -67,6 +67,10 @@ pub struct DisplayState {
     pub energy_axis: bool,
     /// Whether library lines are drawn (Display/Isotope Markers).
     pub isotope_markers: bool,
+    /// Whether a logarithmic axis tops out at the next power of ten rather
+    /// than the nearest 1-2-5 step. Set from the application's preference, so
+    /// every window follows the same rule.
+    pub log_decade_top: bool,
     /// Length of the spectrum this state belongs to.
     length: usize,
     /// Where the pointer went down, while a drag is in progress.
@@ -93,6 +97,7 @@ impl Default for DisplayState {
             fill: FillMode::default(),
             energy_axis: true,
             isotope_markers: false,
+            log_decade_top: false,
             length: 0,
             drag_origin: None,
             drag_in_inset: false,
@@ -271,6 +276,7 @@ impl DisplayState {
                     // top belongs on one of them rather than on whatever the
                     // tallest channel happens to be. Rounding up also stops the
                     // peak being clipped flat against the top of the plot.
+                    VerticalScale::Logarithmic if self.log_decade_top => decade_ceiling(peak),
                     VerticalScale::Logarithmic => logarithmic_ceiling(peak),
                     _ => peak,
                 }
@@ -413,6 +419,38 @@ impl DisplayState {
     }
 }
 
+/// One whole decade above `peak`, keeping the figure it leads with.
+///
+/// A peak of 300 tops the axis out at 3000, and one of 1000 at 10,000: the
+/// same leading digit, one decade up. That is a full decade of headroom, so
+/// the peak sits at a tenth of the height with the decade it belongs to drawn
+/// beneath it, and the eye reads the height against a labelled number instead
+/// of against the top of the plot.
+///
+/// Anything after the leading digit rounds it up - 347 tops out at 4000 -
+/// because a top of 3470 is a number nobody wants to read off an axis.
+///
+/// It spends vertical space freely compared with the 1-2-5 ceiling, which is
+/// why it is an option rather than the rule.
+fn decade_ceiling(peak: u64) -> u64 {
+    if peak == 0 {
+        return 10;
+    }
+    // The largest power of ten at or below the peak: the decade it lives in.
+    let mut decade = 1u64;
+    while decade <= peak / 10 {
+        decade *= 10;
+    }
+    // The digit it leads with, rounded up if anything follows it.
+    let leading = peak / decade;
+    let leading = if peak.is_multiple_of(decade) {
+        leading
+    } else {
+        leading + 1
+    };
+    leading.saturating_mul(decade).saturating_mul(10)
+}
+
 /// The next 1, 2 or 5 times a power of ten strictly above `peak`.
 ///
 /// This is the top of a logarithmic axis: a round number the eye can read off
@@ -441,6 +479,66 @@ fn logarithmic_ceiling(peak: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_decade_option_tops_out_one_decade_above_the_peak() {
+        // The rule, in the user's own words: a decade above the peak as it
+        // stands, so 300 counts tops out at 3000 rather than at 1000.
+        assert_eq!(decade_ceiling(300), 3_000);
+        assert_eq!(decade_ceiling(1_000), 10_000);
+        assert_eq!(decade_ceiling(10), 100);
+        assert_eq!(decade_ceiling(1), 10);
+        // Anything after the leading digit rounds it up: nobody wants to read
+        // 3470 off an axis.
+        assert_eq!(decade_ceiling(347), 4_000);
+        assert_eq!(decade_ceiling(999), 10_000);
+        assert_eq!(decade_ceiling(15_675), 200_000);
+        // Nothing counted yet still needs a scale to draw against.
+        assert_eq!(decade_ceiling(0), 10);
+        // A peak this big cannot be given a decade of headroom; it must still
+        // return, and the axis loop that walks decades must still terminate.
+        assert!(decade_ceiling(u64::MAX) >= u64::MAX / 10);
+    }
+
+    #[test]
+    fn the_peak_sits_a_tenth_of_the_way_up_its_own_decade() {
+        // What the extra headroom buys: the peak is read against a number
+        // below it rather than against the top of the plot.
+        let mut spectrum = Spectrum::new(16);
+        spectrum.channels[4] = 300;
+        let mut display = DisplayState::for_length(16);
+        display.vertical = VerticalScale::Logarithmic;
+        display.log_decade_top = true;
+
+        let full_scale = display.full_scale(&spectrum);
+        assert_eq!(full_scale, 3_000);
+        let fraction = display.height_fraction(300, full_scale);
+        assert!(
+            fraction > 0.5 && fraction < 0.95,
+            "the peak should sit clearly below the top, at {fraction}"
+        );
+    }
+
+    #[test]
+    fn the_decade_option_changes_the_axis_and_the_default_does_not() {
+        let mut spectrum = Spectrum::new(16);
+        spectrum.channels[4] = 1_000;
+        let mut display = DisplayState::for_length(16);
+        display.vertical = VerticalScale::Logarithmic;
+
+        // Left alone, the axis stops at the nearest step above the peak.
+        assert_eq!(display.full_scale(&spectrum), 2_000);
+
+        display.log_decade_top = true;
+        assert_eq!(
+            display.full_scale(&spectrum),
+            10_000,
+            "the decade above the peak is what MAESTRO draws to"
+        );
+        // And the peak is genuinely below the top rather than clipped to it.
+        let fraction = display.height_fraction(1_000, display.full_scale(&spectrum));
+        assert!(fraction > 0.0 && fraction < 1.0, "{fraction}");
+    }
 
     #[test]
     fn a_logarithmic_axis_tops_out_above_the_tallest_channel() {

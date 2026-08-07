@@ -565,3 +565,47 @@ fn an_uncertainty_preset_does_stop_a_remote_instrument() {
     );
     assert!(!remote.is_active(), "and the instrument should be stopped");
 }
+
+#[test]
+fn clearing_lets_the_next_start_through_a_preset_that_was_reached() {
+    // The regression this pins: CLEAR resets the instrument's clocks, but the
+    // mirror kept the old ones until the next poll - and the start guard reads
+    // them. With a live preset held, Clear then Start was refused as "already
+    // reached", which told the operator to clear the spectrum they had just
+    // cleared. A job's CLEAR / START did not start at all.
+    let mut remote = connect_exactly(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        // Counted out: the live preset below is already satisfied.
+        (
+            "SHOW_STATUS",
+            "RT=310.90 LT=300.00 DT=3.51% ICR=0 ACTIVE=0 TOTAL=0",
+        ),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        (
+            "SHOW_PRESETS",
+            "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0",
+        ),
+        // Exactly what the operator does next, and nothing in between.
+        ("CLEAR", "OK"),
+        ("START", "OK"),
+    ]);
+    assert_eq!(remote.presets().live_time, Some(300.0));
+    assert!(
+        remote.start().is_err(),
+        "before clearing, the reached preset is what refuses"
+    );
+
+    remote.clear().expect("clear");
+    assert_eq!(
+        remote.status().live_time,
+        0.0,
+        "the mirror's clocks go with the instrument's"
+    );
+    remote
+        .start()
+        .expect("after clearing, the preset is no longer reached");
+    assert!(remote.is_active());
+}

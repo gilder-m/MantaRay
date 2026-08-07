@@ -12,7 +12,7 @@ use ortseam_device::{
 
 use crate::app::{Action, App, Target};
 use crate::theme::{Rgb, Theme};
-use crate::view::{MarkMode, format_counts};
+use crate::view::{MarkMode, format_counts, format_rate};
 use crate::viewmodel::{FillMode, VerticalScale};
 
 /// Every dialog the application can show.
@@ -481,12 +481,30 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             });
             ui.label("or drag a spectrum onto the window");
             ui.separator();
-            if ui.button("Save\tCtrl+S").clicked() {
-                actions.push(Action::Save);
+            // Save As first, and on Ctrl+S: it is the safe one, and the one
+            // reached for by habit. Overwriting in place is a deliberate act
+            // and says which file it will replace.
+            if ui.button("Save As...\tCtrl+S").clicked() {
+                actions.push(Action::SaveAs);
                 ui.close();
             }
-            if ui.button("Save As...").clicked() {
-                actions.push(Action::SaveAs);
+            let overwrites = app
+                .active
+                .and_then(|index| app.windows.get(index))
+                .and_then(|window| window.path.as_ref())
+                .map(|path| {
+                    std::path::Path::new(path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                });
+            let save = ui.button("Save\tCtrl+Shift+S");
+            let save = match &overwrites {
+                Some(name) => save.on_hover_text(format!("replaces {name}")),
+                None => save.on_hover_text("asks where to put it - nothing has been saved yet"),
+            };
+            if save.clicked() {
+                actions.push(Action::Save);
                 ui.close();
             }
             if ui.button("Export...").clicked() {
@@ -800,6 +818,20 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             if ui.button("Logarithmic\tKeypad /").clicked() {
                 actions.push(Action::ToggleLog);
                 ui.close();
+            }
+            // How high a logarithmic axis goes. MAESTRO tops out on the decade
+            // above the tallest channel, so a thousand-count peak is read
+            // against a drawn 10,000 line rather than against the ceiling.
+            let mut decade_top = app.log_decade_top;
+            if ui
+                .checkbox(&mut decade_top, "Log to the next decade")
+                .on_hover_text(
+                    "top the logarithmic axis at the next power of ten, as MAESTRO does, \
+                     instead of the nearest step above the peak",
+                )
+                .changed()
+            {
+                app.log_decade_top = decade_top;
             }
             if ui.button("Automatic\tKeypad *").clicked() {
                 actions.push(Action::AutoScale);
@@ -1359,6 +1391,20 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 .map(|spectrum| format_counts(spectrum.total_counts()))
                 .unwrap_or_else(|| "-".into()),
         );
+        ui.end_row();
+        // Under the total, the rate that produced it. Over live time rather
+        // than real, because live time is what the system was able to accept
+        // events during - the same convention the counting-activity equation
+        // uses - so the figure does not sag as dead time rises.
+        ui.label("Rate");
+        let rate = spectrum.and_then(|spectrum| {
+            (spectrum.live_time > 0.0).then(|| spectrum.total_counts() as f64 / spectrum.live_time)
+        });
+        ui.label(match rate {
+            Some(rate) => format_rate(rate),
+            None => "-".into(),
+        })
+        .on_hover_text("gross counts per second of live time");
         ui.end_row();
     });
 
@@ -2001,7 +2047,7 @@ fn shortcuts_dialog(app: &mut App, ctx: &egui::Context) {
                 &[
                     ("Ctrl+O", "Recall a spectrum"),
                     ("Ctrl+P", "Print via the browser"),
-                    ("Ctrl+S", "Save (Shift: Save As)"),
+                    ("Ctrl+S", "Save As (Shift: overwrite in place)"),
                     ("Ctrl+Z", "Undo (Shift or Ctrl+Y: Redo)"),
                     ("F1", "This list"),
                 ],

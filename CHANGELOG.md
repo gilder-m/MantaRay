@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+**Clearing lets the next count start again (2026-08-06).** Found by running
+the bench check against the 926: `CLEAR` resets the instrument's clocks, but
+the mirror kept the old ones until the next poll - and the start guard added
+with the preset work reads them. With a live preset held, Clear and then Start
+was refused as "the Live time preset is already reached - clear the spectrum,
+or change the preset", which told the operator to do the very thing they had
+just done; a job's `CLEAR` / `START` did not start at all. The mirror's clocks
+now go with the instrument's, as the simulator's always have. The whole
+sequence is pinned on the hardware now: count out a one-second preset, watch
+the instrument stop itself at LT=1.00, and see the next `START` refused by
+name - the first end-to-end proof of that guard on the instrument it was
+written for.
+
+Also here: a doc comment had been separated from what it documents by a
+function inserted between them, leaving `logarithmic_ceiling` undocumented and
+its text attached to `decade_ceiling`.
+
+**Five things found by daily-driving it (2026-08-06).** All raised by the
+person using the program against a real detector, and all small enough to be
+felt every session.
+
+- *Ctrl+S asks where to save, every time.* It used to overwrite whatever the
+  spectrum was last saved to, with no prompt - a reflex keystroke away from
+  replacing a measurement that cannot be taken again. Ctrl+S is now Save As,
+  the File menu leads with it, and overwriting in place has moved to
+  Ctrl+Shift+S, where the menu entry says which file it will replace.
+- *The count rate is shown under the total counts*, over live time rather
+  than real, with the precision the size of the number deserves: a background
+  at a fraction of a count per second and a check source at thousands both
+  have to read sensibly from the same field.
+- *A logarithmic axis can top out a whole decade above the peak*, keeping the
+  figure it leads with: 300 counts tops out at 3000, 1000 at 10,000. The peak
+  is then read against a number drawn below it rather than against the
+  ceiling. Display / "Log to the next decade", off by default so the existing
+  tighter scaling stays. Anything after the leading digit rounds it up - 347
+  tops out at 4000 - and because the axis can now stop between decades, the
+  number it stops at is labelled in its own right.
+- *Peak Info fits a dragged selection.* Drag a span, right-click, Peak Info,
+  and the fit is over exactly what was dragged - with no region marked.
+  Measuring a peak no longer edits the spectrum's regions as a side effect
+  and leaves them to be tidied up afterwards.
+- *Clear ROI over a selection clears every region in it*, in one undo step,
+  rather than only the one under the marker. A region straddling the edge of
+  the selection goes with the rest: it was pointed at, and half a region left
+  behind is a stranger result than none.
+
 **The bench check, run (2026-08-06).** The preset work below was written
 against doubles and marked as not yet run on the 926; it has been now, and it
 holds: `probe` finds the adapter, `SHOW_PRESETS` read back the very 300-second
