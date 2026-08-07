@@ -727,18 +727,27 @@ fn tab_strip(
                     // until one is pulled out, and after that both deserve to
                     // be findable in the strip.
                     let selected = shown == Some(*index) || active == Some(*index);
+                    // The arrow marks a spectrum that has been pulled out. It is
+                    // a character rather than one of the drawn icons, which is
+                    // the thing that has bitten this program twice - so it was
+                    // checked on screen rather than assumed: U+2197 is in the
+                    // font egui bundles, where the cross that failed was not.
                     let label = format!(
                         "{}{}{}",
                         window.title,
                         if window.modified { " *" } else { "" },
                         if window.floating { "  \u{2197}" } else { "" }
                     );
-                    let tab = ui.selectable_label(selected, label);
+                    // Every tab says what it is, because a strip of them will
+                    // truncate the names long before it runs out of tabs.
+                    let hint = if window.floating {
+                        format!("{} - in a window of its own", window.title)
+                    } else {
+                        format!("{} - right-click to open it in a window", window.title)
+                    };
+                    let tab = ui.selectable_label(selected, label).on_hover_text(hint);
                     if tab.clicked() {
                         actions.push(Action::Activate(window.id));
-                    }
-                    if window.floating {
-                        tab.clone().on_hover_text("open in a window of its own");
                     }
                     tab.context_menu(|ui| {
                         let (label, hint) = if window.floating {

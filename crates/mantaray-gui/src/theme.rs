@@ -782,9 +782,16 @@ impl SchemeStyle {
 /// ```json
 /// {
 ///   "name": "Bench",
-///   "colors": { "background": "#0b1020", "foreground": "#40e0d0", ... }
+///   "colors": { "background": "#0b1020", "foreground": "#40e0d0", "...": "..." },
+///   "style": { "layout": "Tabs", "icons": "Text", "fill": "Gradient",
+///              "grid": true, "wash": true, "glow": true,
+///              "corners": 7, "shadows": true }
 /// }
 /// ```
+///
+/// Every field of `style` has a default, and so does the whole of it, so a
+/// file written by hand can carry only the colours and only the parts of the
+/// style it means to change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scheme {
     /// What to call it in the picker.
@@ -1262,6 +1269,35 @@ mod tests {
         assert!(text.contains("\"name\": \"Bench\""), "{text}");
         assert!(text.contains("\"background\": \"#000040\""), "{text}");
         assert_eq!(Scheme::from_json(&text).expect("read back"), scheme);
+    }
+
+    /// A scheme written by hand can say only what it means to change.
+    ///
+    /// This is a format people are meant to edit and send each other, so
+    /// leaving a field out has to mean "the usual" rather than "refuse the
+    /// file" or, worse, "black".
+    #[test]
+    fn a_scheme_may_leave_out_anything_that_has_a_default() {
+        let colours = serde_json::to_string(&SpectrumColors::deep_space()).expect("a palette");
+
+        // No style at all.
+        let text = format!(r#"{{"name": "Bare", "colors": {colours}}}"#);
+        let scheme = Scheme::from_json(&text).expect("a scheme with no style");
+        assert_eq!(scheme.style, SchemeStyle::default());
+
+        // A style saying one thing, everything else left alone.
+        let text =
+            format!(r#"{{"name": "Flat", "colors": {colours}, "style": {{"grid": false}}}}"#);
+        let scheme = Scheme::from_json(&text).expect("a scheme changing one setting");
+        assert!(!scheme.style.grid, "the one thing it said");
+        assert_eq!(
+            SchemeStyle {
+                grid: true,
+                ..scheme.style
+            },
+            SchemeStyle::default(),
+            "and nothing else moved"
+        );
     }
 
     #[test]
