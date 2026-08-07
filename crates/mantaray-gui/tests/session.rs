@@ -2012,14 +2012,16 @@ fn escape_still_closes_the_dialogs_that_are_only_panels() {
 
 /// Settings written under the former name are still found after the rename.
 ///
-/// Moving the file across is only half of it: the key inside the file carries
-/// the old name too, and reading only the new key finds nothing and starts
-/// with the defaults - the same loss the move exists to prevent, one step
-/// further in. This is the shape the real file has, taken from one.
+/// Moving the file across is only half of it. What eframe stores is a map, and
+/// the key inside that map carries the old name too: reading only the new key
+/// finds nothing and starts with the defaults - the same loss the move exists
+/// to prevent, one step further in. On the machine this was written on the
+/// stranded entry held a tuned Midnight palette and four recent files.
+///
+/// This is the payload shape as it was actually written, colours as arrays and
+/// all, because that is what a file from before the rename contains.
 #[test]
 fn settings_saved_under_the_former_name_are_restored() {
-    // A real payload, abbreviated: JSON inside the storage entry, with the
-    // colours as arrays, which is how every version until now wrote them.
     const SAVED: &str = r#"{"theme":"Midnight","colors":{"background":[9,10,13],
         "foreground":[96,205,255],"roi":[255,158,60],"compare":[87,201,138],
         "composite":[244,164,96],"axes":[130,136,148],"marker":[255,245,200],

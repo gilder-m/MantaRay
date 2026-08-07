@@ -930,9 +930,9 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::headless();
         // The key inside the file matters as much as the file's name. Moving
-        // the file across without also looking under the former key would read
-        // an entry that is not there and start with the defaults - which is
-        // the same loss the move was meant to prevent, one step further in.
+        // the file across without also looking under the former key reads an
+        // entry that is not there and starts with the defaults - which is the
+        // same loss the move exists to prevent, one step further in.
         if let Some(text) = cc.storage.and_then(|storage| {
             storage
                 .get_string(crate::APPLICATION_ID)
