@@ -99,6 +99,9 @@ fn main() -> eframe::Result {
             let had_arguments = !files.is_empty();
             app.open_arguments(&files);
             app.maybe_reopen_last(had_arguments);
+            // Anything a previous run left behind, offered before the first
+            // frame so the question is the first thing seen.
+            app.look_for_unfinished_work();
             app.settle_layout();
             Ok(Box::new(app))
         }),

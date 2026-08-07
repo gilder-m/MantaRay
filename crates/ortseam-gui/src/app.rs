@@ -695,6 +695,12 @@ pub struct App {
     /// Whether a logarithmic axis tops out at the next power of ten, the way
     /// MAESTRO's does, rather than at the nearest 1-2-5 step above the peak.
     pub log_decade_top: bool,
+    /// When the working session was last written to disk.
+    last_autosave: Instant,
+    /// A snapshot found at start-up, waiting to be offered back.
+    pub recovered: Option<crate::session::Session>,
+    /// How each detector's count has behaved while it ran, by detector number.
+    pub stability: std::collections::HashMap<u16, crate::stability::StabilityLog>,
     /// Font size of the in-plot peak-information card.
     pub peak_font: f32,
     /// Extension offered first when saving a spectrum without a path.
@@ -778,6 +784,23 @@ impl App {
         }
     }
 
+    /// Looks for work left behind by a run that did not finish.
+    ///
+    /// A snapshot on disk means the last exit was not a clean one - the clean
+    /// path deletes it - so whatever it holds was never saved and is offered
+    /// back rather than restored silently. Silently would be worse: windows
+    /// appearing unbidden is how somebody ends up working on the wrong data.
+    pub fn look_for_unfinished_work(&mut self) {
+        self.recovered = crate::session::read().filter(|session| !session.is_empty());
+        if let Some(session) = &self.recovered {
+            let count = session.windows.len();
+            self.status = format!(
+                "ortseam did not exit cleanly last time; {count} window(s) can be reopened"
+            );
+            self.dialogs.open(crate::dialogs::Dialog::Recover);
+        }
+    }
+
     /// Builds the application without touching egui.
     ///
     /// Everything except drawing goes through this, so the tests drive exactly
@@ -854,6 +877,9 @@ impl App {
             applied_theme: None,
             auto_clear_roi: false,
             log_decade_top: false,
+            last_autosave: Instant::now(),
+            recovered: None,
+            stability: std::collections::HashMap::new(),
             peak_font: 11.0,
             default_format: "chn".into(),
             reopen_last: false,
@@ -972,6 +998,84 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    /// Writes the snapshot when enough time has passed since the last one.
+    ///
+    /// Called from the real event loop only, not from [`Self::draw`], so the
+    /// headless tests never touch the file. Twenty seconds is often enough
+    /// that little is lost and rare enough that a large buffer being
+    /// serialised is not felt.
+    fn autosave(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+        if self.last_autosave.elapsed() < EVERY {
+            return;
+        }
+        self.last_autosave = Instant::now();
+        let session = self.snapshot_session();
+        // Nothing open is worth recording too: it clears a snapshot from
+        // earlier in the run that no longer describes anything.
+        if session.is_empty() {
+            crate::session::clear();
+        } else {
+            let _ = crate::session::write(&session);
+        }
+    }
+
+    /// The work in progress, as it would come back after a crash.
+    ///
+    /// Buffer windows only. A detector window is a view onto instrument memory,
+    /// which survives this process dying and would be wrong to restore from a
+    /// stale copy; a buffer exists nowhere but here.
+    pub fn snapshot_session(&self) -> crate::session::Session {
+        let windows = self
+            .windows
+            .iter()
+            .filter(|window| window.target == Target::Buffer)
+            .filter_map(|window| {
+                window
+                    .buffer
+                    .as_ref()
+                    .map(|spectrum| crate::session::SavedWindow {
+                        title: window.title.clone(),
+                        path: window.path.clone(),
+                        spectrum: spectrum.clone(),
+                        display: window.display,
+                        calibration: window.calibration.clone(),
+                        modified: window.modified,
+                    })
+            })
+            .collect();
+        crate::session::Session {
+            saved_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            windows,
+        }
+    }
+
+    /// Reopens the windows a snapshot held, as buffers.
+    ///
+    /// They come back modified, whatever they were: the file on disk, if there
+    /// is one, is not what is in front of you, and the difference is exactly
+    /// what was nearly lost.
+    pub fn restore_session(&mut self, session: crate::session::Session) {
+        let count = session.windows.len();
+        for saved in session.windows {
+            let length = saved.spectrum.len();
+            self.open_buffer(saved.title, saved.spectrum, saved.path.clone());
+            if let Some(index) = self.active {
+                let window = &mut self.windows[index];
+                window.display = saved.display;
+                window.display.set_length(length);
+                window.calibration = saved.calibration;
+                window.modified = saved.modified;
+                window.path = saved.path;
+            }
+        }
+        self.status = match count {
+            0 => "nothing to reopen".into(),
+            1 => "reopened 1 window from the last session".into(),
+            many => format!("reopened {many} windows from the last session"),
+        };
     }
 
     /// Records what an instrument called itself, so the next open can check.
@@ -1344,6 +1448,18 @@ impl App {
                 // not silently frozen on screen.
                 Err(error) => troubled.push((detector.identity().number, error.to_string())),
             }
+        }
+        // What the count has been doing, sampled as it goes. Recorded for
+        // every detector, counting or not: a log that stopped when a preset
+        // stopped the run is still the record of that run.
+        for detector in &self.detectors {
+            let status = detector.status();
+            let number = detector.identity().number;
+            self.stability.entry(number).or_default().record(
+                status.live_time,
+                status.total_counts,
+                status.dead_time_percent,
+            );
         }
         for (number, error) in troubled {
             self.status = format!("Detector {number}: {error}");
@@ -3391,6 +3507,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.tick();
         self.draw(ui);
+        self.autosave();
         // The window is created hidden so that start-up does not flash an empty
         // frame; now that one has been drawn, there is something worth showing.
         if !self.shown {
@@ -3404,6 +3521,14 @@ impl eframe::App for App {
         if let Ok(text) = serde_json::to_string(&self.persisted()) {
             storage.set_string("ortseam", text);
         }
+    }
+
+    /// A clean exit takes the snapshot with it.
+    ///
+    /// This is the whole crash detection: a snapshot still on disk at start-up
+    /// means the last run did not reach here.
+    fn on_exit(&mut self) {
+        crate::session::clear();
     }
 }
 

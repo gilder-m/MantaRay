@@ -66,6 +66,8 @@ pub enum Dialog {
     Exit,
     /// Save, discard or keep a modified buffer whose window is being closed.
     ConfirmClose,
+    /// Offer back the work a run that did not finish left behind.
+    Recover,
     /// Type a path, when native file dialogs are not available.
     OpenPath,
 }
@@ -1408,6 +1410,8 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.end_row();
     });
 
+    stability_trace(app, ui);
+
     ui.separator();
     ui.heading("Preset Limits");
     match presets {
@@ -1807,6 +1811,7 @@ pub fn windows(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
     shortcuts_dialog(app, ctx);
     about_dialog(app, ctx);
     confirm_close_dialog(app, ctx, &mut actions);
+    recover_dialog(app, ctx);
     exit_dialog(app, ctx);
     open_path_dialog(app, ctx, &mut actions);
     actions
@@ -4512,6 +4517,172 @@ fn exit_dialog(app: &mut App, ctx: &egui::Context) {
         app.quit_confirmed = true;
     }
     app.dialogs.set(Dialog::Exit, open && !cancel);
+}
+
+/// How the count has behaved while it ran: rate, and dead time under it.
+///
+/// The readout above says what the rate is now; this says whether it has been
+/// that all along. A source that shifted, a detector warming up, a shield left
+/// open - all of them are changes over time, invisible in an instantaneous
+/// number and obvious in forty pixels of trace.
+fn stability_trace(app: &mut App, ui: &mut egui::Ui) {
+    let Some(number) = app
+        .active_detector_index()
+        .and_then(|index| app.detectors.get(index))
+        .map(|mcb| ortseam_device::Mcb::identity(mcb).number)
+    else {
+        return;
+    };
+    let Some(log) = app.stability.get(&number) else {
+        return;
+    };
+    // Two readings cannot show a trend, and a flat line from nothing invites
+    // being read as one.
+    if log.len() < 3 {
+        return;
+    }
+    let peak = log.peak_rate();
+    if peak <= 0.0 {
+        return;
+    }
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Stability");
+        if let Some(drift) = log.drift() {
+            let percent = drift * 100.0;
+            // Counting statistics move any reading around; a few percent
+            // across a run is not a finding, and colouring it as one would
+            // train the operator to ignore the colour.
+            let colour = if percent.abs() >= 20.0 {
+                app.colors.alarm.to_color()
+            } else if percent.abs() >= 8.0 {
+                app.colors.roi.to_color()
+            } else {
+                app.colors.healthy.to_color()
+            };
+            ui.label(egui::RichText::new(format!("{percent:+.0}%")).color(colour))
+                .on_hover_text(
+                    "how the count rate over the last fifth of the run compares with the \
+                     first fifth - drift, not a single reading",
+                );
+        }
+    });
+
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(180.0), 34.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(2),
+        ui.visuals().extreme_bg_color,
+    );
+    let samples: Vec<_> = log.samples().collect();
+    let last = samples.len().saturating_sub(1).max(1) as f32;
+    let point = |index: usize, value: f64, top: f64| -> egui::Pos2 {
+        let x = rect.left() + rect.width() * (index as f32 / last);
+        let fraction = (value / top).clamp(0.0, 1.0) as f32;
+        egui::Pos2::new(x, rect.bottom() - rect.height() * fraction)
+    };
+    // Dead time first and faint, so the rate reads over the top of it.
+    let dead: Vec<egui::Pos2> = samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| point(index, sample.dead_time, 100.0))
+        .collect();
+    painter.add(egui::Shape::line(
+        dead,
+        egui::Stroke::new(1.0, app.colors.roi.to_color().gamma_multiply(0.5)),
+    ));
+    let rate: Vec<egui::Pos2> = samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| point(index, sample.rate, peak))
+        .collect();
+    painter.add(egui::Shape::line(
+        rate,
+        egui::Stroke::new(1.2, app.colors.foreground.to_color()),
+    ));
+    response.on_hover_text(format!(
+        "count rate across the acquisition, peak {}; dead time faint underneath, \
+         full height is 100%",
+        crate::view::format_rate(peak)
+    ));
+}
+
+/// What a run that did not finish left behind, offered back.
+///
+/// Not restored silently: windows appearing unbidden is how somebody ends up
+/// working on the wrong data without noticing. The question says what there is
+/// and when it was taken, and discarding is a deliberate answer rather than
+/// the default.
+fn recover_dialog(app: &mut App, ctx: &egui::Context) {
+    if !app.dialogs.is_open(Dialog::Recover) {
+        return;
+    }
+    let Some(session) = app.recovered.clone() else {
+        app.dialogs.set(Dialog::Recover, false);
+        return;
+    };
+    egui::Window::new("Unfinished work")
+        .order(egui::Order::Foreground)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("ortseam did not exit cleanly last time.");
+            ui.add_space(4.0);
+            if session.saved_at.is_empty() {
+                ui.label(format!("{} window(s) were open:", session.windows.len()));
+            } else {
+                ui.label(format!(
+                    "{} window(s) were open, last recorded {}:",
+                    session.windows.len(),
+                    session.saved_at
+                ));
+            }
+            ui.add_space(2.0);
+            for window in session.windows.iter().take(8) {
+                let counts = window.spectrum.total_counts();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "   {}  -  {} counts{}",
+                        window.title,
+                        format_counts(counts),
+                        if window.modified { ", unsaved" } else { "" }
+                    ))
+                    .monospace()
+                    .small(),
+                );
+            }
+            if session.windows.len() > 8 {
+                ui.label(
+                    egui::RichText::new(format!("   and {} more", session.windows.len() - 8))
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Reopen them").clicked() {
+                    let session = app.recovered.take().unwrap_or_default();
+                    app.restore_session(session);
+                    app.dialogs.set(Dialog::Recover, false);
+                }
+                if ui
+                    .button("Discard")
+                    .on_hover_text("throw the unfinished work away; this cannot be undone")
+                    .clicked()
+                {
+                    app.recovered = None;
+                    crate::session::clear();
+                    app.status = "the unfinished work was discarded".into();
+                    app.dialogs.set(Dialog::Recover, false);
+                }
+            });
+        });
 }
 
 /// The unsaved-changes question a modified buffer asks before its window goes.
