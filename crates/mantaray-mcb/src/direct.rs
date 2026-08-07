@@ -95,11 +95,30 @@ impl Device {
             .wait()
             .map_err(|error| format!("opening adapter {serial}: {error}"))?;
         let interface = device.claim_interface(INTERFACE).wait().map_err(|error| {
-            format!(
-                "claiming interface {INTERFACE} of adapter {serial}: {error}. On Linux \
-                 this is usually permission rather than anything missing - a udev rule \
-                 giving {VENDOR:04x}:{PRODUCT:04x} to your user is what is wanted."
-            )
+            // Two different faults arrive here and they need opposite advice.
+            // Busy means something already holds the interface - another
+            // window of this program, or a kernel driver that bound it - and
+            // no udev rule will help. Denied is the permission case. Sending
+            // somebody to write a udev rule when the real answer is "you have
+            // it open over there" is the more likely of the two now that a
+            // bench can carry more than one adapter.
+            let advice = match error.kind() {
+                nusb::ErrorKind::Busy => {
+                    "Something else already has this adapter - another window of this \
+                     program, or a driver that has bound it. Close the other one, or \
+                     pick a different adapter."
+                        .to_string()
+                }
+                nusb::ErrorKind::PermissionDenied => format!(
+                    "This is permission: a udev rule giving {VENDOR:04x}:{PRODUCT:04x} \
+                     to your user is what is wanted."
+                ),
+                nusb::ErrorKind::Disconnected => {
+                    "The adapter went away between being listed and being opened.".to_string()
+                }
+                _ => "The adapter answered, but the interface could not be claimed.".to_string(),
+            };
+            format!("claiming interface {INTERFACE} of adapter {serial}: {error}. {advice}")
         })?;
         let out = interface
             .endpoint::<Bulk, Out>(OUT)
