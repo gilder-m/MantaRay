@@ -1,0 +1,16 @@
+[package]
+name = "mantaray-core"
+description = "Core spectrum model, calibration and gamma-spectroscopy analysis math for mantaray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.19"

@@ -7,7 +7,7 @@
 /scratch
 
 # User-supplied spectrum fixtures are opt-in; keep real data out of git by
-# default (see crates/ortseam-formats/tests/fixtures/README.md).
-crates/ortseam-formats/tests/fixtures/*
-!crates/ortseam-formats/tests/fixtures/README.md
-!crates/ortseam-formats/tests/fixtures/.gitkeep
+# default (see crates/mantaray-formats/tests/fixtures/README.md).
+crates/mantaray-formats/tests/fixtures/*
+!crates/mantaray-formats/tests/fixtures/README.md
+!crates/mantaray-formats/tests/fixtures/.gitkeep

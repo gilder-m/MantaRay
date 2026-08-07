@@ -1,5 +1,5 @@
 REM Overnight background: ten one-hour counts, each saved and reported.
-REM Run with: ortseam job examples/nightly-background.job --trace
+REM Run with: mantaray job examples/nightly-background.job --trace
 SET_DETECTOR 1
 SET_PRESET_CLEAR
 SET_PRESET_LIVE 3600

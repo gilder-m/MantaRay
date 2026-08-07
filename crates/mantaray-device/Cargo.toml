@@ -1,0 +1,18 @@
+[package]
+name = "mantaray-device"
+description = "Multichannel-buffer (MCB) hardware abstraction, presets and a physics-based detector simulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+chrono = "0.4.45"
+mantaray-core.workspace = true
+mantaray-formats = { version = "0.1.0", path = "../mantaray-formats" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+thiserror = "2.0.19"

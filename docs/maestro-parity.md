@@ -1,7 +1,7 @@
 # MAESTRO parity
 
-Every feature in the MAESTRO v7 user manual (A65-B32), where it lives in ORTSEAM,
-and where ORTSEAM deliberately differs. Section numbers refer to the manual.
+Every feature in the MAESTRO v7 user manual (A65-B32), where it lives in MantaRay,
+and where MantaRay deliberately differs. Section numbers refer to the manual.
 
 Legend: **yes** implemented · **different** implemented another way · **no** not
 implemented, with the reason.
@@ -159,15 +159,15 @@ The whole §6.5 command set now runs.
 |---|---|---|
 | WinPlots | different | the display itself, plus Export and the report viewer |
 | Nuclide Library Editor | yes | built into Services/Library file |
-| TRANSLT | yes | `ortseam convert`, with `--columns`, `--no-channels`, `--no-header` |
+| TRANSLT | yes | `mantaray convert`, with `--columns`, `--no-channels`, `--no-header` |
 
 ## Real instruments
 
 The pick list holds two kinds of detector side by side: the built-in simulator,
 and a **network instrument** - an MCB at the far end of a TCP connection,
 speaking the ASCII `SET_`/`SHOW_` dotted-command dialect that MAESTRO documents
-for `SEND_MESSAGE` and the simulator answers. `ortseam serve` exposes a
-simulator that way, so one ORTSEAM can drive another's instrument across the
+for `SEND_MESSAGE` and the simulator answers. `mantaray serve` exposes a
+simulator that way, so one MantaRay can drive another's instrument across the
 room; the Detector List's "Add a network instrument" connects to it, or to
 anything else speaking the dialect. The protocol layer is exercised against a
 scripted transport (every byte checked) and over real TCP against a served
@@ -182,7 +182,7 @@ that day is configuration, not surgery.
 `h - l - (n - 1)` channels, which disagrees with equation 19 - it sums
 `h - l + 1 - 2n` channels - and over-subtracts. On a test peak holding exactly 370
 counts above a flat background the printed form gives 340, and a flat region gives
-a net area of -30 instead of 0. ORTSEAM uses the number of channels equation 19
+a net area of -30 instead of 0. MantaRay uses the number of channels equation 19
 actually covers, which reproduces both known answers, and the same width goes into
 the uncertainty. See `core/src/analysis.rs`.
 
@@ -279,7 +279,7 @@ region is never narrower than `2n + 1` channels.
   shell loop.
 - **Explorer integration on Windows** (Services menu): per-user file-type
   registration so double-clicking a `.Spe`, `.Chn` or `.Spc` opens it here,
-  with an unregister that removes only ORTSEAM's claim.
+  with an unregister that removes only MantaRay's claim.
 - **A crash report** written to the temporary directory if the application
   ever panics - the message, location, platform and backtrace in one file
   worth attaching to a bug report.

@@ -1,0 +1,45 @@
+[package]
+name = "mantaray-gui"
+description = "Cross-platform desktop MCA emulator and spectrum workbench (egui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+eframe = { version = "0.35.0", features = ["persistence"] }
+egui = "0.35.0"
+mantaray-core.workspace = true
+mantaray-device.workspace = true
+mantaray-formats.workspace = true
+mantaray-jobs.workspace = true
+mantaray-report.workspace = true
+rfd = { version = "0.17.2", optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+
+[features]
+default = ["native-dialogs"]
+# Native file dialogs. Off builds have an in-app path entry instead, which
+# avoids GTK on Linux and works in containers.
+native-dialogs = ["dep:rfd"]
+# The built-in detector simulator. Deliberately NOT default: a spectroscopy
+# program must never put invented counts on screen where they could be taken
+# for measurements. The test suites need an instrument to drive, so the
+# dev-dependency below turns it on for test targets only.
+simulator = []
+
+[dev-dependencies]
+# Depending on ourselves with `simulator` on enables it when building tests
+# and never when building the shipped binary.
+mantaray-gui = { path = ".", features = ["simulator"] }
+
+[build-dependencies]
+# Embeds the icon into the Windows executable; a no-op elsewhere.
+winresource = "0.1.23"
+

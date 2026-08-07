@@ -23,13 +23,13 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: ORTSEAM-windows-x86_64.zip
+            archive: MantaRay-windows-x86_64.zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: ORTSEAM-linux-x86_64.tar.gz
+            archive: MantaRay-linux-x86_64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: ORTSEAM-macos-aarch64.tar.gz
+            archive: MantaRay-macos-aarch64.tar.gz
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p ortseam-gui -p ortseam-cli
+        run: cargo build --release --target ${{ matrix.target }} -p mantaray-gui -p mantaray-cli
 
       # The bridge to ORTEC hardware is 32-bit because ORTEC's libraries are,
       # and a 64-bit process cannot load them. Windows is the only platform
@@ -56,16 +56,16 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           rustup target add i686-pc-windows-msvc
-          cargo build --release --target i686-pc-windows-msvc -p ortseam-mcb
+          cargo build --release --target i686-pc-windows-msvc -p mantaray-mcb
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/ortseam-gui.exe" dist/
-          Copy-Item "target/${{ matrix.target }}/release/ortseam.exe" dist/
-          Copy-Item "target/i686-pc-windows-msvc/release/ortseam-mcb.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/mantaray-gui.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/mantaray.exe" dist/
+          Copy-Item "target/i686-pc-windows-msvc/release/mantaray-mcb.exe" dist/
           Copy-Item README.md, CHANGELOG.md, LICENSE.md dist/
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.archive }}
 
@@ -73,8 +73,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir dist
-          cp target/${{ matrix.target }}/release/ortseam-gui dist/
-          cp target/${{ matrix.target }}/release/ortseam dist/
+          cp target/${{ matrix.target }}/release/mantaray-gui dist/
+          cp target/${{ matrix.target }}/release/mantaray dist/
           cp README.md CHANGELOG.md LICENSE.md dist/
           tar -czf ${{ matrix.archive }} -C dist .
 
@@ -95,6 +95,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            ORTSEAM-windows-x86_64.zip
-            ORTSEAM-linux-x86_64.tar.gz
-            ORTSEAM-macos-aarch64.tar.gz
+            MantaRay-windows-x86_64.zip
+            MantaRay-linux-x86_64.tar.gz
+            MantaRay-macos-aarch64.tar.gz

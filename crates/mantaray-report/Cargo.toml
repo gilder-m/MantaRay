@@ -1,0 +1,14 @@
+[package]
+name = "mantaray-report"
+description = "ROI reports, nuclide reports and spectrum print output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+chrono = "0.4.45"
+mantaray-core.workspace = true

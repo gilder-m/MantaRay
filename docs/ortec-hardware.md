@@ -1,6 +1,6 @@
 # Talking to real ORTEC hardware
 
-What is known about reaching an ORTEC MCB from ORTSEAM, established from a
+What is known about reaching an ORTEC MCB from MantaRay, established from a
 working MAESTRO Pro 9.01 installation and from the instrument on the bench.
 Every claim here is marked **verified** (read out of a file, a binary or a
 screenshot) or **unverified** (inferred, or taken from a secondary source and
@@ -19,7 +19,7 @@ CompatibleID  USB\COMPAT_VID_0A2D&Class_00&SubClass_00&Prot_00
 Device class 00 is vendor-specific, so it needs a vendor driver; there is no
 inbox Windows driver that will bind it. On a machine without ORTEC software
 installed it sits at **Problem 28, `CM_PROB_FAILED_INSTALL`** - no driver - and
-nothing can reach it, ORTSEAM or otherwise.
+nothing can reach it, MantaRay or otherwise.
 
 MAESTRO's own status bar names the model: `Mcb Model No. 0926-001`.
 
@@ -97,16 +97,16 @@ The PDB also names `lpdwROIMask`, matching the documented behaviour that a
 spectrum word carries its ROI flag in a high bit and the mask says which.
 
 **The bitness is the design constraint.** A 32-bit in-process DLL cannot be
-loaded by a 64-bit process. ORTSEAM is 64-bit, so the instrument has to be
+loaded by a 64-bit process. MantaRay is 64-bit, so the instrument has to be
 reached through a **small 32-bit sidecar process** that owns the DLL and speaks
-to ORTSEAM over a pipe or a socket. That is not a workaround to be avoided later
+to MantaRay over a pipe or a socket. That is not a workaround to be avoided later
 - it is the shape of the solution, and the [`Transport`] seam already accepts
 it, because a transport only has to carry a command out and a line back.
 
 The call chain is:
 
 ```
-ortseam (64-bit) ──pipe──> sidecar (32-bit) ──> mcbloc32.dll
+mantaray (64-bit) ──pipe──> sidecar (32-bit) ──> mcbloc32.dll
                                                 └─> DpmUsbAddIn.dll ──> [USB driver] ──> 926
 ```
 
@@ -240,7 +240,7 @@ in that state is the trap: `START` is accepted, answers as usual, and the
 instrument simply does not count, because the preset is already satisfied.
 Nothing in the reply says so. That is why the bridge answers `SHOW_PRESETS`
 by reading all four registers back (`SHOW_TRUE_PRESET`, `SHOW_LIVE_PRESET`,
-`SHOW_PEAK_PRESET`, `SHOW_INTEGRAL_PRESET`), and why ortseam asks that
+`SHOW_PEAK_PRESET`, `SHOW_INTEGRAL_PRESET`), and why mantaray asks that
 question when it connects rather than assuming an instrument holds whatever
 this session last wrote. Zero in a register means none set, which is how the
 instrument itself says it. Clearing the spectrum resets the clocks and lets
@@ -266,19 +266,19 @@ ticks is 157851.12 s, and MAESTRO reading the same instrument displayed
 `Real: 157,851.12`. Live time and the live preset check the same way, against
 `153,272.64` and `259,200.00`.
 
-**What ORTSEAM gets wrong today.** `crates/ortseam-device/src/remote.rs` sends
+**What MantaRay gets wrong today.** `crates/mantaray-device/src/remote.rs` sends
 `SET_PRESET_LIVE`, which the instrument **rejects** - the real command is
 `SET_LIVE_PRESET`, and its argument is ticks, not seconds. `SHOW_STATUS` does
-exist but returns a `$M` record, not the `RT=.. LT=..` text ORTSEAM's simulator
+exist but returns a `$M` record, not the `RT=.. LT=..` text MantaRay's simulator
 answers with. Correcting that is a separate piece of work; the bridge does not
 depend on it, because it asks the instrument directly.
 
-[`Transport`]: ../crates/ortseam-device/src/transport.rs
+[`Transport`]: ../crates/mantaray-device/src/transport.rs
 
 ## Configuring it ourselves
 
-**Verified against two instruments.** ORTSEAM does not need a configuration
-inherited from anywhere. `ortseam-mcb configure` asks the transports what is
+**Verified against two instruments.** MantaRay does not need a configuration
+inherited from anywhere. `mantaray-mcb configure` asks the transports what is
 answering and writes both files the local layer wants.
 
 The minimum `MCBCON32.INI` the library accepts, established by bisection:
@@ -344,30 +344,30 @@ ASCII dialect ($G..., checksummed)   <- decoded, see above
 ```
 
 All three layers are now worked out, and everything below is what they turned
-out to be. That matters for two things at once: ORTSEAM no longer depends on
+out to be. That matters for two things at once: MantaRay no longer depends on
 ORTEC's user-mode software on Windows, and the same code runs on Linux and
 macOS, where `Mcbcio32.dll` can never go and libusb can claim
 `VID_0A2D&PID_0016` with no driver at all.
 
 ### What works already
 
-**Verified against both adapters, 2026-07-31.** ORTSEAM holds a full conversation
+**Verified against both adapters, 2026-07-31.** MantaRay holds a full conversation
 with a 926 over USB with no ORTEC software in the process at all - no
 `Mcbcio32.dll`, no `mcbloc32.dll`, no `DpmUsbAddIn.dll`. Only ORTEC's *driver*
 is involved, which is the thing that was deliberately kept.
 
 ```text
-> ortseam-mcb usbtalk --device 11217584 SHOW_VERSION
+> mantaray-mcb usbtalk --device 11217584 SHOW_VERSION
 SHOW_VERSION -> "$F0926-001"
 
-> ortseam-mcb usbtalk --device 08134076 SHOW_STAT
+> mantaray-mcb usbtalk --device 08134076 SHOW_STAT
 SHOW_STAT -> "$M000372850500037299040000000000081"
 
-> ortseam-mcb usbdump --device 08134076 0x0400 32
+> mantaray-mcb usbdump --device 08134076 0x0400 32
 0x0400  25 00 30 00 30 00 30 00 30 00 30 00 30 00 30 00  |%.0.0.0.0.0.0.0.|
 0x0410  36 00 39 00 0d 00 35 00 31 00 30 00 35 00 0d 00  |6.9...5.1.0.5...|
 
-> ortseam-mcb usbspectrum --device 08134076 --out live.json
+> mantaray-mcb usbspectrum --device 08134076 --out live.json
 8192 channels in 0.06 s: total 1643807, peak 2541 at channel 272
 SHOW_INTEGRAL agrees: 1643807
 ```
@@ -484,7 +484,7 @@ An abandoned transfer leaves the adapter holding a reply nobody collected, and
 from then on every answer is one question behind. Left alone this needs a
 physical replug, which is not a thing to ask of anyone using the program.
 
-Three levels of recovery are implemented, tried in order by `ortseam-mcb usbfix`:
+Three levels of recovery are implemented, tried in order by `mantaray-mcb usbfix`:
 
 1. **Abort and reset both pipes**, then read the in endpoint until it stops
    answering. This drains queued replies and is enough for most slips.
@@ -614,7 +614,7 @@ drains by default and cycles only when asked with `--cycle`.
 
 ### The dual-port memory, as surveyed
 
-**Verified by reading it.** `ortseam-mcb usbdump <offset> <length>` walks the
+**Verified by reading it.** `mantaray-mcb usbdump <offset> <length>` walks the
 address space, `usbscan` walks the whole of it, and `usbspaces` asks every one
 of the 256 values byte three can take.
 
@@ -675,7 +675,7 @@ Take the channel count from the instrument rather than assuming it: `$C` from
 and an instrument set to 4096 channels answers with a 16 KB spectrum, not a
 32 KB one.
 
-`ortseam-mcb usbspectrum --out FILE` does this and checks itself, summing the
+`mantaray-mcb usbspectrum --out FILE` does this and checks itself, summing the
 channels and comparing against the instrument's own `SHOW_INTEGRAL` over the
 same range. A disagreement is a failure, not a warning.
 
@@ -687,7 +687,7 @@ one of them reads a spectrum.
 
 ### Driving it from the application
 
-**Verified against the instrument.** `ortseam-mcb serve` speaks ORTSEAM's own
+**Verified against the instrument.** `mantaray-mcb serve` speaks MantaRay's own
 dialect on a pipe, and it now reaches the instrument **over USB first**, falling
 back to ORTEC's library only when that cannot. The order is the point: the USB
 path needs nothing but the kernel driver, so a machine that has never had
@@ -698,11 +698,11 @@ Both routes implement the same `Instrument` trait, so the translation above them
 - clocks in ticks, presets in seconds, dead time from the two clocks - is
 written once.
 
-`crates/ortseam-device/tests/bridge_hardware.rs` drives the whole chain:
-ORTSEAM's dialect, through the bridge process, over USB, to a real 926. It
+`crates/mantaray-device/tests/bridge_hardware.rs` drives the whole chain:
+MantaRay's dialect, through the bridge process, over USB, to a real 926. It
 checks that the channels sum to the total the instrument itself reports, and
 that `START` and `STOP` move it. It needs hardware, so it skips out loud without
-`ORTSEAM_MCB` naming a bridge, and it takes a lock because an adapter can be
+`MANTARAY_MCB` naming a bridge, and it takes a lock because an adapter can be
 open in one process at a time.
 
 Two things that were quietly wrong and are worth not repeating:
@@ -720,8 +720,8 @@ Two things that were quietly wrong and are worth not repeating:
 **Verified on Linux, 2026-08-05.** There is no vendor driver on these platforms
 and none is needed: the kernel's own USB stack hands the interface over, and
 the same frames go down the same two bulk endpoints.
-`crates/ortseam-mcb/src/direct.rs` is that path, on libusb through `nusb`;
-`crates/ortseam-mcb/src/dpm.rs` sits on a `BulkDevice` trait so the protocol is
+`crates/mantaray-mcb/src/direct.rs` is that path, on libusb through `nusb`;
+`crates/mantaray-mcb/src/dpm.rs` sits on a `BulkDevice` trait so the protocol is
 written once and neither platform is a special case.
 
 The path met an instrument for the first time on a Linux desktop with a 926 on
@@ -733,7 +733,7 @@ adapter `08134079`, and every assumption recorded above held on first contact:
   `$G0000009193097` -> 183.86 s live);
 - a whole 4096-channel spectrum read out with its ROI bits, 284 345 counts,
   in about a fifth of a second with process start-up included;
-- `ortseam-mcb serve` carried the same instrument into the desktop
+- `mantaray-mcb serve` carried the same instrument into the desktop
   application - Scan, Open all, and a live detector window - through the same
   `Session` translation the Windows bridge uses.
 

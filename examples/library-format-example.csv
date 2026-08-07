@@ -1,9 +1,9 @@
 # FORMAT EXAMPLE - NOT A NUCLIDE LIBRARY. DO NOT USE FOR MEASUREMENTS.
 #
-# This file exists to show the shape of ORTSEAM's CSV library format, nothing
+# This file exists to show the shape of MantaRay's CSV library format, nothing
 # more. The numbers below are transcribed by hand and carry no evaluation, no
 # date and nothing to cite - a result computed from them could not be defended,
-# which is why ORTSEAM ships no nuclide library at all.
+# which is why MantaRay ships no nuclide library at all.
 #
 # For real work, load an ORTEC .Lib file, or build a library from an evaluated
 # source (NNDC/ENSDF, or the IAEA Live Chart). See the README.

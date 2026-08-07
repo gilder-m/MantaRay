@@ -10,9 +10,9 @@
 # over SSH with no display at all.
 #
 #   tools/screenshot.sh analyse docs/screenshots/analyse.png
-#   ORTSEAM_DEMO_ISOTOPE=eu152 tools/screenshot.sh isotope /tmp/isotope.png
+#   MANTARAY_DEMO_ISOTOPE=eu152 tools/screenshot.sh isotope /tmp/isotope.png
 #
-# Needs Xvfb and ImageMagick. Build first: cargo build --release -p ortseam-gui
+# Needs Xvfb and ImageMagick. Build first: cargo build --release -p mantaray-gui
 set -euo pipefail
 
 demo="${1:-1}"
@@ -26,12 +26,12 @@ if [ -z "$target" ] && command -v cargo >/dev/null; then
     target="$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 fi
-exe="${ORTSEAM_EXE:-${target:-$here/../target}/release/ortseam-gui}"
-files="${ORTSEAM_FILES:-$here/../crates/ortseam-formats/tests/fixtures/eu152_spectra.Spe}"
-size="${ORTSEAM_SIZE:-1900x1060}"
+exe="${MANTARAY_EXE:-${target:-$here/../target}/release/mantaray-gui}"
+files="${MANTARAY_FILES:-$here/../crates/mantaray-formats/tests/fixtures/eu152_spectra.Spe}"
+size="${MANTARAY_SIZE:-1900x1060}"
 # Long enough for the window to map, the fonts to load and the first frame to
 # settle. Two seconds is plenty on any machine that can run the program at all.
-settle="${ORTSEAM_SETTLE:-3}"
+settle="${MANTARAY_SETTLE:-3}"
 
 for tool in Xvfb import; do
     command -v "$tool" >/dev/null || {
@@ -41,7 +41,7 @@ for tool in Xvfb import; do
     }
 done
 [ -x "$exe" ] || {
-    echo "no build at $exe - cargo build --release -p ortseam-gui" >&2
+    echo "no build at $exe - cargo build --release -p mantaray-gui" >&2
     exit 1
 }
 
@@ -66,7 +66,7 @@ done
 # ignore the X server entirely.
 env -u WAYLAND_DISPLAY \
     DISPLAY="$display" \
-    ORTSEAM_DEMO="$demo" \
+    MANTARAY_DEMO="$demo" \
     WINIT_UNIX_BACKEND=x11 \
     "$exe" $files &
 app=$!

@@ -10,9 +10,9 @@ version of this joke.
 
 ---
 
-# ORTSEAM
+# MantaRay
 
-[![CI](https://github.com/gilder-m/ORTSEAM/actions/workflows/ci.yml/badge.svg)](https://github.com/gilder-m/ORTSEAM/actions/workflows/ci.yml)
+[![CI](https://github.com/gilder-m/MantaRay/actions/workflows/ci.yml/badge.svg)](https://github.com/gilder-m/MantaRay/actions/workflows/ci.yml)
 [![Licence: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/licence-PolyForm%20NC%201.0.0-blue)](LICENSE.md)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange)](https://www.rust-lang.org)
 [![Platforms: Linux, Windows, macOS](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)](#platforms)
@@ -34,21 +34,21 @@ application, a command-line tool and libraries you can build on.
 </details>
 
 ```
-ortseam/
-├── crates/ortseam-core      spectrum model, calibration, peak analysis, libraries
-├── crates/ortseam-formats   .Chn .Spc .Spe .Roi ASCII JSON list-mode codecs
-├── crates/ortseam-device    instrument abstraction, presets, detector simulator
-├── crates/ortseam-jobs      MAESTRO-compatible .JOB automation
-├── crates/ortseam-report    ROI reports, nuclide reports, printouts
-├── crates/ortseam-cli       the `ortseam` command-line workbench
-└── crates/ortseam-gui       the desktop application
+mantaray/
+├── crates/mantaray-core      spectrum model, calibration, peak analysis, libraries
+├── crates/mantaray-formats   .Chn .Spc .Spe .Roi ASCII JSON list-mode codecs
+├── crates/mantaray-device    instrument abstraction, presets, detector simulator
+├── crates/mantaray-jobs      MAESTRO-compatible .JOB automation
+├── crates/mantaray-report    ROI reports, nuclide reports, printouts
+├── crates/mantaray-cli       the `mantaray` command-line workbench
+└── crates/mantaray-gui       the desktop application
 ```
 
 ## What it does
 
 **Acquisition.** Detectors are driven through one interface, so the built-in
 physics simulator and a network instrument (an MCB served over TCP - another
-ORTSEAM's simulator today, bench hardware speaking the same `SET_`/`SHOW_`
+MantaRay's simulator today, bench hardware speaking the same `SET_`/`SHOW_`
 dialect tomorrow) behave the same: start, stop, clear, copy to buffer, list
 mode, zero-dead-time modes, amplifier/ADC/bias/stabiliser settings and presets
 on real time, live time, ROI peak, ROI integral, counting uncertainty and
@@ -81,10 +81,10 @@ window, exactly as recalling a file does.
 Rust 1.92 or newer.
 
 ```sh
-cargo run -p ortseam-gui                      # the desktop application
-cargo run -p ortseam-gui -- spectrum.Spe      # open a file, or run a .JOB
-cargo run -p ortseam-cli -- --help            # the command-line workbench
-cargo run -p ortseam-cli -- serve             # a simulator as a network MCB
+cargo run -p mantaray-gui                      # the desktop application
+cargo run -p mantaray-gui -- spectrum.Spe      # open a file, or run a .JOB
+cargo run -p mantaray-cli -- --help            # the command-line workbench
+cargo run -p mantaray-cli -- serve             # a simulator as a network MCB
 cargo test                                    # the whole test suite
 ```
 
@@ -101,14 +101,14 @@ sudo apt install build-essential pkg-config libgtk-3-dev \
 `libgtk-3-dev` is only needed for native file dialogs. Without it, build with
 
 ```sh
-cargo run -p ortseam-gui --no-default-features
+cargo run -p mantaray-gui --no-default-features
 ```
 
 and use **File / Open path...** to type a path instead. The libraries and the
 command-line tool have no system dependencies at all.
 
 To drive a local ORTEC instrument over USB, build the helper that sits beside
-the application - `cargo build -p ortseam-mcb` - and grant the adapter to your
+the application - `cargo build -p mantaray-mcb` - and grant the adapter to your
 user once:
 
 ```sh
@@ -122,22 +122,22 @@ needed; see [docs/ortec-hardware.md](docs/ortec-hardware.md).
 
 ### Windows and macOS
 
-`cargo run -p ortseam-gui` is enough; no extra packages.
+`cargo run -p mantaray-gui` is enough; no extra packages.
 
 ## The command-line workbench
 
 ```sh
-ortseam info spectrum.Spe                      # what is in a file
-ortseam convert in.Spe out.chn                 # between any supported formats
-ortseam peaks spectrum.Spe --sensitivity 2     # find and identify peaks
-ortseam report spectrum.Spe --column           # MAESTRO-style ROI report
-ortseam analyse soil.Spe --efficiency 0.05 \
+mantaray info spectrum.Spe                      # what is in a file
+mantaray convert in.Spe out.chn                 # between any supported formats
+mantaray peaks spectrum.Spe --sensitivity 2     # find and identify peaks
+mantaray report spectrum.Spe --column           # MAESTRO-style ROI report
+mantaray analyse soil.Spe --efficiency 0.05 \
         --quantity 1.2 --unit kg --mda         # activities and detection limits
-ortseam calibrate raw.chn --point 1788=661.657 --point 3646=1332.492 -o cal.chn
-ortseam calibrate raw.Spe --auto Eu-152 -o cal.Spe  # find, match and fit automatically
-ortseam print spectrum.Spe --from 600 --to 700 # channel dump, seven to a line
-ortseam job nightly.job --trace                # run an automation script
-ortseam job nightly.job --detector 192.168.0.40:2000   # run against an instrument
+mantaray calibrate raw.chn --point 1788=661.657 --point 3646=1332.492 -o cal.chn
+mantaray calibrate raw.Spe --auto Eu-152 -o cal.Spe  # find, match and fit automatically
+mantaray print spectrum.Spe --from 600 --to 700 # channel dump, seven to a line
+mantaray job nightly.job --trace                # run an automation script
+mantaray job nightly.job --detector 192.168.0.40:2000   # run against an instrument
 ```
 
 ## File formats
@@ -149,7 +149,7 @@ ortseam job nightly.job --detector 192.168.0.40:2000   # run against an instrume
 | `.Spe` | yes | yes | IAEA/CTBTO ASCII, with `$ROI`, `$MCA_CAL` and `$SHAPE_CAL` |
 | `.Roi` | yes | yes | region tables |
 | `.txt`, `.asc` | yes | yes | ASCII dumps, with TRANSLT's column options |
-| `.json` | yes | yes | ORTSEAM's own lossless format |
+| `.json` | yes | yes | MantaRay's own lossless format |
 | `.Lis` | yes | yes | list-mode events, with time slicing |
 | `.n42` | yes | - | ANSI N42.42 XML, both the 2005 and 2011 revisions |
 | `.csv` | - | yes | channels or analysis results, for spreadsheets |
@@ -169,7 +169,7 @@ plot and reports on one page, and the complete §6.5 JOB command set - including
 `RUN`/`WAIT "program"` launching real programs, `LOOP SPECTRA`/`VIEW` walking
 the instrument's stored spectra, and `ZOOM` placing windows.
 
-**Real hardware works, with none of ORTEC's software.** ORTSEAM drives an ORTEC
+**Real hardware works, with none of ORTEC's software.** MantaRay drives an ORTEC
 926 over USB using only the kernel driver - no `Mcbcio32.dll`, no `mcbloc32.dll`,
 no `DpmUsbAddIn.dll`, no MAESTRO installed. It finds the instruments, numbers
 them itself, and reads whole spectra: all 8192 channels identical to what
@@ -191,17 +191,17 @@ and marks what is verified and what is not.
 
 The readers and the analysis are tested against genuine instrument files, not
 only synthetic ones. Drop real spectra into
-`crates/ortseam-formats/tests/fixtures/` and the suite will exercise them: every
+`crates/mantaray-formats/tests/fixtures/` and the suite will exercise them: every
 file must load, round-trip through the native format, and - for recognised
 sources - show the expected lines at the expected energies. On a real Cs-137
-spectrum from a MAESTRO Pro system, ORTSEAM reports the 661.657 keV line at
+spectrum from a MAESTRO Pro system, MantaRay reports the 661.657 keV line at
 661.98 keV with a 1.80 keV FWHM and a net area of 1 286 255 ± 1 185 (0.09 %).
 
 ## How the application itself is tested
 
 The desktop application is a library with a small binary on top, so the whole of
 it can be driven without a window on screen. Five suites run in
-`crates/ortseam-gui/tests/`:
+`crates/mantaray-gui/tests/`:
 
 | Suite | What it covers |
 |---|---|
@@ -242,7 +242,7 @@ contents.
 energies and emission probabilities belong to whoever evaluated them, and a
 table with no evaluation, no date and nothing to cite is worse than no table at
 all, because a result computed from it cannot be defended. Bring a `.Lib` file,
-or build a library from an evaluated export with `ortseam library` - see
+or build a library from an evaluated export with `mantaray library` - see
 [docs/nuclide-data.md](docs/nuclide-data.md). Those sources, and the people who
 make them reachable:
 
@@ -253,7 +253,7 @@ make them reachable:
 - **[carsus](https://github.com/tardis-sn/carsus)**, from the TARDIS project,
   which retrieves and caches the NNDC tables;
 - **Dani Solakian** and the Berkeley **[RadWatch](https://github.com/RadWatch)**
-  `spectral-analysis` project, whose compiled NNDC gamma database ORTSEAM's
+  `spectral-analysis` project, whose compiled NNDC gamma database MantaRay's
   library builder is designed around, used here with permission.
 
 **Standing on.** [egui and eframe](https://github.com/emilk/egui) for the
@@ -272,14 +272,14 @@ it commercially; for that, ask.
 Note that this is a source-available licence, not an OSI-approved open-source
 one, precisely because it withholds commercial use.
 
-ORTSEAM is an independent implementation. It is not affiliated with, endorsed by
+MantaRay is an independent implementation. It is not affiliated with, endorsed by
 or derived from the source code of ORTEC or AMETEK, and MAESTRO is their
 trademark. Behaviour was reproduced from the published user manual and from
 public file-format descriptions.
 
 ## How this was built
 
-The initial version of ORTSEAM was vibe-coded: written largely by a large
+The initial version of MantaRay was vibe-coded: written largely by a large
 language model working from the MAESTRO manual, under human direction, rather
 than typed line by line. That is stated plainly because it should change how you
 read the code and how much you trust it before checking it yourself.
