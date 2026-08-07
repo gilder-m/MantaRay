@@ -56,14 +56,23 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p mantaray-gui -p mantaray-cli
 
-      # The bridge to ORTEC hardware is 32-bit because ORTEC's libraries are,
-      # and a 64-bit process cannot load them. Windows is the only platform
-      # where it has anything to talk to.
+      # On Windows the bridge is 32-bit because ORTEC's libraries are, and a
+      # 64-bit process cannot load them.
       - name: Build the hardware bridge (Windows, 32-bit)
         if: runner.os == 'Windows'
         run: |
           rustup target add i686-pc-windows-msvc
           cargo build --release --target i686-pc-windows-msvc -p mantaray-mcb
+
+      # Elsewhere it reaches the instrument over libusb with no vendor library
+      # at all, so it is built for the platform's own architecture. It used to
+      # be built only for Windows, on the reasoning that Windows was the only
+      # place it had anything to talk to - which stopped being true when the
+      # in-house USB path landed, and left the Linux archive unable to reach an
+      # instrument at all.
+      - name: Build the hardware bridge
+        if: runner.os != 'Windows'
+        run: cargo build --release --target ${{ matrix.target }} -p mantaray-mcb
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -82,6 +91,7 @@ jobs:
           mkdir dist
           cp target/${{ matrix.target }}/release/mantaray-gui dist/
           cp target/${{ matrix.target }}/release/mantaray dist/
+          cp target/${{ matrix.target }}/release/mantaray-mcb dist/
           cp README.md CHANGELOG.md LICENSE.md dist/
           tar -czf ${{ matrix.archive }} -C dist .
 
