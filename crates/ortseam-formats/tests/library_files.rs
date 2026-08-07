@@ -186,14 +186,14 @@ fn binary_and_text_libraries_load_through_the_same_door() {
 
     // A JSON library renamed to .lib still loads as before.
     let renamed = dir.join("renamed.lib");
-    library::save(&NuclideLibrary::standard(), &renamed).unwrap();
+    library::save(&NuclideLibrary::sample_for_tests(), &renamed).unwrap();
     let text = library::load(&renamed).unwrap();
-    assert_eq!(text.names(), NuclideLibrary::standard().names());
+    assert_eq!(text.names(), NuclideLibrary::sample_for_tests().names());
 }
 
 #[test]
 fn json_round_trips_the_standard_library() {
-    let original = NuclideLibrary::standard();
+    let original = NuclideLibrary::sample_for_tests();
     let text = library::write_json(&original).unwrap();
     let back = library::read_json(&text).unwrap();
     assert_eq!(back, original);
@@ -267,7 +267,7 @@ fn csv_rejects_rows_without_an_energy() {
 fn libraries_can_be_saved_and_loaded_by_extension() {
     let dir = std::env::temp_dir().join(format!("ortseam-lib-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let original = NuclideLibrary::standard();
+    let original = NuclideLibrary::sample_for_tests();
     for name in ["lib.json", "lib.csv"] {
         let path = dir.join(name);
         library::save(&original, &path).unwrap();

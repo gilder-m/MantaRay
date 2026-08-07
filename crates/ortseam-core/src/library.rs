@@ -374,11 +374,19 @@ impl NuclideLibrary {
         best
     }
 
-    /// A small library of the nuclides used for calibration and quality checks.
+    /// A handful of nuclides for the test suite to work against.
     ///
-    /// Energies and yields are the accepted evaluated values; they are meant for
-    /// demonstration and peak identification, not for certified assay work.
-    pub fn standard() -> Self {
+    /// **Not a library, and never presented as one.** The numbers here were
+    /// entered by hand and carry no provenance: no evaluation, no date, no
+    /// uncertainty, nothing to cite. They are close to the accepted values,
+    /// which is exactly what makes shipping them dangerous - a table that
+    /// looks authoritative and answers to nobody is worse than no table at
+    /// all, because a result computed from it cannot be defended.
+    ///
+    /// ortseam therefore ships no nuclide data. A library comes from a `.Lib`
+    /// file the operator supplies, or is built from an evaluated source. This
+    /// exists so the tests have something deterministic to compute against.
+    pub fn sample_for_tests() -> Self {
         const HOUR: f64 = 3_600.0;
         const DAY: f64 = 86_400.0;
         const YEAR: f64 = 365.25 * DAY;

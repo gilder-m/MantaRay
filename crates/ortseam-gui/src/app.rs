@@ -846,7 +846,7 @@ impl App {
             active: None,
             next_id: 1,
             settings: CalculationSettings::default(),
-            library: NuclideLibrary::standard(),
+            library: NuclideLibrary::new(""),
             library_path: None,
             colors: theme.colors(),
             theme,
@@ -2191,6 +2191,16 @@ impl App {
 
     fn run_analysis(&mut self) {
         let Some(index) = self.active else { return };
+        // No library is shipped, so an empty one is the ordinary state on a
+        // fresh install rather than a fault. It still has to be said: an
+        // analysis with nothing to identify against would otherwise produce
+        // an empty table that reads like a finding.
+        if self.library.is_empty() {
+            self.status =
+                "no nuclide library is loaded - use Analyse / Library file... to open a .Lib"
+                    .into();
+            return;
+        }
         let settings = self.settings;
         let library = self.library.clone();
         let efficiency = self.efficiency.clone();

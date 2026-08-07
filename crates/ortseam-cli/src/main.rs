@@ -142,6 +142,22 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Build a nuclide library from an evaluated data export.
+    ///
+    /// No library is shipped: line energies and emission probabilities belong
+    /// to whoever evaluated them. This turns the National Nuclear Data Center's
+    /// radiation export into one, keeping every number as evaluated.
+    Library {
+        /// NNDC radiation export in CSV form. Gunzip a `.csv.gz` first.
+        #[arg(long)]
+        nndc: PathBuf,
+        /// Drop lines below this emission probability, in percent.
+        #[arg(long, default_value_t = ortseam_formats::nndc::DEFAULT_MIN_INTENSITY)]
+        min_intensity: f64,
+        /// Where to write the library.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Export channel data as CSV.
     Csv {
         /// Spectrum file.
@@ -250,6 +266,11 @@ fn main() -> Result<()> {
             print!("{}", print_spectrum(&spectrum, range));
             Ok(())
         }
+        Commands::Library {
+            nndc,
+            min_intensity,
+            output,
+        } => build_library(&nndc, min_intensity, &output),
         Commands::Analyse {
             file,
             library,
@@ -365,12 +386,44 @@ fn load(path: &Path) -> Result<Spectrum> {
     load_spectrum(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// Turns an evaluated radiation export into a nuclide library.
+///
+/// The export is the National Nuclear Data Center's, over the ENSDF
+/// evaluations. Nothing here invents a number: every energy and emission
+/// probability in the result is the evaluated one, and the library records
+/// where it came from so a report can cite it.
+fn build_library(export: &Path, min_intensity: f64, output: &Path) -> Result<()> {
+    let text =
+        std::fs::read_to_string(export).with_context(|| format!("reading {}", export.display()))?;
+    let built = ortseam_formats::nndc::build(&text, min_intensity)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let lines: usize = built
+        .library
+        .nuclides
+        .iter()
+        .map(|nuclide| nuclide.peaks.len())
+        .sum();
+    library::save(&built.library, output)
+        .with_context(|| format!("writing {}", output.display()))?;
+    eprintln!("{}", built.provenance);
+    eprintln!(
+        "read {} rows, kept {} lines: {} nuclides, {lines} lines written to {}",
+        built.rows_read,
+        built.lines_kept,
+        built.library.len(),
+        output.display()
+    );
+    Ok(())
+}
+
 fn load_library(path: Option<&Path>) -> Result<NuclideLibrary> {
     match path {
         Some(path) => {
             library::load(path).with_context(|| format!("reading library {}", path.display()))
         }
-        None => Ok(NuclideLibrary::standard()),
+        // No library is shipped: nuclide data belongs to whoever evaluated
+        // it, and a hand-entered table with no provenance is worse than none.
+        None => Ok(NuclideLibrary::new("")),
     }
 }
 
@@ -545,6 +598,14 @@ fn analyse_command(
         eprintln!("marked {marked} peak(s)");
     }
     let library = load_library(library_path)?;
+    // Refused rather than reported empty: "no nuclides found" and "nothing to
+    // look for" are different answers, and only one of them is true here.
+    if library.is_empty() {
+        bail!(
+            "no nuclide library: give --library <file.Lib>. ortseam ships none, \
+             because nuclide data belongs to whoever evaluated it"
+        );
+    }
     let mut options = AnalysisOptions {
         settings,
         report_mda_for_absent_nuclides: mda,
@@ -715,7 +776,7 @@ fn acquire(args: AcquireArgs) -> Result<()> {
     let settings = CalculationSettings::default();
     let marked = mark_peaks(&mut spectrum, &settings);
     println!("{marked} peak(s) found:");
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::new("");
     let regions: Vec<Roi> = spectrum.rois.iter().copied().collect();
     for roi in regions {
         if let Ok(info) = peak_info(&spectrum, roi, &settings) {

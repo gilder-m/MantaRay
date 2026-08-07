@@ -113,7 +113,7 @@ fn peak_flags_and_kinds_round_trip() {
 
 #[test]
 fn the_standard_library_covers_the_usual_calibration_nuclides() {
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     for n in [
         "Am-241", "Ba-133", "Co-57", "Co-60", "Cs-137", "Eu-152", "K-40",
     ] {
@@ -137,7 +137,7 @@ fn the_standard_library_covers_the_usual_calibration_nuclides() {
 
 #[test]
 fn half_life_is_formatted_in_human_units() {
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     let cs = lib.nuclide("Cs-137").unwrap();
     let text = cs.half_life_display();
     assert!(text.contains("y"), "expected years, got {text}");

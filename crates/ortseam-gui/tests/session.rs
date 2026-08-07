@@ -659,6 +659,8 @@ fn an_uncalibrated_europium_spectrum_calibrates_itself_from_its_peaks() {
     spectrum.rois = ortseam_core::RoiSet::default();
 
     let mut app = App::headless();
+    // No library ships, so one is loaded before anything identifies against it.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
     app.open_buffer("eu152".into(), spectrum, None);
     app.apply_action(Action::AutoCalibrate("Eu-152".into()));
 
@@ -702,6 +704,9 @@ fn auto_calibration_against_the_wrong_source_is_refused() {
     spectrum.energy_calibration = None;
     spectrum.rois = ortseam_core::RoiSet::default();
     let mut app = App::headless();
+    // The library is loaded so the refusal below is for the right reason -
+    // too few lines to fit - rather than for having nothing to look up.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
     app.open_buffer("eu152".into(), spectrum, None);
 
     // Co-60 has two lines: never enough to calibrate from, so no answer is
@@ -832,6 +837,8 @@ fn printing_builds_a_document_the_browser_can_print() {
     // SAFETY: test-local env var, read by the code under test.
     unsafe { std::env::set_var("ORTSEAM_NO_OPEN", "1") };
     let mut app = with_spectrum(1024);
+    // No library ships, so one is loaded before anything identifies against it.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
     app.apply_action(Action::PeakSearch);
     let document = app.print_document().expect("a document");
     assert!(document.starts_with("<!DOCTYPE html>"));
@@ -1247,6 +1254,36 @@ fn renaming_a_detector_reaches_the_list_the_window_and_the_next_save() {
 }
 
 #[test]
+fn a_fresh_session_has_no_library_and_says_so_rather_than_showing_nothing() {
+    // No nuclide library ships: line energies and emission probabilities
+    // belong to whoever evaluated them. An empty analysis table would read as
+    // "nothing found", which is a different claim from "nothing to look for".
+    let mut app = with_spectrum(1024);
+    assert!(
+        app.library.is_empty(),
+        "a fresh session must start with no library"
+    );
+
+    app.apply_action(Action::PeakSearch);
+    app.apply_action(Action::Analyse);
+
+    assert!(
+        app.analysis.is_none(),
+        "an analysis against nothing is not an analysis"
+    );
+    assert!(
+        app.status.to_lowercase().contains("library"),
+        "the state has to be named, and where to fix it: {}",
+        app.status
+    );
+
+    // With one loaded, the same action works.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
+    app.apply_action(Action::Analyse);
+    assert!(app.analysis.is_some(), "{}", app.status);
+}
+
+#[test]
 fn a_running_count_builds_a_stability_trace_and_clear_starts_it_over() {
     // The readout says what the rate is now; this is what says whether it has
     // been that all along.
@@ -1582,6 +1619,8 @@ fn efficiency_measures_itself_from_a_certified_source_spectrum() {
         return;
     }
     let mut app = App::headless();
+    // No library ships, so one is loaded before anything identifies against it.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
     app.recall_path(fixture);
 
     let points = app

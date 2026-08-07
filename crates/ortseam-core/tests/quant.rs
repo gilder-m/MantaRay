@@ -50,7 +50,7 @@ fn options() -> AnalysisOptions {
 #[test]
 fn analysis_identifies_the_peaks_it_finds() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     ortseam_core::mark_peaks(&mut s, &CalculationSettings::default());
     let report = analyse(&s, &lib, &options());
 
@@ -70,7 +70,7 @@ fn analysis_identifies_the_peaks_it_finds() {
 #[test]
 fn activity_uses_efficiency_yield_and_live_time() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     s.rois.mark(Roi::new(650, 674));
     let report = analyse(&s, &lib, &options());
     let cs = report
@@ -95,7 +95,7 @@ fn activity_uses_efficiency_yield_and_live_time() {
 #[test]
 fn several_lines_are_combined_into_a_weighted_mean() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     s.rois.mark(Roi::new(1161, 1185));
     s.rois.mark(Roi::new(1320, 1345));
     let report = analyse(&s, &lib, &options());
@@ -120,7 +120,7 @@ fn several_lines_are_combined_into_a_weighted_mean() {
 #[test]
 fn activity_can_be_reported_per_unit_of_sample() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     s.rois.mark(Roi::new(650, 674));
     let mut opts = options();
     opts.sample = SampleInfo {
@@ -142,7 +142,7 @@ fn activity_can_be_reported_per_unit_of_sample() {
 #[test]
 fn without_an_efficiency_curve_count_rates_stand_in_for_activities() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     s.rois.mark(Roi::new(650, 674));
     let report = analyse(&s, &lib, &AnalysisOptions::default());
     let cs = report
@@ -179,7 +179,7 @@ fn without_an_efficiency_curve_count_rates_stand_in_for_activities() {
 #[test]
 fn without_an_efficiency_curve_absent_nuclides_still_get_detection_limits() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     s.rois.mark(Roi::new(650, 674));
     let opts = AnalysisOptions {
         report_mda_for_absent_nuclides: true,
@@ -213,7 +213,7 @@ fn regions_without_a_library_match_are_listed_separately() {
 #[test]
 fn undetected_library_nuclides_can_still_get_an_mda() {
     let mut s = calibrated_spectrum();
-    let lib = NuclideLibrary::standard();
+    let lib = NuclideLibrary::sample_for_tests();
     s.rois.mark(Roi::new(650, 674));
     let mut opts = options();
     opts.report_mda_for_absent_nuclides = true;

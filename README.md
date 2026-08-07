@@ -233,15 +233,18 @@ contents.
   manual, where it lives here, and what is deliberately different
 - [docs/formats.md](docs/formats.md) - file format details
 - [docs/architecture.md](docs/architecture.md) - how the crates fit together
+- [docs/nuclide-data.md](docs/nuclide-data.md) - why no nuclide library ships, and
+  how to bring or build one
 
 ## Acknowledgements
 
-**Nuclear data.** ORTSEAM ships no nuclide library, deliberately: line energies
-and emission probabilities belong to whoever evaluated them, and a table with no
-evaluation, no date and nothing to cite is worse than no table at all, because a
-result computed from it cannot be defended. A library comes from a `.Lib` file
-you supply, or is built locally from an evaluated source. Those sources, and the
-people who make them reachable:
+**Nuclear data.** No nuclide library ships with this project, deliberately: line
+energies and emission probabilities belong to whoever evaluated them, and a
+table with no evaluation, no date and nothing to cite is worse than no table at
+all, because a result computed from it cannot be defended. Bring a `.Lib` file,
+or build a library from an evaluated export with `ortseam library` - see
+[docs/nuclide-data.md](docs/nuclide-data.md). Those sources, and the people who
+make them reachable:
 
 - the **National Nuclear Data Center** at Brookhaven National Laboratory, for
   NuDat and the ENSDF evaluations underneath it;

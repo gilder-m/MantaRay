@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+**No nuclide library ships any more, and there is a way to build one
+(2026-08-07).** Line energies and emission probabilities are somebody's
+evaluation: they have authors, a publication cut-off and stated uncertainties,
+and a measurement computed from them can only be defended if you can say which
+evaluation you used. What used to be built in was a table keyed in by hand
+carrying none of that - close enough to the accepted values to look
+authoritative, and answering to nobody.
+
+It is gone from every road into the program. A fresh session, and the command
+line with no `--library`, now start with nothing, and the analysis table, the
+isotope markers and the nuclide reports say so instead of showing an empty
+result that reads like a finding; the command line refuses rather than
+reporting nothing found. The few values kept for the test suite are named
+`sample_for_tests` and documented as a fixture, not a library.
+
+In its place, `ortseam library --nndc export.csv -o nuclides.json` turns the
+National Nuclear Data Center's radiation export - the ENSDF evaluations, served
+through NuDat - into a library, keeping every number as evaluated. It selects
+photons and drops betas, conversion electrons and alphas; tells gammas, X-rays
+and the annihilation line apart; names metastable states; keeps the strongest of
+duplicate lines; and records what it converted and when, so a report can cite
+it. Run against the full export it reads 242,295 rows into 2,012 nuclides and
+26,473 lines, and the values land where they should: Cs-137 at 661.657 keV and
+85.1%, Co-60's pair at 99.85 and 99.98%, Eu-152's ladder, K-40 at 1460.82.
+
+See [docs/nuclide-data.md](docs/nuclide-data.md) for where to get an export and
+who to credit - the NNDC and the IAEA for the evaluations, carsus for retrieving
+them, and Dani Solakian and Berkeley RadWatch for the compiled database this
+converter is built around, used with permission.
+
 **Work in progress survives a crash, and a count is watched while it runs
 (2026-08-06).**
 

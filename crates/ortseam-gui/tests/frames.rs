@@ -888,9 +888,12 @@ fn a_recalled_spectrum_never_shows_the_empty_hint() {
 fn the_analysis_table_draws_with_its_nuclide_links() {
     let ctx = egui::Context::default();
     let mut app = with_data();
+    // No library ships, so an analysis has nothing to identify against until
+    // one is loaded - which is the real workflow, and what this table needs.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
     app.apply_action(Action::PeakSearch);
     app.apply_action(Action::Analyse);
-    assert!(app.analysis.is_some());
+    assert!(app.analysis.is_some(), "{}", app.status);
     let output = frame(&mut app, &ctx, [1400.0, 900.0]);
     assert!(shapes(&output) > 50, "the filled table should draw");
 }
