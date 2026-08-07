@@ -3442,6 +3442,14 @@ impl App {
                 self.apply_one(Action::PeakSearch);
                 return;
             }
+            "outline" => {
+                // The trace with nothing under it, and regions that still fill.
+                // The one combination where those two decisions disagree, so
+                // the one worth a picture.
+                self.style.fill = crate::theme::FillStyle::None;
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
             "colours" => {
                 // The theme editor, open on a spectrum: the palette has to be
                 // judged against data, not against an empty plot.

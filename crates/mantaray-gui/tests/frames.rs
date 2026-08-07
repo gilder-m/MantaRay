@@ -169,6 +169,97 @@ fn click_menu_item(app: &mut App, ctx: &egui::Context, menu: &str, item: &str) {
     frame(app, ctx, [1400.0, 900.0]);
 }
 
+/// Scrolls a dialog from the top, gathering everything it paints on the way.
+///
+/// A dialog is bounded to the screen and scrolls, so what is below the fold is
+/// not painted until it is scrolled to - which is the point. Asking "does this
+/// dialog offer X" therefore means looking at all of it, not at one frameful.
+fn painted_while_scrolling(
+    app: &mut App,
+    ctx: &egui::Context,
+    size: [f32; 2],
+    over: egui::Pos2,
+) -> String {
+    let mut seen = String::new();
+    for step in 0..14 {
+        let events = if step == 0 {
+            vec![egui::Event::PointerMoved(over)]
+        } else {
+            vec![
+                egui::Event::PointerMoved(over),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -90.0),
+                    modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
+                },
+            ]
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size[0], size[1]),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| app.draw(ui));
+        seen.push_str(&painted_text(&output));
+    }
+    seen
+}
+
+/// Scrolls a dialog until a piece of text is on screen, and says where it is.
+///
+/// The same idea as [`painted_while_scrolling`], but stopping at the thing
+/// wanted so that its position is the one it currently occupies - a rectangle
+/// from an earlier scroll position would be somewhere else by the time it was
+/// clicked.
+fn scroll_until(
+    app: &mut App,
+    ctx: &egui::Context,
+    size: [f32; 2],
+    over: egui::Pos2,
+    wanted: &str,
+) -> Option<egui::Rect> {
+    for step in 0..14 {
+        let mut events = vec![egui::Event::PointerMoved(over)];
+        if step > 0 {
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -90.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+            });
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size[0], size[1]),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| app.draw(ui));
+        if let Some(rect) = text_rect(&output, wanted) {
+            return Some(rect);
+        }
+    }
+    None
+}
+
+/// A context whose animations finish at once.
+///
+/// A headless frame does not advance the clock, so anything egui animates -
+/// a collapsing section opening, most of all - freezes part-way through and
+/// stays there however many frames are drawn. Tests that open a section and
+/// look inside it need the section open, not opening.
+fn still_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    ctx.all_styles_mut(|style| style.animation_time = 0.0);
+    ctx
+}
+
 /// A spectrum with a peak, a calibration and regions: the interesting case.
 fn realistic(channels: usize) -> Spectrum {
     let mut spectrum = Spectrum::new(channels);
@@ -1296,10 +1387,16 @@ fn light_chrome_around_a_dark_plot_gets_dark_text() {
 /// Every scheme is offered in the dialog, by name.
 #[test]
 fn the_theme_dialog_offers_every_scheme() {
-    let ctx = egui::Context::default();
+    let ctx = still_context();
     let mut app = with_data();
     app.apply_action(Action::Show(Dialog::Preferences));
-    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    // Tall enough for the dialog with its colours opened out. Whether it fits
+    // a short screen is the business of the test below; this one asks what it
+    // offers.
+    // The dialog is bounded to the screen and scrolls, so everything it offers
+    // is gathered by scrolling through it rather than from one frame.
+    let screen = [1400.0, 900.0];
+    let text = painted_while_scrolling(&mut app, &ctx, screen, egui::pos2(400.0, 400.0));
 
     for theme in mantaray_gui::theme::Theme::all() {
         assert!(
@@ -1355,6 +1452,63 @@ fn spectra_drawn(text: &str) -> usize {
     text.lines()
         .filter(|line| line.starts_with("Marker:"))
         .count()
+}
+
+/// No dialog can grow tall enough to push its own close button off the screen.
+///
+/// This happened: the theme dialog gained a style section and a fuller colour
+/// list, egui pushed the window up to keep the bottom on screen, and the title
+/// bar went off the top with the close button on it. Escape still worked, and
+/// nothing else did.
+#[test]
+fn every_dialog_keeps_its_title_bar_on_screen() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.apply_action(Action::PeakSearch);
+
+    // A short screen, which is where a tall dialog goes wrong.
+    let screen = [1100.0, 620.0];
+    for dialog in Dialog::all() {
+        app.dialogs.close_all();
+        app.apply_action(Action::Show(*dialog));
+        // Two frames: egui measures a window it has not placed before on one
+        // and paints it on the next.
+        frame(&mut app, &ctx, screen);
+        let output = frame(&mut app, &ctx, screen);
+        if !app.dialogs.is_open(*dialog) {
+            continue;
+        }
+        let painted: Vec<egui::Rect> = {
+            fn walk(shape: &egui::Shape, into: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Text(text) => {
+                        into.push(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    egui::Shape::Vec(inner) => {
+                        for shape in inner {
+                            walk(shape, into);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut found);
+            }
+            found
+        };
+        // Nothing may be painted off either end of the screen. A dialog taller
+        // than the screen runs off the bottom, and egui then slides it up to
+        // compensate, taking the title bar and the close button with it.
+        for rect in painted {
+            assert!(
+                rect.top() >= -1.0 && rect.bottom() <= screen[1] + 1.0,
+                "{dialog:?} painted at {rect:?}, off a {screen:?} screen"
+            );
+        }
+    }
 }
 
 /// A workspace decides which sidebar sections are on screen.
@@ -1461,7 +1615,7 @@ fn spectra_are_arranged_in_tabs_by_default() {
     assert_ne!(app.active.map(|index| app.windows[index].id), Some(first));
     let output = frame(&mut app, &ctx, [1400.0, 900.0]);
     let tab = text_rect(&output, "first.Spe").expect("the first tab");
-    click_at_point(&mut app, &ctx, tab.center());
+    click_at(&mut app, &ctx, [1400.0, 900.0], tab.center());
     assert_eq!(
         app.active.map(|index| app.windows[index].id),
         Some(first),
@@ -1532,12 +1686,13 @@ fn the_window_arrangement_draws_them_all() {
     );
 }
 
-/// Clicks once at a point and lets the queued action apply.
-fn click_at_point(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
+/// Clicks once at a point on a screen of a given size, and lets the queued
+/// action apply on the frame after.
+fn click_at(app: &mut App, ctx: &egui::Context, size: [f32; 2], at: egui::Pos2) {
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(1400.0, 900.0),
+            egui::vec2(size[0], size[1]),
         )),
         events: vec![
             egui::Event::PointerMoved(at),
@@ -1557,7 +1712,7 @@ fn click_at_point(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
         ..Default::default()
     };
     let _ = ctx.run_ui(input, |ui| app.draw(ui));
-    frame(app, ctx, [1400.0, 900.0]);
+    frame(app, ctx, size);
 }
 
 /// The hex field can be typed into a character at a time.
@@ -1569,17 +1724,23 @@ fn click_at_point(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
 /// hex was displayed - it had to be typed at to show.
 #[test]
 fn a_colour_can_be_typed_in_as_hex() {
-    let ctx = egui::Context::default();
+    let ctx = still_context();
     let mut app = with_data();
     app.apply_action(Action::Show(Dialog::Preferences));
 
-    // Find the spectrum colour's field by the hex it currently shows, and
-    // click it to put the cursor in it.
+    // Scrolled to, the way a person reaches a row further down a dialog than
+    // the screen is tall.
+    let screen = [1400.0, 900.0];
     let before = app.colors.foreground;
-    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
-    let field = text_rect(&output, &before.to_string())
-        .expect("the spectrum colour's hex should be on screen");
-    type_into(&mut app, &ctx, field.center(), "#ff00ff");
+    let field = scroll_until(
+        &mut app,
+        &ctx,
+        screen,
+        egui::pos2(400.0, 400.0),
+        &before.to_string(),
+    )
+    .expect("the spectrum colour's hex should be reachable");
+    type_into(&mut app, &ctx, screen, field.center(), "#ff00ff");
 
     assert_eq!(
         app.colors.foreground,
@@ -1591,8 +1752,8 @@ fn a_colour_can_be_typed_in_as_hex() {
 /// Clicks at a point to focus whatever is there, then types, one character per
 /// frame - which is the case that matters, because the partial text has to
 /// survive between them.
-fn type_into(app: &mut App, ctx: &egui::Context, at: egui::Pos2, text: &str) {
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+fn type_into(app: &mut App, ctx: &egui::Context, size: [f32; 2], at: egui::Pos2, text: &str) {
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]));
     let run = |app: &mut App, events: Vec<egui::Event>| {
         let input = egui::RawInput {
             screen_rect: Some(screen),

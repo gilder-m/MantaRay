@@ -2154,10 +2154,22 @@ fn dialog_window<R>(
         .position(|candidate| *candidate == dialog)
         .unwrap_or(0);
     let offset = (position % 6) as f32 * 48.0;
+    // Two guarantees, and both are needed. Bounded, because a window taller
+    // than the screen is slid up by egui until its own title bar - and the
+    // close button on it - is off the top, leaving no way to shut it but the
+    // keyboard. Scrolling, because a resizable window keeps the size it was
+    // first given: open a folded section in one and the new rows are simply cut
+    // off, with nothing to say they are there.
+    let room = (ctx.content_rect().height() - 120.0).max(180.0);
     egui::Window::new(title)
         .open(&mut open)
-        .resizable(true)
+        // Sized to its contents rather than resizable. A resizable window keeps
+        // whatever size it was first given, so opening a folded section inside
+        // one cuts the new rows off and leaves nothing to say they are there.
+        .resizable(false)
         .collapsible(false)
+        .max_height(room)
+        .vscroll(true)
         // Dialogs float above the spectrum windows. Without this they share a
         // layer with them, so clicking a spectrum - which is exactly what
         // calibrating asks you to do - buries the dialog behind it.
