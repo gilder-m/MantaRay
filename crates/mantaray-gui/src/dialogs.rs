@@ -481,6 +481,10 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             let recent: Vec<PathBuf> = app.recent_files().to_vec();
             ui.add_enabled_ui(!recent.is_empty(), |ui| {
                 ui.menu_button("Recent", |ui| {
+                    // Same reason as the detector list: a file name is as long
+                    // as somebody made it, and a wrapped one in a submenu is
+                    // unreadable rather than merely narrow.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     for path in &recent {
                         let name = path
                             .file_name()
@@ -821,6 +825,13 @@ pub fn menu_bar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
 
         ui.menu_button("Display", |ui| {
             ui.menu_button("Detector", |ui| {
+                // A detector is named by the instrument it reaches - "Detector
+                // 1 - 0926-001 11217584" - and left to wrap, a submenu folds
+                // that into the width it already has, which is a few pixels.
+                // The name then comes out one character per line, a column of
+                // digits taller than the menu it hangs off. Sized to the text
+                // instead, so the menu is as wide as the longest name in it.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for (index, label) in &detectors {
                     if ui.button(label).clicked() {
                         actions.push(Action::OpenDetector(*index));
