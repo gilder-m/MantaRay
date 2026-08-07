@@ -660,6 +660,34 @@ impl Layout {
     }
 }
 
+/// What the toolbar's buttons carry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IconStyle {
+    /// Words only, which need no explaining and take the most room.
+    #[default]
+    Text,
+    /// Drawn symbols, which fit far more into a row and have to be learned.
+    Icons,
+    /// A symbol and its word: the widest, and the way to learn the symbols.
+    Both,
+}
+
+impl IconStyle {
+    /// Every style, for the picker.
+    pub fn all() -> &'static [IconStyle] {
+        &[IconStyle::Text, IconStyle::Icons, IconStyle::Both]
+    }
+
+    /// Name for the picker.
+    pub fn label(&self) -> &'static str {
+        match self {
+            IconStyle::Text => "Words",
+            IconStyle::Icons => "Icons",
+            IconStyle::Both => "Both",
+        }
+    }
+}
+
 /// How a scheme draws, as distinct from what it draws in.
 ///
 /// A palette on its own cannot reproduce a look. The programs these
@@ -672,6 +700,9 @@ pub struct SchemeStyle {
     /// How open spectra are arranged in the working area.
     #[serde(default)]
     pub layout: Layout,
+    /// What the toolbar's buttons carry.
+    #[serde(default)]
+    pub icons: IconStyle,
     /// How the area under the trace is filled.
     #[serde(default)]
     pub fill: FillStyle,
@@ -710,6 +741,7 @@ impl Default for SchemeStyle {
     fn default() -> Self {
         Self {
             layout: Layout::Tabs,
+            icons: IconStyle::Text,
             fill: FillStyle::Gradient,
             grid: true,
             wash: true,
@@ -728,6 +760,9 @@ impl SchemeStyle {
     pub fn period() -> Self {
         Self {
             layout: Layout::Windows,
+            // An icon toolbar, because that software had one and it is half of
+            // why its window looked the way it did.
+            icons: IconStyle::Icons,
             fill: FillStyle::Solid,
             grid: false,
             wash: false,

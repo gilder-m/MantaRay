@@ -1050,17 +1050,16 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
 
     // Wrapped, so a narrow window folds the toolbar onto a second row
     // instead of clipping the buttons at the right edge.
+    let icons = app.style.icons;
     ui.horizontal_wrapped(|ui| {
         // Files.
-        if ui
-            .button("Recall…")
+        if crate::icons::button(ui, crate::icons::Icon::Open, "Recall…", icons, true)
             .on_hover_text("open a spectrum (Ctrl+O)")
             .clicked()
         {
             actions.push(Action::Recall);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Save"))
+        if crate::icons::button(ui, crate::icons::Icon::Save, "Save", icons, has_window)
             .on_hover_text("save the active spectrum (Ctrl+S)")
             .clicked()
         {
@@ -1071,104 +1070,121 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         // Acquisition. Start and Stop take their colours from the palette's
         // status roles: green means "will begin", red is reserved for the one
         // button that ends a measurement.
-        if ui
-            .add_enabled(
-                is_detector && !counting,
-                egui::Button::new(egui::RichText::new("▶ Start").color(
-                    if is_detector && !counting {
-                        app.colors.healthy.to_color()
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                )),
-            )
-            .on_hover_text("begin collecting (Alt+1)")
-            .clicked()
+        if crate::icons::tinted(
+            ui,
+            crate::icons::Icon::Start,
+            "▶ Start",
+            icons,
+            is_detector && !counting,
+            Some(app.colors.healthy.to_color()),
+        )
+        .on_hover_text("begin collecting (Alt+1)")
+        .clicked()
         {
             actions.push(Action::Start);
         }
-        if ui
-            .add_enabled(
-                is_detector && counting,
-                egui::Button::new(egui::RichText::new("■ Stop").color(
-                    if is_detector && counting {
-                        app.colors.alarm.to_color()
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                )),
-            )
-            .on_hover_text("stop collecting (Alt+2)")
-            .clicked()
+        if crate::icons::tinted(
+            ui,
+            crate::icons::Icon::Stop,
+            "■ Stop",
+            icons,
+            is_detector && counting,
+            Some(app.colors.alarm.to_color()),
+        )
+        .on_hover_text("stop collecting (Alt+2)")
+        .clicked()
         {
             actions.push(Action::Stop);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Clear"))
+        if crate::icons::button(ui, crate::icons::Icon::Clear, "Clear", icons, has_window)
             .on_hover_text("erase the data - Ctrl+Z brings it back (Alt+3)")
             .clicked()
         {
             actions.push(Action::Clear);
         }
-        if ui
-            .add_enabled(is_detector, egui::Button::new("→ Buffer"))
-            .on_hover_text("copy the detector data into a buffer window (Alt+5)")
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Buffer,
+            "→ Buffer",
+            icons,
+            is_detector,
+        )
+        .on_hover_text("copy the detector data into a buffer window (Alt+5)")
+        .clicked()
         {
             actions.push(Action::CopyToBuffer);
         }
         ui.separator();
 
-        // Undo and redo. Words, not arrow glyphs: the pretty curled arrows are
-        // not in egui's fonts and drew as empty boxes.
-        if ui
-            .add_enabled(app.history.can_undo(), egui::Button::new("Undo"))
-            .on_hover_text(match app.history.undo_label() {
-                Some(label) => format!("undo {label} (Ctrl+Z)"),
-                None => "nothing to undo".to_string(),
-            })
-            .clicked()
+        // Undo and redo. The words are words rather than curled arrow glyphs,
+        // which are not in egui's fonts and drew as empty boxes - the reason
+        // the symbols in this toolbar are drawn rather than written.
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Undo,
+            "Undo",
+            icons,
+            app.history.can_undo(),
+        )
+        .on_hover_text(match app.history.undo_label() {
+            Some(label) => format!("undo {label} (Ctrl+Z)"),
+            None => "nothing to undo".to_string(),
+        })
+        .clicked()
         {
             actions.push(Action::Undo);
         }
-        if ui
-            .add_enabled(app.history.can_redo(), egui::Button::new("Redo"))
-            .on_hover_text(match app.history.redo_label() {
-                Some(label) => format!("redo {label} (Ctrl+Y)"),
-                None => "nothing to redo".to_string(),
-            })
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Redo,
+            "Redo",
+            icons,
+            app.history.can_redo(),
+        )
+        .on_hover_text(match app.history.redo_label() {
+            Some(label) => format!("redo {label} (Ctrl+Y)"),
+            None => "nothing to redo".to_string(),
+        })
+        .clicked()
         {
             actions.push(Action::Redo);
         }
         ui.separator();
 
         // Analysis.
-        if ui
-            .add_enabled(has_window, egui::Button::new("Peaks"))
+        if crate::icons::button(ui, crate::icons::Icon::Peaks, "Peaks", icons, has_window)
             .on_hover_text("search for peaks and mark them")
             .clicked()
         {
             actions.push(Action::PeakSearch);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Peak Info"))
-            .on_hover_text("measure the peak at the marker")
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::PeakInfo,
+            "Peak Info",
+            icons,
+            has_window,
+        )
+        .on_hover_text("measure the peak at the marker")
+        .clicked()
         {
             actions.push(Action::PeakInfoAtMarker);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Report"))
+        if crate::icons::button(ui, crate::icons::Icon::Report, "Report", icons, has_window)
             .on_hover_text("ROI report")
             .clicked()
         {
             actions.push(Action::Show(Dialog::RoiReportOptions));
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Nuclides"))
-            .on_hover_text("identify nuclides and compute activities")
-            .clicked()
+        if crate::icons::button(
+            ui,
+            crate::icons::Icon::Nuclides,
+            "Nuclides",
+            icons,
+            has_window,
+        )
+        .on_hover_text("identify nuclides and compute activities")
+        .clicked()
         {
             actions.push(Action::Analyse);
         }
@@ -1243,22 +1259,19 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         if ui.button("+").on_hover_text("zoom in (keypad +)").clicked() {
             actions.push(Action::ZoomIn);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("Center"))
+        if crate::icons::button(ui, crate::icons::Icon::Centre, "Center", icons, has_window)
             .on_hover_text("put the marker in the middle (keypad 5)")
             .clicked()
         {
             actions.push(Action::Center);
         }
-        if ui
-            .add_enabled(!already_full, egui::Button::new("Full"))
+        if crate::icons::button(ui, crate::icons::Icon::Full, "Full", icons, !already_full)
             .on_hover_text("show the whole spectrum")
             .clicked()
         {
             actions.push(Action::FullView);
         }
-        if ui
-            .add_enabled(has_window, egui::Button::new("⛶"))
+        if crate::icons::button(ui, crate::icons::Icon::Maximise, "⛶", icons, has_window)
             .on_hover_text("fill the spectrum area (Ctrl+M)")
             .clicked()
         {
@@ -4398,6 +4411,22 @@ fn style_editor(app: &mut App, ui: &mut egui::Ui) {
             })
             .weak()
             .small(),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Toolbar");
+        for style in crate::theme::IconStyle::all() {
+            if ui
+                .selectable_label(app.style.icons == *style, style.label())
+                .clicked()
+            {
+                app.style.icons = *style;
+            }
+        }
+        ui.label(
+            egui::RichText::new("symbols fit more into a row; words need no learning")
+                .weak()
+                .small(),
         );
     });
     ui.horizontal(|ui| {

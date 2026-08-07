@@ -28,6 +28,7 @@ pub mod app;
 pub mod assoc;
 pub mod crash;
 pub mod dialogs;
+pub mod icons;
 pub mod jobs;
 pub mod session;
 pub mod snapshot;
