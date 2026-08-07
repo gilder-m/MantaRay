@@ -1011,6 +1011,14 @@ impl App {
         if self.last_autosave.elapsed() < EVERY {
             return;
         }
+        // While an offer of unfinished work is unanswered, the file on disk is
+        // that offer. A session that has just started after a crash has no
+        // buffer windows, so writing now would take the "nothing open" branch
+        // and delete the snapshot - twenty seconds in, with the question still
+        // on screen, and the work gone if this run does not survive either.
+        if !self.may_replace_snapshot() {
+            return;
+        }
         self.last_autosave = Instant::now();
         let session = self.snapshot_session();
         // Nothing open is worth recording too: it clears a snapshot from
@@ -1020,6 +1028,15 @@ impl App {
         } else {
             let _ = crate::session::write(&session);
         }
+    }
+
+    /// Whether the snapshot on disk may be written over yet.
+    ///
+    /// Not while unfinished work is still being offered back: until that
+    /// question is answered, the file is the only copy of it that would
+    /// survive this run ending badly too.
+    pub fn may_replace_snapshot(&self) -> bool {
+        self.recovered.is_none()
     }
 
     /// The work in progress, as it would come back after a crash.
@@ -3528,7 +3545,12 @@ impl eframe::App for App {
     /// This is the whole crash detection: a snapshot still on disk at start-up
     /// means the last run did not reach here.
     fn on_exit(&mut self) {
-        crate::session::clear();
+        // Unless work is still being offered back. Quitting is not an answer
+        // to that question - it was never reopened and never discarded - so
+        // the snapshot stays and the offer is made again next time.
+        if self.may_replace_snapshot() {
+            crate::session::clear();
+        }
     }
 }
 

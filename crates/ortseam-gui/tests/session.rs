@@ -1922,3 +1922,50 @@ fn a_calibration_point_will_not_take_a_number_that_is_not_one() {
         app.status
     );
 }
+
+#[test]
+fn an_unanswered_offer_of_unfinished_work_is_not_thrown_away() {
+    // The data-loss path this closes. A run that crashed leaves a snapshot;
+    // the next start offers it back. But a session that has just started has
+    // no buffer windows, so the twenty-second autosave would take its
+    // "nothing open" branch and delete the snapshot - while the question is
+    // still on screen - and Escape would dismiss the question entirely. Either
+    // way the work existed nowhere else.
+    let mut app = App::headless();
+    app.recovered = Some(ortseam_gui::session::Session {
+        saved_at: "2026-08-06 21:14".into(),
+        windows: vec![],
+    });
+    app.dialogs.open(ortseam_gui::dialogs::Dialog::Recover);
+
+    assert!(
+        !app.may_replace_snapshot(),
+        "the snapshot on disk is the offer; it must not be written over"
+    );
+
+    // Escape peels dialogs off, but not this one: it is a question with two
+    // deliberate answers.
+    app.dialogs.close_all();
+    assert!(
+        app.dialogs.is_open(ortseam_gui::dialogs::Dialog::Recover),
+        "Escape must not dismiss the offer of unfinished work"
+    );
+    assert!(app.recovered.is_some());
+
+    // Answering it releases the snapshot again.
+    app.recovered = None;
+    assert!(app.may_replace_snapshot());
+}
+
+#[test]
+fn escape_still_closes_the_dialogs_that_are_only_panels() {
+    let mut app = App::headless();
+    app.dialogs.open(ortseam_gui::dialogs::Dialog::Calibration);
+    app.dialogs.open(ortseam_gui::dialogs::Dialog::Settings);
+    app.dialogs.close_all();
+    assert!(
+        !app.dialogs
+            .is_open(ortseam_gui::dialogs::Dialog::Calibration)
+    );
+    assert!(!app.dialogs.is_open(ortseam_gui::dialogs::Dialog::Settings));
+}

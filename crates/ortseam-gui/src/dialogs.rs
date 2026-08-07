@@ -304,6 +304,14 @@ impl Dialogs {
     /// Closes every open dialog (Escape).
     pub fn close_all(&mut self) {
         for dialog in std::mem::take(&mut self.open) {
+            // The offer of unfinished work is a question, not a panel: the
+            // only answers are reopening it or discarding it, both deliberate.
+            // Escape dismissing it would throw away work that exists nowhere
+            // else, on the one keystroke people press without reading.
+            if dialog == Dialog::Recover {
+                self.open.insert(dialog);
+                continue;
+            }
             self.on_close(dialog);
         }
     }
