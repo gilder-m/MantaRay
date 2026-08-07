@@ -17,6 +17,7 @@
 
 pub mod ascii;
 pub mod chn;
+pub mod clb;
 pub mod library;
 pub mod list_mode;
 pub mod n42;

@@ -493,3 +493,80 @@ fn the_fixture_spectra_all_open_through_the_application() {
         assert!(!spectrum.is_empty(), "{name} loaded zero channels");
     }
 }
+
+/// A calibration recalled from a `.Clb`, which holds one and nothing else.
+///
+/// MAESTRO saves a calibration on its own so it can be put onto a spectrum
+/// taken later, and recalling it is the whole reason the file exists. The
+/// values here are from a real one, checked against the `.Spe` that the same
+/// detector saved on the same day.
+#[test]
+fn a_calibration_is_recalled_from_a_clb_file() {
+    let mut app = App::headless();
+    app.open_buffer("uncalibrated.Spe".into(), Spectrum::new(4096), None);
+    assert!(
+        app.active_spectrum()
+            .and_then(|spectrum| spectrum.energy_calibration.as_ref())
+            .is_none(),
+        "starts with no calibration"
+    );
+
+    // A file of the shape MAESTRO writes: six little-endian floats at 0x94.
+    let mut bytes = vec![0u8; 1152];
+    for (index, value) in [19.1197f32, 0.420412, 3.060_48e-7, 4.5439, 0.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        let at = 0x94 + index * 4;
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let path = std::env::temp_dir().join("mantaray-recall-test.Clb");
+    std::fs::write(&path, &bytes).expect("write the calibration");
+
+    app.apply_calibration_from(&path);
+
+    let calibration = app
+        .active_spectrum()
+        .and_then(|spectrum| spectrum.energy_calibration.clone())
+        .expect("the calibration should have been recalled");
+    assert!((calibration.coefficients[0] - 19.1197).abs() < 1e-4);
+    assert!((calibration.coefficients[1] - 0.420_412).abs() < 1e-7);
+    assert_eq!(calibration.units, "keV");
+    // The shape calibration comes with it; recalling only the energy would
+    // leave the peak widths describing a different detector.
+    assert!(
+        app.active_spectrum()
+            .and_then(|spectrum| spectrum.shape_calibration.as_ref())
+            .is_some_and(|shape| (shape.coefficients[0] - 4.5439).abs() < 1e-4),
+        "the shape calibration should come with it"
+    );
+    // And the status says what was applied, not merely that something was.
+    assert!(app.status.contains("0.420412"), "{}", app.status);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A file that holds no calibration must not wipe the one already there.
+#[test]
+fn recalling_from_a_file_without_a_calibration_keeps_the_one_in_hand() {
+    let mut app = App::headless();
+    let mut spectrum = Spectrum::new(1024);
+    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 0.36));
+    app.open_buffer("calibrated.Spe".into(), spectrum, None);
+
+    // A .Clb of the right length holding nothing is refused, and the
+    // calibration in hand is left alone - losing one by opening the wrong file
+    // would be a quiet way to make every energy in a report wrong.
+    let path = std::env::temp_dir().join("mantaray-empty-test.Clb");
+    std::fs::write(&path, vec![0u8; 1152]).expect("write");
+    app.apply_calibration_from(&path);
+
+    assert!(
+        app.active_spectrum()
+            .and_then(|spectrum| spectrum.energy_calibration.as_ref())
+            .is_some(),
+        "the calibration already in hand should survive: {}",
+        app.status
+    );
+    let _ = std::fs::remove_file(&path);
+}

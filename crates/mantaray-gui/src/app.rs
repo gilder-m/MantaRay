@@ -3092,22 +3092,66 @@ impl App {
     }
 
     fn recall_calibration(&mut self) {
-        let Some(path) = crate::dialogs::pick_open_file(&self.spectrum_filters()) else {
+        // A calibration file as well as a spectrum: MAESTRO saves one on its
+        // own as a .Clb, and recalling it is the whole reason that file exists.
+        let mut filters = vec![
+            (
+                "Calibration or spectrum",
+                &["clb", "chn", "spc", "spe", "json", "txt", "lis"][..],
+            ),
+            ("ORTEC .Clb", &["clb"][..]),
+        ];
+        filters.extend(self.spectrum_filters().into_iter().skip(1));
+        let Some(path) = crate::dialogs::pick_open_file(&filters) else {
             return;
         };
         self.apply_calibration_from(&path);
     }
 
-    /// Copies another spectrum's energy and shape calibration onto the active one.
+    /// Puts a calibration from another file onto the active spectrum.
+    ///
+    /// Takes it from a `.Clb`, which holds a calibration and nothing else, or
+    /// from any spectrum file, which carries the one it was saved with.
     pub fn apply_calibration_from(&mut self, path: &std::path::Path) {
-        match load_spectrum(path) {
-            Ok(other) => {
-                let (energy, shape) = (other.energy_calibration, other.shape_calibration);
+        let is_clb = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("clb"));
+        let found = if is_clb {
+            std::fs::read(path)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| {
+                    mantaray_formats::clb::read(&bytes).map_err(|error| error.to_string())
+                })
+                .map(|calibration| (Some(calibration.energy), Some(calibration.shape)))
+        } else {
+            load_spectrum(path)
+                .map_err(|error| error.to_string())
+                .map(|other| (other.energy_calibration, other.shape_calibration))
+        };
+
+        match found {
+            Ok((energy, shape)) => {
+                // A file that holds no calibration is not a calibration to
+                // recall. Copying its absence over a good one would be a way to
+                // lose a calibration by opening a file.
+                if energy.is_none() {
+                    self.status = format!("{} holds no calibration", path.display());
+                    return;
+                }
+                let described = energy
+                    .as_ref()
+                    .map(|energy| {
+                        format!(
+                            "{:.4} + {:.6} per channel",
+                            energy.coefficients[0], energy.coefficients[1]
+                        )
+                    })
+                    .unwrap_or_default();
                 if let Some(spectrum) = self.active_spectrum_mut() {
                     spectrum.energy_calibration = energy;
                     spectrum.shape_calibration = shape;
                 }
-                self.status = format!("calibration read from {}", path.display());
+                self.status = format!("calibration from {}: {described}", path.display());
             }
             Err(error) => self.status = format!("could not read the file: {error}"),
         }
