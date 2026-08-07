@@ -17,7 +17,7 @@ result that reads like a finding; the command line refuses rather than
 reporting nothing found. The few values kept for the test suite are named
 `sample_for_tests` and documented as a fixture, not a library.
 
-In its place, `ortseam library --nndc export.csv -o nuclides.json` turns the
+In its place, `mantaray library --nndc export.csv -o nuclides.json` turns the
 National Nuclear Data Center's radiation export - the ENSDF evaluations, served
 through NuDat - into a library, keeping every number as evaluated. It selects
 photons and drops betas, conversion electrons and alphas; tells gammas, X-rays
@@ -127,7 +127,7 @@ and stopped the count at exactly LT=2.00, and `START` against that satisfied
 preset was accepted with the clocks frozen - the silent refusal, reproduced.
 Pinning by `--device` opens the named adapter and refuses a serial that is not
 there; a detector opened twice learns its serial and then matches it. The bench
-check is kept as `crates/ortseam-device/tests/bench_926.rs`, ignored by default
+check is kept as `crates/mantaray-device/tests/bench_926.rs`, ignored by default
 because it needs the instrument. Three things it found:
 
 - *Dead time could read below zero.* The two clocks are separate commands, so
@@ -178,7 +178,7 @@ still open.
 **A preset the instrument is already holding is visible, and cannot silently
 refuse a count (2026-08-06).** Found on the bench: a 926 was still holding a
 300-second live preset from an earlier session, with its live clock stopped
-at exactly that value. ortseam could only ever *write* presets - it opened
+at exactly that value. mantaray could only ever *write* presets - it opened
 with an empty Presets tab, because nothing ever asked the instrument what it
 was holding - and then `START` was accepted and the instrument did not count,
 because the preset was already satisfied. The instrument says nothing about
@@ -305,7 +305,7 @@ every recorded wire-format assumption held on first contact: the `$F`/`$G`
 records, the tick arithmetic, and a whole 4096-channel spectrum with its ROI
 bits in about a fifth of a second. What changed to get there:
 
-- *`ortseam-mcb serve` exists away from Windows.* The dialect-translation
+- *`mantaray-mcb serve` exists away from Windows.* The dialect-translation
   layer (`Session`) is compiled on every platform and a new `ViaDirect`
   backend carries it over libusb, so the desktop application drives a local
   instrument on Linux exactly as it does on Windows - Scan, Open all, and a
@@ -313,7 +313,7 @@ bits in about a fifth of a second. What changed to get there:
 - *`probe` and `configure` answer on Linux* in the same block shape the
   Windows bridge prints, so the application's scan parses both without caring
   which platform answered. `usb` keeps the plain serial listing.
-- *The application looks for `ortseam-mcb`* (no `.exe`) beside itself away
+- *The application looks for `mantaray-mcb`* (no `.exe`) beside itself away
   from Windows.
 - *The translation layer is now tested everywhere*: a bench double answering
   as the real 926 answered pins the status clocks, preset tick conversion,
@@ -346,7 +346,7 @@ it gives a valid one - so the bridge answered OK while setting nothing. The
 real verbs, established on the bench by writing values and reading them back
 exactly, are `SET_PEAK_PRESET` and `SET_INTEGRAL_PRESET`, in counts;
 `SET_PRESET_CLEAR` now zeroes all four preset registers. The time presets
-were verified whole: a 10-second live preset set through ortseam's dialect
+were verified whole: a 10-second live preset set through mantaray's dialect
 stopped the instrument by itself at exactly LT=10.00 s. Uncertainty and MDA
 presets are host-side calculations no instrument carries, and this was
 recorded here as not working on a remote instrument at all; that was wrong.
@@ -354,7 +354,7 @@ They are evaluated from the mirrored spectrum on every frame and STOP is sent
 when one is satisfied. What is really different from a time preset is where
 the stop lives: the instrument's own registers hold a time preset and stop it
 whether or not anything is watching, while these hold only for as long as
-ortseam is running.
+mantaray is running.
 
 The first double-click on the bench's own Cs-137 peak found another gap:
 without a region or a shape calibration, Peak Info guessed the peak to be
@@ -451,15 +451,15 @@ degrade gracefully at narrow widths instead of clipping.
 
 **Real hardware.** Instruments are reached through a transport carrying the
 ASCII `SET_`/`SHOW_` dialect. TCP is built in and proven against a served
-simulator (`ortseam serve`).
+simulator (`mantaray serve`).
 
-Beyond that, ORTSEAM talks to a real ORTEC 926 over USB **using none of ORTEC's
+Beyond that, MantaRay talks to a real ORTEC 926 over USB **using none of ORTEC's
 user-mode software** - no `Mcbcio32.dll`, no `mcbloc32.dll`, no
 `DpmUsbAddIn.dll`, only the kernel driver. Commands, clocks, configuration,
 gain, mode, integrals, the dual-port memory and whole spectra all work, and the
 readout was checked channel-for-channel against ORTEC's own library on the same
 instrument: 8192 of 8192 identical, clocks matching to the millisecond, and the
-totals agreeing with the instrument's own arithmetic. `ortseam-mcb` is the
+totals agreeing with the instrument's own arithmetic. `mantaray-mcb` is the
 32-bit bridge, and it can also drive ORTEC's libraries where they are
 installed. The wire format is written down in
 [docs/ortec-hardware.md](docs/ortec-hardware.md).

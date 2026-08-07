@@ -32,7 +32,7 @@ half-lives. That export converts directly into a library.
 # The export is normally distributed gzipped.
 gunzip -c gamma_db_nndc.csv.gz > nndc.csv
 
-ortseam library --nndc nndc.csv -o nuclides.json
+mantaray library --nndc nndc.csv -o nuclides.json
 ```
 
 which prints what it did:
@@ -81,7 +81,7 @@ undetermined, the result says undetermined rather than substituting a number.
 ### Getting the export
 
 A prebuilt export and library are attached to the
-[releases](https://github.com/gilder-m/ORTSEAM/releases) so you do not have to
+[releases](https://github.com/gilder-m/MantaRay/releases) so you do not have to
 assemble one to get started.
 
 To build the export yourself, the compiled NNDC gamma database used here comes

@@ -1,6 +1,6 @@
 Required Notice: Copyright (c) 2026 Gilder Montepeque
 
-ORTSEAM is licensed under the PolyForm Noncommercial License 1.0.0,
+MantaRay is licensed under the PolyForm Noncommercial License 1.0.0,
 reproduced in full below. In short: you may use, copy, modify, fork and
 redistribute this software freely for any noncommercial purpose - personal
 use, study, research, teaching, hobby work - and charities, schools,

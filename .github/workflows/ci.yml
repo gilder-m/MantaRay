@@ -41,7 +41,7 @@ jobs:
       # The command-line simulator is not a shipped feature, so its tests only
       # run when it is asked for. Both configurations must be green.
       - name: Test the simulator build
-        run: cargo test -p ortseam-cli --features simulator
+        run: cargo test -p mantaray-cli --features simulator
 
       # The shipped binaries must contain no simulator at all: nothing in them
       # can put invented counts on screen or into a file.
@@ -50,17 +50,17 @@ jobs:
       - name: Check the shipped binaries have no simulator
         shell: bash
         run: |
-          cargo build -p ortseam-gui -p ortseam-cli
-          ! cargo tree -p ortseam-gui -e features | grep -q 'ortseam-gui feature "simulator"'
-          ! cargo tree -p ortseam-cli -e features | grep -q 'ortseam-cli feature "simulator"'
+          cargo build -p mantaray-gui -p mantaray-cli
+          ! cargo tree -p mantaray-gui -e features | grep -q 'mantaray-gui feature "simulator"'
+          ! cargo tree -p mantaray-cli -e features | grep -q 'mantaray-cli feature "simulator"'
 
       # The libraries and the command-line tool must build with no system
       # libraries at all, so they work in containers and on servers.
       - name: Build headless crates only
-        run: cargo build -p ortseam-core -p ortseam-formats -p ortseam-device -p ortseam-jobs -p ortseam-report -p ortseam-cli
+        run: cargo build -p mantaray-core -p mantaray-formats -p mantaray-device -p mantaray-jobs -p mantaray-report -p mantaray-cli
 
       - name: Build the desktop application without native dialogs
-        run: cargo build -p ortseam-gui --no-default-features
+        run: cargo build -p mantaray-gui --no-default-features
 
       # macOS has no runner here and no ORTEC hardware anywhere, but the code
       # has to keep compiling for it. A type check is what can be had without a

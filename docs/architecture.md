@@ -1,19 +1,19 @@
 # Architecture
 
 ```text
-ortseam-gui ──┐                        ortseam-cli ──┐
-              ├── ortseam-report ──┐                 │
-              ├── ortseam-jobs ────┤                 │
-              ├── ortseam-device ──┼── ortseam-core ─┘
-              └── ortseam-formats ─┘
+mantaray-gui ──┐                        mantaray-cli ──┐
+              ├── mantaray-report ──┐                 │
+              ├── mantaray-jobs ────┤                 │
+              ├── mantaray-device ──┼── mantaray-core ─┘
+              └── mantaray-formats ─┘
 ```
 
 Dependencies point one way: nothing below knows about anything above it, and
-`ortseam-core` depends on nothing but `chrono`, `serde` and `thiserror`.
+`mantaray-core` depends on nothing but `chrono`, `serde` and `thiserror`.
 
 ## The crates
 
-**`ortseam-core`** is the model and the mathematics, with no input or output. A
+**`mantaray-core`** is the model and the mathematics, with no input or output. A
 `Spectrum` is channel counts plus the descriptors that file formats carry (times,
 start, descriptions, calibrations, regions, mode). Around it sit energy and
 peak-shape calibration, region bookkeeping, peak information, peak search,
@@ -21,12 +21,12 @@ smoothing, stripping, nuclide libraries, efficiency curves, quantitative analysi
 with decay correction and detection limits, quality-assurance charts, and the undo
 stack. Channels are zero-based everywhere.
 
-**`ortseam-formats`** turns files into `Spectrum` values and back. Each format is
+**`mantaray-formats`** turns files into `Spectrum` values and back. Each format is
 its own module with its layout documented at the top; `load_spectrum` and
 `save_spectrum` dispatch on the extension. A shared bounds-checked `Cursor` keeps
 the binary readers honest about truncated files.
 
-**`ortseam-device`** hides instruments behind the `Mcb` trait: identity and
+**`mantaray-device`** hides instruments behind the `Mcb` trait: identity and
 capabilities, the settings of the MCB Properties dialog, presets and their
 evaluation, start/stop/clear, status, list mode and zero-dead-time spectra, and raw
 messages. `SimulatedMcb` implements it with a seeded physics model, so a run is
@@ -34,20 +34,20 @@ reproducible. `advance` is the acquisition loop: poll, then stop when a preset i
 satisfied. Around that sit the detector list, the sample changer and batch queue,
 the alarm monitor and the dashboard tiles.
 
-**`ortseam-jobs`** parses `.JOB` files into a `Job` of `Command`s and runs them
+**`mantaray-jobs`** parses `.JOB` files into a `Job` of `Command`s and runs them
 against a `JobHost`. Every host method has a default that reports the command as
 unsupported *with its line number*, so a host implements what it can and a job
 fails loudly rather than silently skipping work. `run` executes a whole job;
 `Runner` executes one command at a time, which is what the desktop application uses
 so the display keeps drawing.
 
-**`ortseam-report`** formats results as text: the two ROI report layouts, channel
+**`mantaray-report`** formats results as text: the two ROI report layouts, channel
 printouts, nuclide reports and CSV.
 
-**`ortseam-cli`** is `ortseam`, a clap application over the libraries, with its own
+**`mantaray-cli`** is `mantaray`, a clap application over the libraries, with its own
 small `JobHost`.
 
-**`ortseam-gui`** is the desktop application, built on egui. It is a library with a
+**`mantaray-gui`** is the desktop application, built on egui. It is a library with a
 binary on top: `main.rs` only builds the window and hands over, so everything the
 application does can be driven from a test.
 

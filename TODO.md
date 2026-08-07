@@ -9,7 +9,7 @@ look like. What has been fixed is in the changelog, not here.
 Severity: **H** = wrong results/crash/hang on realistic use, **M** = on
 unusual-but-possible input, **L** = practice/robustness.
 
-## GUI (`crates/ortseam-gui`)
+## GUI (`crates/mantaray-gui`)
 
 ### M: A debug-build freeze on Linux, seen once, remains unexplained
 During the 2026-08-05 bench run the GUI froze once under a **debug** build
@@ -28,15 +28,15 @@ for bridged and network detectors — `advance` computes them from the mirrored
 spectrum on every frame of the desktop application, and on every step of the
 command line's `WAIT`, and sends STOP when one is satisfied (pinned by
 `an_uncertainty_preset_does_stop_a_remote_instrument` in
-`crates/ortseam-device/tests/remote.rs`). What is genuinely different from a
+`crates/mantaray-device/tests/remote.rs`). What is genuinely different from a
 time preset is where the stop lives: a real- or live-time preset is set in the
 instrument's own registers and stops it whether or not anything is watching,
-while these stop it only for as long as ortseam is running and polling.
+while these stop it only for as long as mantaray is running and polling.
 **Why it matters:** close the application mid-count, or lose the USB link, and
 an uncertainty-preset acquisition keeps going on the instrument. **Fix:** say
 so in the Presets tab — the preset is honoured, but by the host.
 
-## Core (`crates/ortseam-core`) — deferred judgment calls
+## Core (`crates/mantaray-core`) — deferred judgment calls
 
 ### M: `auto_calibrate` scoring still validates candidates linearly
 The one-peak-per-line rule and linear-refit-at-3 are in (2026-08-04), but a
@@ -68,11 +68,11 @@ noted at the write site); `chn.rs` clamps negative i32 channel counts to 0
   rework: `usb.rs` gained the correct 64-bit OVERLAPPED layout, heap-owned
   transfer buffers that are leaked (never freed) when a cancel fails, and a
   wedged-device latch. It compiles under CI's Windows job, but the driver
-  has not seen the new code. `ortseam-mcb usb`, `usbtalk SHOW_VERSION` and
+  has not seen the new code. `mantaray-mcb usb`, `usbtalk SHOW_VERSION` and
   `usbspectrum` on the Windows side is the whole check.
 - **Run the full-chain hardware test** when an instrument is idle: build
-  i686 release `ortseam-mcb`, run `ORTSEAM_MCB=<abs path> cargo test -p
-  ortseam-device --test bridge_hardware -- --nocapture`.
+  i686 release `mantaray-mcb`, run `MANTARAY_MCB=<abs path> cargo test -p
+  mantaray-device --test bridge_hardware -- --nocapture`.
 - **macOS remains a type-check only**; the libusb path is proven on Linux
   (2026-08-05, PR #1) but has never run on a Mac. **Multiple adapters on
   one Linux bus** are likewise untried (the bench has one).

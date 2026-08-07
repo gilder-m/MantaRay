@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-Captures a demo state of ortseam into a PNG, for the documentation.
+Captures a demo state of mantaray into a PNG, for the documentation.
 
 .DESCRIPTION
 Builds nothing - point it at an existing release build. Launches the
-application off-screen-ish (position/size come from ORTSEAM_WINDOW_POS and
-ORTSEAM_WINDOW_SIZE), captures the window by handle with PrintWindow, and
+application off-screen-ish (position/size come from MANTARAY_WINDOW_POS and
+MANTARAY_WINDOW_SIZE), captures the window by handle with PrintWindow, and
 closes it again. The shell is made per-monitor DPI aware first; without that
 GetWindowRect returns virtualized coordinates and the bitmap silently crops
 the right and bottom of the window.
@@ -17,21 +17,21 @@ the right and bottom of the window.
 ./tools/screenshot.ps1 -Demo "insight" -Files @() -Out insight.png
 #>
 param(
-    # ORTSEAM_DEMO state, optionally prefixed with a theme: "paper:1".
+    # MANTARAY_DEMO state, optionally prefixed with a theme: "paper:1".
     [string]$Demo = "1",
     [string]$Out = "shot.png",
     # Spectra to open; most demo states expect one.
-    [string[]]$Files = @("$PSScriptRoot\..\crates\ortseam-formats\tests\fixtures\eu152_spectra.Spe"),
-    [string]$Exe = "$PSScriptRoot\..\target\release\ortseam-gui.exe",
+    [string[]]$Files = @("$PSScriptRoot\..\crates\mantaray-formats\tests\fixtures\eu152_spectra.Spe"),
+    [string]$Exe = "$PSScriptRoot\..\target\release\mantaray-gui.exe",
     # Window position (monitor choice) and logical size.
     [string]$Pos = "2560,20",
     [string]$Size = "1900,1060",
     # Add-Type cannot redefine a class in one shell; give each run a fresh name.
     [string]$ClassName = "Cap$([guid]::NewGuid().ToString('N').Substring(0,8))"
 )
-$env:ORTSEAM_DEMO = $Demo
-$env:ORTSEAM_WINDOW_POS = $Pos
-$env:ORTSEAM_WINDOW_SIZE = $Size
+$env:MANTARAY_DEMO = $Demo
+$env:MANTARAY_WINDOW_POS = $Pos
+$env:MANTARAY_WINDOW_SIZE = $Size
 if ($Files.Count -gt 0) {
     $p = Start-Process -FilePath $Exe -ArgumentList ($Files | ForEach-Object { '"' + $_ + '"' }) -PassThru
 } else {
