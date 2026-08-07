@@ -18,7 +18,15 @@ set -euo pipefail
 demo="${1:-1}"
 out="${2:-shot.png}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exe="${ORTSEAM_EXE:-$here/../target/release/ortseam-gui}"
+# Where cargo actually puts things, which is not always $repo/target: a
+# `target-dir` in any config.toml, or CARGO_TARGET_DIR, moves it. Ask cargo
+# rather than assume, and fall back to the default if cargo cannot say.
+target="${CARGO_TARGET_DIR:-}"
+if [ -z "$target" ] && command -v cargo >/dev/null; then
+    target="$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
+        sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+fi
+exe="${ORTSEAM_EXE:-${target:-$here/../target}/release/ortseam-gui}"
 files="${ORTSEAM_FILES:-$here/../crates/ortseam-formats/tests/fixtures/eu152_spectra.Spe}"
 size="${ORTSEAM_SIZE:-1900x1060}"
 # Long enough for the window to map, the fonts to load and the first frame to

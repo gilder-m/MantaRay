@@ -16,13 +16,27 @@ use std::path::PathBuf;
 use ortseam_device::{BridgeTransport, Mcb, RemoteMcb};
 
 /// The helper the bridge runs.
+///
+/// Found relative to this test binary rather than to the source tree, because
+/// the two are not always in the same place: `CARGO_TARGET_DIR`, or a
+/// `target-dir` in any `config.toml`, puts build output wherever the developer
+/// wants it. This binary is at `<target>/debug/deps/`, so the release
+/// directory is three levels up and across - true wherever `<target>` is.
 fn helper() -> PathBuf {
-    match std::env::var("ORTSEAM_MCB") {
-        Ok(path) => PathBuf::from(path),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/release")
-            .join(ortseam_device::BRIDGE_EXECUTABLE),
+    if let Ok(path) = std::env::var("ORTSEAM_MCB") {
+        return PathBuf::from(path);
     }
+    let from_target = std::env::current_exe().ok().and_then(|exe| {
+        Some(
+            exe.parent()? // deps
+                .parent()? // debug
+                .parent()? // target
+                .join("release"),
+        )
+    });
+    from_target
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release"))
+        .join(ortseam_device::BRIDGE_EXECUTABLE)
 }
 
 /// Opens the instrument the way a saved entry does: the serial pins which
