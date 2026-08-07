@@ -185,6 +185,9 @@ pub struct Persisted {
     pub theme: crate::theme::Theme,
     /// The working colours, which may be hand-edited from the scheme.
     pub colors: SpectrumColors,
+    /// How the display is drawn, which is as much of a scheme as its colours.
+    #[serde(default)]
+    pub style: crate::theme::SchemeStyle,
     /// Schemes the operator saved or imported, beside the built-in ones.
     #[serde(default)]
     pub schemes: Vec<crate::theme::Scheme>,
@@ -706,6 +709,8 @@ pub struct App {
     pub library_path: Option<PathBuf>,
     /// Display colours.
     pub colors: SpectrumColors,
+    /// How the display is drawn: fill, grid, glow, corners, shadows.
+    pub style: crate::theme::SchemeStyle,
     /// Schemes the operator saved or imported, beside the built-in ones.
     pub schemes: Vec<crate::theme::Scheme>,
     /// The colour scheme in force.
@@ -765,7 +770,7 @@ pub struct App {
     /// this held the preset instead, an edited colour reached the plot and
     /// stopped there, leaving every selection, hover and link around it in the
     /// shade the preset had chosen.
-    applied_colors: Option<crate::theme::SpectrumColors>,
+    applied_look: Option<(crate::theme::SpectrumColors, crate::theme::SchemeStyle)>,
     /// Whether a peak search clears the existing regions first (ROI/Auto Clear).
     pub auto_clear_roi: bool,
     /// Whether a logarithmic axis tops out at the next power of ten, the way
@@ -810,7 +815,7 @@ impl App {
         {
             app.restore(persisted);
         }
-        theme::apply(&cc.egui_ctx, &app.colors);
+        theme::apply(&cc.egui_ctx, &app.colors, &app.style);
         app
     }
 
@@ -819,6 +824,7 @@ impl App {
         Persisted {
             theme: self.theme,
             colors: self.colors,
+            style: self.style,
             schemes: self.schemes.clone(),
             recent: self.recent.clone(),
             time_scale: self.time_scale,
@@ -835,6 +841,7 @@ impl App {
     pub fn restore(&mut self, persisted: Persisted) {
         self.theme = persisted.theme;
         self.colors = persisted.colors;
+        self.style = persisted.style;
         self.schemes = persisted.schemes;
         self.recent = persisted
             .recent
@@ -938,6 +945,7 @@ impl App {
             },
             library_path: None,
             colors: theme.colors(),
+            style: theme.style(),
             schemes: Vec::new(),
             theme,
             history: UndoStack::default(),
@@ -964,7 +972,7 @@ impl App {
             pending_collapse: None,
             pending_place: None,
             pending_clipboard: None,
-            applied_colors: None,
+            applied_look: None,
             auto_clear_roi: false,
             log_decade_top: false,
             last_autosave: Instant::now(),
@@ -3086,6 +3094,11 @@ impl App {
             {
                 self.theme = *theme;
                 self.colors = theme.colors();
+                // The style as well as the palette. Taking only the colours
+                // showed Conductor with the default gradient, gridlines and
+                // glow - none of which that scheme has - and the picture was
+                // the only place it showed.
+                self.style = theme.style();
             }
             demo = rest.to_string();
         }
@@ -3712,9 +3725,9 @@ impl App {
         self.take_dropped_files(ui.ctx());
         // Keep egui's own widgets dressed in the theme, however it was chosen -
         // Preferences, a restored session, or a demo state.
-        if self.applied_colors != Some(self.colors) {
-            theme::apply(ui.ctx(), &self.colors);
-            self.applied_colors = Some(self.colors);
+        if self.applied_look != Some((self.colors, self.style)) {
+            theme::apply(ui.ctx(), &self.colors, &self.style);
+            self.applied_look = Some((self.colors, self.style));
         }
 
         let ctx = ui.ctx().clone();
@@ -4128,6 +4141,7 @@ impl App {
             windows,
             detectors,
             colors,
+            style,
             mark_mode,
             library,
             isotope,
@@ -4224,6 +4238,7 @@ impl App {
                         compare_offset: *compare_offset,
                         display,
                         colors,
+                        style: *style,
                         mark_mode: *mark_mode,
                         library: Some(library),
                         isotope: checked,

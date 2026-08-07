@@ -252,6 +252,16 @@ impl Theme {
         }
     }
 
+    /// How the scheme draws, which is as much of its look as the colours are.
+    pub fn style(&self) -> SchemeStyle {
+        match self {
+            // The one scheme reproducing something that existed: solid fill,
+            // no grid, no glow, square corners, no shadows.
+            Theme::Conductor => SchemeStyle::period(),
+            _ => SchemeStyle::default(),
+        }
+    }
+
     /// The colours of the scheme.
     pub fn colors(&self) -> SpectrumColors {
         match self {
@@ -264,6 +274,13 @@ impl Theme {
             Theme::HighContrast => SpectrumColors::high_contrast(),
         }
     }
+}
+
+/// What the overview is drawn in when a palette predates it having its own
+/// colour: a neutral silver, which is what it was already being drawn as on
+/// every scheme that had no opinion.
+fn default_overview() -> Rgb {
+    Rgb(160, 160, 160)
 }
 
 /// The colours of the spectrum display.
@@ -287,6 +304,13 @@ pub struct SpectrumColors {
     pub library: Rgb,
     /// The area the expanded view covers, in the overview.
     pub view_box: Rgb,
+    /// The whole spectrum drawn small, in the overview inset.
+    ///
+    /// Its own colour rather than the trace's. The overview answers a different
+    /// question - where am I in the whole thing - and a scheme may want it
+    /// quiet and neutral while the trace stays loud.
+    #[serde(default = "default_overview")]
+    pub overview: Rgb,
     /// Panels and window chrome.
     pub panel: Rgb,
     /// Alarms and errors. Kept out of the data palette on purpose.
@@ -314,6 +338,7 @@ impl SpectrumColors {
             marker: Rgb(255, 247, 220),
             library: Rgb(244, 114, 182),
             view_box: Rgb(96, 116, 168),
+            overview: Rgb(120, 148, 190),
             panel: Rgb(20, 24, 34),
             alarm: Rgb(239, 68, 68),
             healthy: Rgb(52, 211, 153),
@@ -332,6 +357,7 @@ impl SpectrumColors {
             marker: Rgb(255, 245, 200),
             library: Rgb(216, 148, 255),
             view_box: Rgb(88, 96, 112),
+            overview: Rgb(132, 140, 152),
             panel: Rgb(15, 17, 21),
             alarm: Rgb(248, 81, 73),
             healthy: Rgb(63, 185, 130),
@@ -350,6 +376,7 @@ impl SpectrumColors {
             marker: Rgb(255, 244, 214),
             library: Rgb(255, 130, 200),
             view_box: Rgb(140, 110, 60),
+            overview: Rgb(190, 158, 100),
             panel: Rgb(20, 15, 8),
             alarm: Rgb(255, 70, 60),
             healthy: Rgb(150, 230, 120),
@@ -368,6 +395,7 @@ impl SpectrumColors {
             marker: Rgb(30, 30, 34),
             library: Rgb(160, 40, 130),
             view_box: Rgb(140, 150, 175),
+            overview: Rgb(120, 132, 156),
             panel: Rgb(238, 238, 236),
             alarm: Rgb(190, 30, 30),
             healthy: Rgb(20, 120, 80),
@@ -409,7 +437,14 @@ impl SpectrumColors {
             axes: Rgb(128, 128, 128),
             marker: Rgb(255, 255, 255),
             library: Rgb(255, 0, 255),
-            view_box: Rgb(255, 255, 0),
+            // Not the original's yellow. That yellow is a thin cursor line
+            // inside the overview; this role is the rectangle covering
+            // everything the expanded view shows, which on a spectrum viewed
+            // whole is the entire inset - and in yellow it flooded it.
+            view_box: Rgb(140, 140, 170),
+            // The overview drawn in silver, which is what the original does -
+            // and the reason this colour is a role of its own.
+            overview: Rgb(192, 192, 192),
             panel: Rgb(240, 240, 240),
             alarm: Rgb(200, 0, 80),
             healthy: Rgb(0, 128, 0),
@@ -428,6 +463,7 @@ impl SpectrumColors {
             marker: Rgb(20, 26, 36),
             library: Rgb(158, 26, 116),
             view_box: Rgb(150, 168, 190),
+            overview: Rgb(126, 146, 170),
             panel: Rgb(224, 231, 238),
             alarm: Rgb(184, 24, 24),
             healthy: Rgb(14, 110, 74),
@@ -452,6 +488,7 @@ impl SpectrumColors {
             marker: Rgb(0, 0, 0),
             library: Rgb(150, 0, 90),
             view_box: Rgb(120, 120, 130),
+            overview: Rgb(90, 90, 100),
             panel: Rgb(245, 245, 245),
             alarm: Rgb(200, 0, 0),
             healthy: Rgb(0, 110, 50),
@@ -551,6 +588,119 @@ impl SpectrumColors {
     }
 }
 
+/// How the area under the trace is filled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FillStyle {
+    /// Bright at the trace, fading to nothing at the baseline.
+    ///
+    /// Reads as depth on a dark plot and keeps the trace itself the brightest
+    /// thing drawn, which is why it is the default.
+    #[default]
+    Gradient,
+    /// One flat colour from the trace down to the baseline.
+    ///
+    /// What instrument software has always done, and what prints and
+    /// photocopies without turning to mud.
+    Solid,
+    /// Nothing under the trace; the line alone.
+    None,
+}
+
+impl FillStyle {
+    /// Every style, for the picker.
+    pub fn all() -> &'static [FillStyle] {
+        &[FillStyle::Gradient, FillStyle::Solid, FillStyle::None]
+    }
+
+    /// Name for the picker.
+    pub fn label(&self) -> &'static str {
+        match self {
+            FillStyle::Gradient => "Gradient",
+            FillStyle::Solid => "Solid",
+            FillStyle::None => "Outline",
+        }
+    }
+
+    /// The alpha at the trace and at the baseline.
+    pub fn alphas(&self) -> (f32, f32) {
+        match self {
+            FillStyle::Gradient => (0.80, 0.10),
+            FillStyle::Solid => (1.0, 1.0),
+            FillStyle::None => (0.0, 0.0),
+        }
+    }
+}
+
+/// How a scheme draws, as distinct from what it draws in.
+///
+/// A palette on its own cannot reproduce a look. The programs these
+/// instruments shipped with filled solid to the baseline, drew no grid, put no
+/// glow under the trace and had square corners and no shadows - none of which
+/// is a colour, and all of which is more of the difference than the colours
+/// are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemeStyle {
+    /// How the area under the trace is filled.
+    #[serde(default)]
+    pub fill: FillStyle,
+    /// Whether gridlines are drawn across the plot.
+    #[serde(default = "yes")]
+    pub grid: bool,
+    /// Whether the plot background carries a trace of the data hue.
+    ///
+    /// A whisper of colour across the field reads as depth on a modern
+    /// display. A scheme reproducing one that had exactly as many colours as
+    /// it had, and no gradients at all, turns it off for a flat field.
+    #[serde(default = "yes")]
+    pub wash: bool,
+    /// Whether a wide faint stroke sits under the trace, reading as a glow.
+    #[serde(default = "yes")]
+    pub glow: bool,
+    /// Corner rounding of windows, menus and buttons, in points. Zero is square.
+    #[serde(default = "default_corners")]
+    pub corners: u8,
+    /// Whether windows and menus cast a shadow.
+    #[serde(default = "yes")]
+    pub shadows: bool,
+}
+
+/// The default for a flag that is on unless a scheme says otherwise.
+fn yes() -> bool {
+    true
+}
+
+/// Rounded, unless a scheme asks for square.
+fn default_corners() -> u8 {
+    7
+}
+
+impl Default for SchemeStyle {
+    fn default() -> Self {
+        Self {
+            fill: FillStyle::Gradient,
+            grid: true,
+            wash: true,
+            glow: true,
+            corners: 7,
+            shadows: true,
+        }
+    }
+}
+
+impl SchemeStyle {
+    /// Square, flat and unadorned: the way instrument software was drawn.
+    pub fn period() -> Self {
+        Self {
+            fill: FillStyle::Solid,
+            grid: false,
+            wash: false,
+            glow: false,
+            corners: 0,
+            shadows: false,
+        }
+    }
+}
+
 /// A named palette, as it is saved, shared and edited by hand.
 ///
 /// The built-in themes are presets that produce one of these; everything past
@@ -569,14 +719,28 @@ pub struct Scheme {
     pub name: String,
     /// The palette itself.
     pub colors: SpectrumColors,
+    /// How it draws. Absent from a scheme written before styles existed, and
+    /// defaulted then, so an older file still loads and looks as it did.
+    #[serde(default)]
+    pub style: SchemeStyle,
 }
 
 impl Scheme {
-    /// A named scheme.
+    /// A named scheme, drawn the default way.
     pub fn new(name: impl Into<String>, colors: SpectrumColors) -> Self {
         Self {
             name: name.into(),
             colors,
+            style: SchemeStyle::default(),
+        }
+    }
+
+    /// The same, drawn some other way.
+    pub fn styled(name: impl Into<String>, colors: SpectrumColors, style: SchemeStyle) -> Self {
+        Self {
+            name: name.into(),
+            colors,
+            style,
         }
     }
 
@@ -634,7 +798,7 @@ impl Scheme {
 /// them from the preset meant an edited palette reached the plot and stopped
 /// there: the trace changed colour while every selection, hover, link and
 /// warning around it stayed the shade the preset had chosen.
-pub fn apply(ctx: &egui::Context, colors: &SpectrumColors) {
+pub fn apply(ctx: &egui::Context, colors: &SpectrumColors, style: &SchemeStyle) {
     let dark = colors.chrome_is_dark();
     let mut visuals = if dark {
         egui::Visuals::dark()
@@ -669,13 +833,20 @@ pub fn apply(ctx: &egui::Context, colors: &SpectrumColors) {
     } else {
         colors.panel.mix(Rgb(255, 255, 255), 0.35).to_color()
     };
-    visuals.window_corner_radius = 7.into();
-    visuals.menu_corner_radius = 5.into();
-    visuals.window_shadow = egui::epaint::Shadow {
-        offset: [0, 8],
-        blur: 24,
-        spread: 0,
-        color: egui::Color32::from_black_alpha(if dark { 150 } else { 40 }),
+    visuals.window_corner_radius = style.corners.into();
+    visuals.menu_corner_radius = style.corners.saturating_sub(2).into();
+    // A shadow lifts a window off what is behind it. A scheme reproducing
+    // software that never had one turns it off rather than living with an
+    // anachronism under every menu.
+    visuals.window_shadow = if style.shadows {
+        egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(if dark { 150 } else { 40 }),
+        }
+    } else {
+        egui::epaint::Shadow::NONE
     };
     visuals.popup_shadow = visuals.window_shadow;
 
@@ -716,13 +887,26 @@ pub fn apply(ctx: &egui::Context, colors: &SpectrumColors) {
     visuals.widgets.active.bg_fill = accent.gamma_multiply(0.45);
     visuals.widgets.active.weak_bg_fill = accent.gamma_multiply(0.4);
     visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+
+    // Widgets follow the same corner as the windows, so a square scheme is
+    // square all the way down rather than square windows full of round buttons.
+    let corner: egui::CornerRadius = style.corners.saturating_sub(3).into();
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        widget.corner_radius = corner;
+    }
     ctx.set_visuals(visuals);
 
-    ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(7.0, 5.0);
-        style.spacing.button_padding = egui::vec2(7.0, 3.0);
-        style.spacing.menu_margin = egui::Margin::same(6);
-        style.visuals.striped = true;
+    ctx.all_styles_mut(|ui_style| {
+        ui_style.spacing.item_spacing = egui::vec2(7.0, 5.0);
+        ui_style.spacing.button_padding = egui::vec2(7.0, 3.0);
+        ui_style.spacing.menu_margin = egui::Margin::same(6);
+        ui_style.visuals.striped = true;
     });
 }
 
@@ -1126,7 +1310,22 @@ mod tests {
             "alarm": [239, 68, 68], "healthy": [52, 211, 153]
         }"#;
         let colors: SpectrumColors = serde_json::from_str(older).expect("an older palette");
-        assert_eq!(colors, SpectrumColors::deep_space());
+        // Every colour that was in the file arrives unchanged.
+        assert_eq!(
+            SpectrumColors {
+                overview: colors.overview,
+                ..colors
+            },
+            SpectrumColors {
+                overview: colors.overview,
+                ..SpectrumColors::deep_space()
+            }
+        );
+        // And one added since gets a neutral default rather than this scheme's
+        // own, because a file written before it existed cannot have an opinion
+        // about it and guessing one would change how an old palette looks.
+        assert_eq!(colors.overview, default_overview());
+        assert_ne!(colors.overview, SpectrumColors::deep_space().overview);
     }
 
     #[test]

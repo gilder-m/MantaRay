@@ -4006,6 +4006,8 @@ fn preferences_dialog(app: &mut App, ctx: &egui::Context) {
         |app, ui| {
             scheme_picker(app, ui);
             ui.separator();
+            style_editor(app, ui);
+            ui.separator();
             colour_editor(app, ui);
             ui.separator();
             palette_checks(app, ui);
@@ -4097,10 +4099,12 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
             // Selected means "these are exactly its colours": once one is
             // edited the palette is no longer that scheme, and saying it still
             // is would be a lie the operator could act on.
-            let selected = app.theme == *theme && app.colors == colors;
+            let selected =
+                app.theme == *theme && app.colors == colors && app.style == theme.style();
             if scheme_swatch(ui, theme.label(), &colors, selected).clicked() {
                 app.theme = *theme;
                 app.colors = colors;
+                app.style = theme.style();
             }
         }
     });
@@ -4115,10 +4119,10 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
         let mut remove = None;
         ui.horizontal_wrapped(|ui| {
             for (index, scheme) in app.schemes.iter().enumerate() {
-                let selected = app.colors == scheme.colors;
+                let selected = app.colors == scheme.colors && app.style == scheme.style;
                 let response = scheme_swatch(ui, &scheme.name, &scheme.colors, selected);
                 if response.clicked() {
-                    chosen = Some(scheme.colors);
+                    chosen = Some((scheme.colors, scheme.style));
                 }
                 response.context_menu(|ui| {
                     if ui.button("Forget this scheme").clicked() {
@@ -4128,8 +4132,9 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
                 });
             }
         });
-        if let Some(colors) = chosen {
+        if let Some((colors, style)) = chosen {
             app.colors = colors;
+            app.style = style;
         }
         if let Some(index) = remove {
             app.schemes.remove(index);
@@ -4155,7 +4160,7 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
             .clicked()
         {
             let name = app.dialogs.scheme_name.trim().to_string();
-            let scheme = crate::theme::Scheme::new(name.clone(), app.colors);
+            let scheme = crate::theme::Scheme::styled(name.clone(), app.colors, app.style);
             // Saving twice under one name replaces it rather than making a
             // second entry nobody can tell from the first.
             match app.schemes.iter_mut().find(|kept| kept.name == name) {
@@ -4212,13 +4217,61 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
             if let Some(path) =
                 pick_save_file_named(&[("Colour scheme", &["json"])], Some(&suggestion))
             {
-                let scheme = crate::theme::Scheme::new(name, app.colors);
+                let scheme = crate::theme::Scheme::styled(name, app.colors, app.style);
                 match std::fs::write(&path, scheme.to_json()) {
                     Ok(()) => app.status = format!("wrote {}", path.display()),
                     Err(error) => app.status = format!("could not write it - {error}"),
                 }
             }
         }
+    });
+}
+
+/// How the scheme draws, which is as much of a look as the colours are.
+///
+/// A palette alone cannot reproduce one. The software these instruments
+/// shipped with filled solid to the baseline, drew no grid, put no glow under
+/// the trace, and had square corners and no shadows - none of that is a
+/// colour, and together it is more of the difference than the colours are.
+fn style_editor(app: &mut App, ui: &mut egui::Ui) {
+    ui.label("Drawing");
+    ui.horizontal(|ui| {
+        ui.label("Under the trace");
+        for fill in crate::theme::FillStyle::all() {
+            if ui
+                .selectable_label(app.style.fill == *fill, fill.label())
+                .clicked()
+            {
+                app.style.fill = *fill;
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut app.style.grid, "Gridlines")
+            .on_hover_text("faint lines across the plot at each axis tick");
+        ui.checkbox(&mut app.style.wash, "Wash").on_hover_text(
+            "a trace of the data colour across the plot background, which reads as depth",
+        );
+        ui.checkbox(&mut app.style.glow, "Glow").on_hover_text(
+            "a wide faint stroke under the trace, so it reads as the brightest thing drawn",
+        );
+        ui.checkbox(&mut app.style.shadows, "Shadows")
+            .on_hover_text("under windows and menus");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Corners");
+        ui.add(
+            egui::Slider::new(&mut app.style.corners, 0..=12)
+                .suffix(" px")
+                .custom_formatter(|value, _| {
+                    if value <= 0.0 {
+                        "square".to_string()
+                    } else {
+                        format!("{value:.0}")
+                    }
+                }),
+        )
+        .on_hover_text("windows, menus and buttons; zero is square");
     });
 }
 
@@ -4312,6 +4365,12 @@ fn colour_editor(app: &mut App, ui: &mut egui::Ui) {
             );
             edit(
                 ui,
+                "Overview",
+                "the whole spectrum drawn small, in the inset",
+                &mut app.colors.overview,
+            );
+            edit(
+                ui,
                 "Overview box",
                 "the expanded view's outline in the overview",
                 &mut app.colors.view_box,
@@ -4343,11 +4402,12 @@ fn colour_editor(app: &mut App, ui: &mut egui::Ui) {
     });
 
     if ui
-        .button("Back to the scheme's own colours")
+        .button("Back to the scheme's own look")
         .on_hover_text(app.theme.label())
         .clicked()
     {
         app.colors = app.theme.colors();
+        app.style = app.theme.style();
     }
 }
 

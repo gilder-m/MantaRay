@@ -2038,9 +2038,16 @@ fn settings_saved_under_the_former_name_are_restored() {
         mantaray_gui::theme::Theme::Midnight,
         "the chosen theme should survive the rename"
     );
+    // Every colour that was saved comes back as it was. The overview is the
+    // exception and correctly so: it did not exist when this was written, so it
+    // takes a neutral default rather than a value invented on its behalf.
+    let midnight = mantaray_gui::theme::SpectrumColors::midnight();
     assert_eq!(
-        app.colors,
-        mantaray_gui::theme::SpectrumColors::midnight(),
+        mantaray_gui::theme::SpectrumColors {
+            overview: midnight.overview,
+            ..app.colors
+        },
+        midnight,
         "and the palette with it"
     );
 }
