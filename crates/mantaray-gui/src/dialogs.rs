@@ -50,6 +50,8 @@ pub enum Dialog {
     ListRange,
     /// Display/Preferences.
     Preferences,
+    /// Choosing what the current workspace shows.
+    Workspace,
     /// The multi-detector dashboard.
     Dashboard,
     /// Quality-assurance charts.
@@ -112,6 +114,8 @@ pub struct Dialogs {
     pub properties_tab: usize,
     /// Name being typed for a colour scheme about to be saved or exported.
     pub scheme_name: String,
+    /// Name being typed for a workspace about to be kept.
+    pub workspace_name: String,
     /// Energy being entered in the Calibration dialog.
     pub calibration_energy: String,
     /// Units being entered in the Calibration dialog.
@@ -220,6 +224,7 @@ impl Default for Dialogs {
             open: std::collections::HashSet::new(),
             properties_tab: 0,
             scheme_name: String::new(),
+            workspace_name: String::new(),
             calibration_energy: String::new(),
             calibration_units: "keV".into(),
             report_columns: false,
@@ -1331,10 +1336,19 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         _ => (None, None, "Buffer".into()),
     };
 
+    // What this sidebar shows is the workspace's decision. Read once, so that
+    // a section cannot appear in one place and be hidden in another.
+    let sections = app.workspace.sections;
+
     ui.add_space(4.0);
-    ui.heading("Pulse Ht. Analysis");
-    ui.label(name);
+    if sections.counts {
+        ui.heading("Pulse Ht. Analysis");
+        ui.label(name);
+    }
     egui::Grid::new("times").num_columns(2).show(ui, |ui| {
+        if !sections.counts {
+            return;
+        }
         let spectrum = app.active_spectrum();
         ui.label("Start");
         ui.label(
@@ -1425,11 +1439,15 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.end_row();
     });
 
-    stability_trace(app, ui);
+    if sections.stability {
+        stability_trace(app, ui);
+    }
 
-    ui.separator();
-    ui.heading("Preset Limits");
-    match presets {
+    if sections.presets {
+        ui.separator();
+        ui.heading("Preset Limits");
+    }
+    match presets.filter(|_| sections.presets) {
         Some(presets) if !presets.is_empty() => {
             egui::Grid::new("presets").num_columns(2).show(ui, |ui| {
                 if let Some(value) = presets.real_time {
@@ -1477,13 +1495,14 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 );
             }
         }
-        _ => {
+        _ if sections.presets => {
             ui.label("none set");
         }
+        _ => {}
     }
 
     // Field mode: what the instrument itself is holding.
-    if let Some(detector) = app.active_detector_index() {
+    if let Some(detector) = app.active_detector_index().filter(|_| sections.instrument) {
         let stored = app.detectors[detector].stored_spectra();
         if stored > 0 {
             ui.separator();
@@ -1500,8 +1519,13 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         }
     }
 
-    isotope_check(app, ui);
+    if sections.isotope {
+        isotope_check(app, ui);
+    }
 
+    if !sections.regions {
+        return actions;
+    }
     ui.separator();
     ui.heading("Regions");
     // The regions of the active spectrum, with the energy and net area of each.
@@ -1705,7 +1729,7 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     });
 
     #[cfg(feature = "simulator")]
-    {
+    if sections.simulation {
         ui.separator();
         ui.heading("Simulation");
         ui.horizontal(|ui| {
@@ -1821,6 +1845,7 @@ pub fn windows(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
     strip_dialog(app, ctx, &mut actions);
     list_range_dialog(app, ctx, &mut actions);
     preferences_dialog(app, ctx);
+    workspace_dialog(app, ctx);
     dashboard_dialog(app, ctx, &mut actions);
     qa_dialog(app, ctx);
     batch_dialog(app, ctx, &mut actions);
@@ -3990,6 +4015,125 @@ fn list_range_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
             }
         },
     );
+}
+
+/// The workspace, in the corner: what is on screen, for the job in hand.
+///
+/// A picker rather than a menu, and in the status bar rather than up with the
+/// menus, because it is set when the job changes - once, at the start of a
+/// count or when the counting is over - and not while either is going on.
+///
+/// The built-in arrangements come first and any that have been kept follow
+/// them, exactly as the colour schemes are offered.
+pub fn workspace_picker(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let mut chosen: Option<crate::workspace::Workspace> = None;
+    egui::ComboBox::from_id_salt("workspace")
+        .selected_text(&app.workspace.name)
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            for workspace in crate::workspace::Workspace::built_in() {
+                let selected = app.workspace.name == workspace.name;
+                if ui
+                    .selectable_label(selected, &workspace.name)
+                    .on_hover_text(match workspace.name.as_str() {
+                        "Acquisition" => "the clock, the rate, and what will stop the count",
+                        "Analysis" => "the regions, the library and the nuclide lookup",
+                        _ => "every section at once",
+                    })
+                    .clicked()
+                {
+                    chosen = Some(workspace);
+                }
+            }
+            if !app.workspaces.is_empty() {
+                ui.separator();
+                for workspace in &app.workspaces {
+                    let selected = app.workspace.name == workspace.name;
+                    if ui.selectable_label(selected, &workspace.name).clicked() {
+                        chosen = Some(workspace.clone());
+                    }
+                }
+            }
+            ui.separator();
+            if ui
+                .button("Arrange...")
+                .on_hover_text("choose what this workspace shows, and keep it")
+                .clicked()
+            {
+                actions.push(Action::Show(Dialog::Workspace));
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("what is on screen, for the job in hand");
+    if let Some(workspace) = chosen {
+        app.status = format!("{} workspace", workspace.name);
+        app.workspace = workspace;
+    }
+    actions
+}
+
+/// Choosing what a workspace shows, and keeping it under a name.
+fn workspace_dialog(app: &mut App, ctx: &egui::Context) {
+    dialog_window(app, ctx, Dialog::Workspace, "Workspace", |app, ui| {
+        ui.label(
+            egui::RichText::new(
+                "What the sidebar shows. Counting and interpreting are different \
+                 jobs and do not want the same panel.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.separator();
+        for (label, hint, shown) in app.workspace.sections.each() {
+            ui.checkbox(shown, label).on_hover_text(hint);
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut app.dialogs.workspace_name)
+                    .desired_width(120.0)
+                    .hint_text("name"),
+            );
+            let named = !app.dialogs.workspace_name.trim().is_empty();
+            if ui
+                .add_enabled(named, egui::Button::new("Keep"))
+                .on_hover_text("keep this arrangement under that name")
+                .on_disabled_hover_text("give the workspace a name first")
+                .clicked()
+            {
+                let name = app.dialogs.workspace_name.trim().to_string();
+                let kept = crate::workspace::Workspace::new(name.clone(), app.workspace.sections);
+                match app.workspaces.iter_mut().find(|other| other.name == name) {
+                    Some(existing) => *existing = kept.clone(),
+                    None => app.workspaces.push(kept.clone()),
+                }
+                app.workspace = kept;
+                app.dialogs.workspace_name.clear();
+                app.status = format!("kept the {name} workspace");
+            }
+        });
+        if !app.workspaces.is_empty() {
+            let mut remove = None;
+            ui.horizontal_wrapped(|ui| {
+                for (index, workspace) in app.workspaces.iter().enumerate() {
+                    if ui
+                        .small_button(format!("\u{00d7} {}", workspace.name))
+                        .on_hover_text("forget this workspace")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                }
+            });
+            if let Some(index) = remove {
+                let gone = app.workspaces.remove(index);
+                app.status = format!("forgot the {} workspace", gone.name);
+            }
+        }
+    });
 }
 
 /// Choosing, editing, saving and sharing a colour scheme.

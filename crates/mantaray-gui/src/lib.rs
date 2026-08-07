@@ -35,3 +35,4 @@ pub mod stability;
 pub mod theme;
 pub mod view;
 pub mod viewmodel;
+pub mod workspace;

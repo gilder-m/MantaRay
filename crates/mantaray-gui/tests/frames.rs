@@ -1357,6 +1357,83 @@ fn spectra_drawn(text: &str) -> usize {
         .count()
 }
 
+/// A workspace decides which sidebar sections are on screen.
+#[test]
+fn a_workspace_shows_the_sections_its_job_needs() {
+    use mantaray_gui::workspace::Workspace;
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.apply_action(Action::PeakSearch);
+
+    // Nothing is hidden until somebody asks for it to be.
+    assert_eq!(app.workspace.name, "Everything");
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    for section in ["Pulse Ht. Analysis", "Preset Limits", "Isotope", "Regions"] {
+        assert!(text.contains(section), "{section} should be shown:\n{text}");
+    }
+
+    // Counting: the clock and what will stop it, without the interpretation.
+    app.workspace = Workspace::acquisition();
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("Preset Limits"), "{text}");
+    assert!(
+        !text.contains("Isotope"),
+        "the nuclide lookup is not wanted mid-count:\n{text}"
+    );
+    assert!(!text.contains("Regions"), "nor the region list:\n{text}");
+
+    // Interpreting: the regions and the library, without the preset limits,
+    // which describe a run that has already finished.
+    app.workspace = Workspace::analysis();
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("Regions"), "{text}");
+    assert!(text.contains("Isotope"), "{text}");
+    assert!(
+        !text.contains("Preset Limits"),
+        "the presets are done with:\n{text}"
+    );
+    // The counts stay in both: they are what a spectrum is.
+    assert!(text.contains("Pulse Ht. Analysis"), "{text}");
+}
+
+/// The workspace is chosen from the corner, and kept across a restart.
+#[test]
+fn the_workspace_is_chosen_from_the_corner_and_remembered() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+
+    // It is named in the status bar, which is where it is chosen from.
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(text.contains("Everything"), "{text}");
+
+    app.workspace = mantaray_gui::workspace::Workspace::analysis();
+    app.workspaces.push(mantaray_gui::workspace::Workspace::new(
+        "Bench",
+        app.workspace.sections,
+    ));
+
+    // Both survive the round trip through the settings file.
+    let written = serde_json::to_string(&app.persisted()).expect("write");
+    let persisted: mantaray_gui::app::Persisted = serde_json::from_str(&written).expect("read");
+    let mut restored = App::headless();
+    restored.restore(persisted);
+    assert_eq!(restored.workspace.name, "Analysis");
+    assert_eq!(restored.workspaces.len(), 1);
+    assert_eq!(restored.workspaces[0].name, "Bench");
+
+    // And settings written before workspaces existed still load, with the
+    // arrangement that hides nothing.
+    let older = r##"{"theme":"Paper","colors":{"background":"#fcfcfa","foreground":"#0b4e73",
+        "roi":"#a0480a","compare":"#603cb4","composite":"#b23c3c","axes":"#5a606e",
+        "marker":"#1e1e22","library":"#a02882","view_box":"#8c96af","panel":"#eeeeec",
+        "alarm":"#be1e1e","healthy":"#147850"},"recent":[],"time_scale":1.0}"##;
+    let persisted: mantaray_gui::app::Persisted =
+        serde_json::from_str(older).expect("settings from before workspaces existed");
+    assert_eq!(persisted.workspace.name, "Everything");
+    assert!(persisted.workspaces.is_empty());
+}
+
 /// Tabs by default: one spectrum fills the area, the rest are names in a strip.
 #[test]
 fn spectra_are_arranged_in_tabs_by_default() {

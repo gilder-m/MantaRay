@@ -188,6 +188,12 @@ pub struct Persisted {
     /// How the display is drawn, which is as much of a scheme as its colours.
     #[serde(default)]
     pub style: crate::theme::SchemeStyle,
+    /// What is on screen, for the job in front of you.
+    #[serde(default)]
+    pub workspace: crate::workspace::Workspace,
+    /// Workspaces the operator kept, beside the built-in ones.
+    #[serde(default)]
+    pub workspaces: Vec<crate::workspace::Workspace>,
     /// Schemes the operator saved or imported, beside the built-in ones.
     #[serde(default)]
     pub schemes: Vec<crate::theme::Scheme>,
@@ -818,6 +824,10 @@ pub struct App {
     pub colors: SpectrumColors,
     /// How the display is drawn: fill, grid, glow, corners, shadows.
     pub style: crate::theme::SchemeStyle,
+    /// What is on screen, for the job in front of you.
+    pub workspace: crate::workspace::Workspace,
+    /// Workspaces the operator kept, beside the built-in ones.
+    pub workspaces: Vec<crate::workspace::Workspace>,
     /// Schemes the operator saved or imported, beside the built-in ones.
     pub schemes: Vec<crate::theme::Scheme>,
     /// The colour scheme in force.
@@ -932,6 +942,8 @@ impl App {
             theme: self.theme,
             colors: self.colors,
             style: self.style,
+            workspace: self.workspace.clone(),
+            workspaces: self.workspaces.clone(),
             schemes: self.schemes.clone(),
             recent: self.recent.clone(),
             time_scale: self.time_scale,
@@ -949,6 +961,8 @@ impl App {
         self.theme = persisted.theme;
         self.colors = persisted.colors;
         self.style = persisted.style;
+        self.workspace = persisted.workspace;
+        self.workspaces = persisted.workspaces;
         self.schemes = persisted.schemes;
         self.recent = persisted
             .recent
@@ -1053,6 +1067,8 @@ impl App {
             library_path: None,
             colors: theme.colors(),
             style: theme.style(),
+            workspace: crate::workspace::Workspace::default(),
+            workspaces: Vec::new(),
             schemes: Vec::new(),
             theme,
             history: UndoStack::default(),
@@ -3404,6 +3420,19 @@ impl App {
                 self.apply_one(Action::PeakSearch);
                 return;
             }
+            "acquisition" | "analysis" => {
+                // The two arrangements, side by side in the documentation: the
+                // difference between them is the whole point, and only a
+                // picture shows how much of the sidebar it is.
+                self.workspace = if demo == "acquisition" {
+                    crate::workspace::Workspace::acquisition()
+                } else {
+                    crate::workspace::Workspace::analysis()
+                };
+                self.library = mantaray_core::NuclideLibrary::sample_for_tests();
+                self.apply_one(Action::PeakSearch);
+                return;
+            }
             "colours" => {
                 // The theme editor, open on a spectrum: the palette has to be
                 // judged against data, not against an empty plot.
@@ -3909,6 +3938,12 @@ impl App {
 
         egui::Panel::bottom("supplementary").show(ui, |ui| {
             ui.horizontal(|ui| {
+                // The workspace first, in the corner, because it is the thing
+                // that changes what everything else on screen is - and it is
+                // where the eye goes last, which suits a control that is set
+                // when the job changes rather than while it is going on.
+                actions.extend(crate::dialogs::workspace_picker(self, ui));
+                ui.separator();
                 ui.label(&self.status);
             });
         });
