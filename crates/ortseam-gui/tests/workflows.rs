@@ -286,3 +286,78 @@ fn clearing_a_detector_by_accident_is_recoverable_mid_job() {
     let reopened = ortseam_formats::load_spectrum(&path).expect("it reads back");
     assert_eq!(reopened.total_counts(), counted);
 }
+
+/// Asking about a nuclide by name, the way somebody at a detector would.
+#[test]
+fn a_nuclide_asked_for_by_name_is_found_however_it_is_written() {
+    let mut app = with_source(1024);
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
+
+    for typed in ["cs137", "Cs-137", "137Cs", "cs 137"] {
+        app.isotope.typed = typed.into();
+        app.isotope.resolve(&app.library);
+        assert_eq!(
+            app.isotope.found.as_deref(),
+            Some("Cs-137"),
+            "{typed:?} should find Cs-137"
+        );
+        assert!(
+            app.isotope.missing.is_none(),
+            "{typed:?}: {:?}",
+            app.isotope.missing
+        );
+        // And the nuclide itself comes back, with its lines.
+        let nuclide = app.isotope.nuclide(&app.library).expect("the nuclide");
+        assert!(
+            nuclide
+                .peaks
+                .iter()
+                .any(|peak| (peak.energy - 661.657).abs() < 0.01)
+        );
+    }
+}
+
+/// The two ways a lookup fails are different problems, and are told apart.
+#[test]
+fn a_nuclide_that_is_not_there_says_which_kind_of_not_there() {
+    let mut app = with_source(1024);
+
+    // No library at all: a thing the operator can fix in one action, and
+    // reporting it as "not found" would send them hunting for a nuclide that
+    // was never searched for.
+    assert!(app.library.is_empty(), "a library is not shipped");
+    app.isotope.typed = "Cs-137".into();
+    app.isotope.resolve(&app.library);
+    assert!(app.isotope.found.is_none());
+    let reason = app.isotope.missing.clone().expect("a reason");
+    assert!(
+        reason.contains("no nuclide library"),
+        "should say the library is missing, said {reason:?}"
+    );
+
+    // A library that simply does not hold it, named so the operator knows
+    // which library was searched.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
+    app.isotope.typed = "Xe-133".into();
+    app.isotope.resolve(&app.library);
+    let reason = app.isotope.missing.clone().expect("a reason");
+    assert!(
+        reason.contains("Xe-133") && reason.contains(&app.library.name),
+        "should name the nuclide and the library, said {reason:?}"
+    );
+
+    // And a name that is not a name at all is refused as such, rather than
+    // being reported as absent from the library.
+    app.isotope.typed = "not a nuclide".into();
+    app.isotope.resolve(&app.library);
+    let reason = app.isotope.missing.clone().expect("a reason");
+    assert!(
+        reason.contains("not a nuclide name"),
+        "should say it is not a name, said {reason:?}"
+    );
+
+    // An empty box is not an error - it is the state before anybody asked.
+    app.isotope.typed = String::new();
+    app.isotope.resolve(&app.library);
+    assert!(app.isotope.found.is_none() && app.isotope.missing.is_none());
+}

@@ -43,6 +43,37 @@ fn sample(path: &Path) {
     ortseam_formats::save_spectrum(&spectrum, path).unwrap();
 }
 
+/// A library file for the tests to identify against.
+///
+/// No library ships with the program - nuclide data belongs to whoever
+/// evaluated it - so every command that identifies nuclides is given one, which
+/// is also how a real run works. These values are a test fixture with no
+/// provenance; a real library is a `.Lib` file or one built with
+/// `ortseam library` from an evaluated export.
+fn library_file() -> PathBuf {
+    let path = workspace().join("test-library.csv");
+    std::fs::write(
+        &path,
+        "\
+# Test fixture, not evaluated data.
+Cs-137, 949252608, 661.657, 85.1
+Co-60, 166344000, 1173.228, 99.85
+Co-60, 166344000, 1332.492, 99.9826
+K-40, 39390336000000000, 1460.822, 10.66
+Eu-152, 426902400, 121.7817, 28.53
+Eu-152, 426902400, 244.6974, 7.55
+Eu-152, 426902400, 344.2785, 26.59
+Eu-152, 426902400, 778.9045, 12.93
+Eu-152, 426902400, 964.057, 14.51
+Eu-152, 426902400, 1085.837, 10.11
+Eu-152, 426902400, 1112.076, 13.67
+Eu-152, 426902400, 1408.013, 20.87
+",
+    )
+    .expect("the test library is written");
+    path
+}
+
 #[test]
 fn help_and_version_work() {
     let (stdout, _, ok) = run(&["--help"]);
@@ -130,7 +161,13 @@ fn peaks_finds_and_identifies_the_line() {
     let dir = workspace();
     let path = dir.join("peaks.chn");
     sample(&path);
-    let (stdout, _, ok) = run(&["peaks", path.to_str().unwrap()]);
+    let library = library_file();
+    let (stdout, _, ok) = run(&[
+        "peaks",
+        path.to_str().unwrap(),
+        "--library",
+        library.to_str().unwrap(),
+    ]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("Cs-137"), "{stdout}");
     assert!(stdout.contains("661."), "{stdout}");
@@ -142,9 +179,12 @@ fn report_writes_both_layouts() {
     let path = dir.join("report.chn");
     sample(&path);
     let out = dir.join("report.rpt");
+    let library = library_file();
     let (_, stderr, ok) = run(&[
         "report",
         path.to_str().unwrap(),
+        "--library",
+        library.to_str().unwrap(),
         "--output",
         out.to_str().unwrap(),
     ]);
@@ -153,7 +193,13 @@ fn report_writes_both_layouts() {
     assert!(text.contains("ROI # 1"), "{text}");
     assert!(text.contains("Corrected Rate"), "{text}");
 
-    let (stdout, _, ok) = run(&["report", path.to_str().unwrap(), "--column"]);
+    let (stdout, _, ok) = run(&[
+        "report",
+        path.to_str().unwrap(),
+        "--library",
+        library.to_str().unwrap(),
+        "--column",
+    ]);
     assert!(ok);
     assert!(stdout.contains("ROI#"), "{stdout}");
 }
@@ -167,6 +213,8 @@ fn analyse_reports_an_activity_and_writes_csv() {
     let (stdout, stderr, ok) = run(&[
         "analyse",
         path.to_str().unwrap(),
+        "--library",
+        library_file().to_str().unwrap(),
         "--efficiency",
         "0.05",
         "--csv",
@@ -227,6 +275,8 @@ fn calibrate_auto_recovers_the_instrument_gain_from_eu152() {
         fixture.to_str().unwrap(),
         "--auto",
         "Eu-152",
+        "--library",
+        library_file().to_str().unwrap(),
         "--output",
         out.to_str().unwrap(),
     ]);

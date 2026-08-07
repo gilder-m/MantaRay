@@ -38,7 +38,7 @@ fn spectrum() -> Spectrum {
 
 #[test]
 fn the_header_names_the_detector_and_the_times() {
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::sample_for_tests();
     let text = roi_report(
         &spectrum(),
         &ReportOptions::paragraph().with_library(&library),
@@ -54,7 +54,7 @@ fn the_header_names_the_detector_and_the_times() {
 
 #[test]
 fn the_paragraph_report_has_the_maestro_fields() {
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::sample_for_tests();
     let text = roi_report(
         &spectrum(),
         &ReportOptions::paragraph().with_library(&library),
@@ -75,7 +75,7 @@ fn the_paragraph_report_has_the_maestro_fields() {
 
 #[test]
 fn the_column_report_has_a_header_row_and_one_line_per_region() {
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::sample_for_tests();
     let mut s = spectrum();
     s.rois.mark(Roi::new(100, 130));
     let text = roi_report(&s, &ReportOptions::column().with_library(&library));
@@ -158,7 +158,7 @@ fn printing_defaults_to_the_whole_spectrum() {
 #[test]
 fn the_nuclide_report_lists_activities_and_detection_limits() {
     let s = spectrum();
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::sample_for_tests();
     let options = AnalysisOptions {
         efficiency: Some(EfficiencyCalibration::constant(0.05)),
         report_mda_for_absent_nuclides: true,
@@ -185,7 +185,7 @@ fn the_nuclide_report_lists_activities_and_detection_limits() {
 #[test]
 fn results_export_as_csv() {
     let s = spectrum();
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::sample_for_tests();
     let options = AnalysisOptions {
         efficiency: Some(EfficiencyCalibration::constant(0.05)),
         ..AnalysisOptions::default()
@@ -214,7 +214,7 @@ fn a_comma_in_a_nuclide_name_does_not_shift_the_csv_columns() {
     // Nuclide names come from user-written library files; a comma must be
     // quoted, not silently push every later column over by one.
     let s = spectrum();
-    let mut awkward = NuclideLibrary::standard()
+    let mut awkward = NuclideLibrary::sample_for_tests()
         .nuclide("Cs-137")
         .expect("the standard library knows Cs-137")
         .clone();

@@ -66,7 +66,7 @@ impl CliSession {
             buffer_path: None,
             target: Target::Detector,
             previous_target: Target::Detector,
-            library: NuclideLibrary::standard(),
+            library: NuclideLibrary::new(""),
             settings: CalculationSettings::default(),
             sample_description: String::new(),
             strip_name: None,

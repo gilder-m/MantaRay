@@ -87,7 +87,7 @@ fn peak_search_finds_the_expected_lines_in_real_spectra() {
 
 #[test]
 fn library_identification_names_the_source_in_real_spectra() {
-    let library = NuclideLibrary::standard();
+    let library = NuclideLibrary::sample_for_tests();
     for path in fixtures() {
         let name = path
             .file_name()

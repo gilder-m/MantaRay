@@ -888,9 +888,12 @@ fn a_recalled_spectrum_never_shows_the_empty_hint() {
 fn the_analysis_table_draws_with_its_nuclide_links() {
     let ctx = egui::Context::default();
     let mut app = with_data();
+    // No library ships, so an analysis has nothing to identify against until
+    // one is loaded - which is the real workflow, and what this table needs.
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
     app.apply_action(Action::PeakSearch);
     app.apply_action(Action::Analyse);
-    assert!(app.analysis.is_some());
+    assert!(app.analysis.is_some(), "{}", app.status);
     let output = frame(&mut app, &ctx, [1400.0, 900.0]);
     assert!(shapes(&output) > 50, "the filled table should draw");
 }
@@ -946,4 +949,96 @@ fn the_report_window_draws_its_text() {
     assert!(app.report_text.is_some(), "no report: {}", app.status);
     let output = frame(&mut app, &ctx, [1280.0, 800.0]);
     assert!(shapes(&output) > 50);
+}
+
+/// The isotope box: what it says with a nuclide found, and with one that is not.
+#[test]
+fn the_isotope_check_draws_what_it_found() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
+
+    // Before anybody asks, the section is there and says nothing else.
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(
+        text.contains("Isotope"),
+        "the section should be in the sidebar"
+    );
+
+    // Found: the name the library uses, and its half life, whatever was typed.
+    app.isotope.typed = "137cs".into();
+    app.isotope.resolve(&app.library);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let text = painted_text(&output);
+    assert!(
+        text.contains("Cs-137"),
+        "the found nuclide should be named:\n{text}"
+    );
+    assert!(
+        text.contains("661.66 keV"),
+        "its lines should be listed:\n{text}"
+    );
+    // And drawn over the spectrum, named there and labelled with how strong
+    // each line is - a line that lands on nothing means one thing at 85% and
+    // quite another at 0.1%.
+    assert!(
+        text.contains("85%"),
+        "each drawn line should carry its emission probability:\n{text}"
+    );
+    assert!(
+        text.contains("Cs-137 (1 line)"),
+        "the plot should name what is drawn on it, and count it:\n{text}"
+    );
+
+    // Not found: said plainly, naming the library that was searched.
+    app.isotope.typed = "Xe-133".into();
+    app.isotope.resolve(&app.library);
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(
+        text.contains("Xe-133") && text.contains("is not in"),
+        "should say which nuclide is missing from which library:\n{text}"
+    );
+
+    // Nonsense: refused as a name, not reported as absent.
+    app.isotope.typed = "qq".into();
+    app.isotope.resolve(&app.library);
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(
+        text.contains("not a nuclide name"),
+        "should refuse the name itself:\n{text}"
+    );
+}
+
+/// A cutoff above every line of the nuclide says so, rather than drawing blank.
+#[test]
+fn an_isotope_with_no_line_above_the_cutoff_says_so() {
+    let ctx = egui::Context::default();
+    let mut app = with_data();
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
+    app.isotope.typed = "cs137".into();
+    app.isotope.min_intensity = 99.9;
+    app.isotope.resolve(&app.library);
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(
+        text.contains("no line above"),
+        "an empty list should explain itself:\n{text}"
+    );
+}
+
+/// Without a calibration there is no energy axis to place a line on.
+#[test]
+fn an_isotope_over_an_uncalibrated_spectrum_says_what_is_missing() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    let mut spectrum = realistic(4096);
+    spectrum.energy_calibration = None;
+    app.open_buffer("uncalibrated.Spe".into(), spectrum, None);
+    app.library = ortseam_core::NuclideLibrary::sample_for_tests();
+    app.isotope.typed = "cs137".into();
+    app.isotope.resolve(&app.library);
+    let text = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(
+        text.contains("needs an energy calibration"),
+        "should say why no lines are drawn:\n{text}"
+    );
 }

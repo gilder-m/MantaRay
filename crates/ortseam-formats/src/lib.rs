@@ -21,6 +21,7 @@ pub mod library;
 pub mod list_mode;
 pub mod n42;
 pub mod native;
+pub mod nndc;
 pub mod roi;
 pub mod spc;
 pub mod spe;

@@ -4,7 +4,7 @@
 use egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
 };
-use ortseam_core::{NuclideLibrary, PeakInfo, Spectrum};
+use ortseam_core::{Nuclide, NuclideLibrary, PeakInfo, Spectrum};
 
 use crate::theme::SpectrumColors;
 use crate::viewmodel::{DisplayState, FillMode, VerticalScale};
@@ -126,6 +126,10 @@ pub struct ViewInput<'a> {
     pub mark_mode: MarkMode,
     /// Library whose lines are drawn when isotope markers are on.
     pub library: Option<&'a NuclideLibrary>,
+    /// One nuclide being checked against the spectrum, drawn on its own.
+    pub isotope: Option<&'a Nuclide>,
+    /// Lines fainter than this are not drawn for that nuclide.
+    pub isotope_min_intensity: f64,
     /// The current rubber-rectangle selection, if any.
     pub selection: Option<(usize, usize)>,
     /// Peak information to draw over the peak it belongs to.
@@ -153,6 +157,8 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
         colors,
         mark_mode,
         library,
+        isotope,
+        isotope_min_intensity,
         selection,
         peak_info,
         peak_font,
@@ -233,6 +239,17 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     );
     if display.isotope_markers {
         draw_library_lines(&painter, plot, spectrum, display, colors, library);
+    }
+    if let Some(nuclide) = isotope {
+        draw_isotope_lines(
+            &painter,
+            plot,
+            spectrum,
+            display,
+            colors,
+            nuclide,
+            isotope_min_intensity,
+        );
     }
     if let Some((low, high)) = selection {
         draw_selection(&painter, plot, display, low, high, colors);
@@ -1816,6 +1833,119 @@ fn draw_library_lines(
             );
             last_label_x = x;
         }
+    }
+}
+
+/// One nuclide's lines, drawn full height over the spectrum.
+///
+/// The whole-library markers are ten-pixel ticks along the bottom, because with
+/// a real library there are hundreds of them in view and anything taller would
+/// bury the data. A single nuclide is the opposite case: the operator has asked
+/// about this one, and the question is whether its lines land on peaks, which a
+/// tick at the bottom of a tall plot cannot answer. So these run the full
+/// height, and each carries the emission probability that says how much
+/// agreement to expect - a 0.1% line landing on nothing means nothing, and
+/// without the number on the label there is no way to see that.
+fn draw_isotope_lines(
+    painter: &egui::Painter,
+    plot: Rect,
+    spectrum: &Spectrum,
+    display: &DisplayState,
+    colors: &SpectrumColors,
+    nuclide: &Nuclide,
+    min_intensity: f64,
+) {
+    let Some(cal) = spectrum.energy_calibration.as_ref() else {
+        // Without a calibration there is no energy axis to place a line on, and
+        // guessing one would put the answer somewhere arbitrary.
+        painter.text(
+            Pos2::new(plot.left() + 6.0, plot.top() + 4.0),
+            Align2::LEFT_TOP,
+            format!("{} needs an energy calibration", nuclide.name),
+            FontId::proportional(11.0),
+            colors.alarm.to_color(),
+        );
+        return;
+    };
+    let color = colors.library.to_color();
+    let mut drawn = 0usize;
+    // Strongest first, so that where two lines are too close to label
+    // separately it is the stronger one that keeps its label.
+    let mut lines: Vec<&ortseam_core::LibraryPeak> = nuclide
+        .peaks
+        .iter()
+        .filter(|peak| peak.yield_percent >= min_intensity)
+        .collect();
+    lines.sort_by(|a, b| {
+        b.yield_percent
+            .partial_cmp(&a.yield_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut labelled: Vec<f32> = Vec::new();
+    for peak in lines {
+        let Some(channel) = cal.channel(peak.energy) else {
+            continue;
+        };
+        let Some(fraction) = display.fraction_of(channel.round().max(0.0) as usize) else {
+            continue;
+        };
+        let x = plot.left() + plot.width() * fraction;
+        // The strongest lines are drawn hardest, so the eye goes to the ones
+        // that carry the identification.
+        let weight = (peak.yield_percent / 100.0).clamp(0.12, 1.0) as f32;
+        painter.line_segment(
+            [Pos2::new(x, plot.top() + 2.0), Pos2::new(x, plot.bottom())],
+            Stroke::new(1.0, color.gamma_multiply(0.30 + 0.55 * weight)),
+        );
+        drawn += 1;
+        if labelled.iter().all(|placed| (x - placed).abs() > 34.0) {
+            // A row below the nuclide's own label, so a line near either edge
+            // of the plot cannot land on top of the name.
+            painter.text(
+                Pos2::new(x + 2.0, plot.top() + LABEL_ROW),
+                Align2::LEFT_TOP,
+                format!("{:.0}%", peak.yield_percent),
+                FontId::monospace(9.0),
+                color,
+            );
+            labelled.push(x);
+        }
+    }
+
+    // The name of what is drawn, and - when some of it is off screen - how much,
+    // so an absent line is never read as an absent nuclide.
+    let total = nuclide
+        .peaks
+        .iter()
+        .filter(|peak| peak.yield_percent >= min_intensity)
+        .count();
+    let label = if drawn == total {
+        format!("{} ({})", nuclide.name, count_of_lines(drawn))
+    } else {
+        format!(
+            "{} ({drawn} of {} in view)",
+            nuclide.name,
+            count_of_lines(total)
+        )
+    };
+    painter.text(
+        Pos2::new(plot.left() + 6.0, plot.top() + 4.0),
+        Align2::LEFT_TOP,
+        label,
+        FontId::proportional(11.0),
+        color,
+    );
+}
+
+/// How far below the top of the plot the per-line labels sit.
+const LABEL_ROW: f32 = 18.0;
+
+/// `1 line`, `7 lines` - written out, because "(1 lines)" reads as a bug.
+pub(crate) fn count_of_lines(count: usize) -> String {
+    match count {
+        1 => "1 line".to_string(),
+        other => format!("{other} lines"),
     }
 }
 
