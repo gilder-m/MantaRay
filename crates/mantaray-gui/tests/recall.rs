@@ -520,7 +520,7 @@ fn a_calibration_is_recalled_from_a_clb_file() {
         let at = 0x94 + index * 4;
         bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
     }
-    let path = std::env::temp_dir().join("mantaray-recall-test.Clb");
+    let path = scratch("recalled.Clb");
     std::fs::write(&path, &bytes).expect("write the calibration");
 
     app.apply_calibration_from(&path);
@@ -557,7 +557,7 @@ fn recalling_from_a_file_without_a_calibration_keeps_the_one_in_hand() {
     // A .Clb of the right length holding nothing is refused, and the
     // calibration in hand is left alone - losing one by opening the wrong file
     // would be a quiet way to make every energy in a report wrong.
-    let path = std::env::temp_dir().join("mantaray-empty-test.Clb");
+    let path = scratch("holds-nothing.Clb");
     std::fs::write(&path, vec![0u8; 1152]).expect("write");
     app.apply_calibration_from(&path);
 

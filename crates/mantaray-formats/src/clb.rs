@@ -113,8 +113,14 @@ pub fn read(bytes: &[u8]) -> Result<Calibration, FormatError> {
 /// Whether a file looks like a `.Clb`.
 ///
 /// Deliberately weak, because there is nothing strong to test: the format has
-/// no magic number. The length and a usable gain are all there is, so this is
-/// only ever used to confirm a file the operator has already named.
+/// no magic number, so the length and a usable gain are all there is. That is
+/// enough to confirm a file somebody has already named, and nowhere near
+/// enough to pick one out of a directory.
+///
+/// Recalling a calibration goes by the extension rather than through here, and
+/// deliberately: [`read`] takes a file longer than the samples, since the
+/// coefficients sit near the front, while this insists on the exact length the
+/// samples have. This is for a caller holding bytes and no name.
 pub fn looks_like(bytes: &[u8]) -> bool {
     bytes.len() == EXPECTED_LENGTH && read(bytes).is_ok()
 }

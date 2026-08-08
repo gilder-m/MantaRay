@@ -3134,19 +3134,14 @@ impl App {
                 // A file that holds no calibration is not a calibration to
                 // recall. Copying its absence over a good one would be a way to
                 // lose a calibration by opening a file.
-                if energy.is_none() {
+                let Some(energy) = energy else {
                     self.status = format!("{} holds no calibration", path.display());
                     return;
-                }
-                let described = energy
-                    .as_ref()
-                    .map(|energy| {
-                        format!(
-                            "{:.4} + {:.6} per channel",
-                            energy.coefficients[0], energy.coefficients[1]
-                        )
-                    })
-                    .unwrap_or_default();
+                };
+                let described = format!(
+                    "{:.4} + {:.6} per channel",
+                    energy.coefficients[0], energy.coefficients[1]
+                );
                 // `$SHAPE_CAL` is optional in a spectrum file, so a perfectly
                 // good energy calibration can arrive with no shape beside it.
                 // Assigning that absence would throw away the peak widths in
@@ -3156,7 +3151,7 @@ impl App {
                 // what they were using.
                 let mut kept_a_shape = false;
                 if let Some(spectrum) = self.active_spectrum_mut() {
-                    spectrum.energy_calibration = energy;
+                    spectrum.energy_calibration = Some(energy);
                     match shape {
                         Some(shape) => spectrum.shape_calibration = Some(shape),
                         None => kept_a_shape = spectrum.shape_calibration.is_some(),
@@ -3529,6 +3524,46 @@ impl App {
                 self.auto_calibrate("Eu-152");
                 self.dialogs.auto_nuclide = "Eu-152".into();
                 self.dialogs.open(Dialog::Calibration);
+                return;
+            }
+            "recall" => {
+                // The other way a calibration arrives: not fitted from the
+                // peaks but recalled from a `.Clb`, the one file whose whole
+                // purpose is to carry one. The status line has to say *which*
+                // calibration was applied, and how long that line runs is the
+                // part no assertion sees - so it is the part worth a picture.
+                if let Some(spectrum) = self.active_spectrum_mut() {
+                    // The energy calibration only. The peak shape is what the
+                    // search sizes its regions with, and taking that away too
+                    // would mark a different set of peaks than the ones a
+                    // recalled spectrum really has.
+                    spectrum.energy_calibration = None;
+                }
+                // The peaks first, so that recalling is the last thing to
+                // touch the status bar. And the instrument scan the second
+                // frame would otherwise run has to be called off: it ends by
+                // writing its own summary to the status bar, which on any
+                // machine with an instrument on the bus would overwrite the
+                // one line this state exists to show.
+                self.apply_one(Action::PeakSearch);
+                self.looked_for_instruments = true;
+                // A file of the shape MAESTRO writes, built here rather than
+                // through a writer because writing `.Clb` is deliberately not
+                // implemented: the rest of the file cannot be reproduced
+                // faithfully. See `mantaray_formats::clb` for the offset.
+                let mut bytes = vec![0u8; 1152];
+                for (index, value) in [19.1197f32, 0.420412, 3.060_48e-7, 4.5439, 0.0, 0.0]
+                    .iter()
+                    .enumerate()
+                {
+                    let at = 0x94 + index * 4;
+                    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                let path = std::env::temp_dir().join("mantaray-demo-recall.Clb");
+                if std::fs::write(&path, &bytes).is_ok() {
+                    self.apply_calibration_from(&path);
+                    let _ = std::fs::remove_file(&path);
+                }
                 return;
             }
             _ => {}

@@ -50,7 +50,7 @@ convert /tmp/shot.png -crop 900x300+0+150 +repage /tmp/crop.png
 Demo states live in `settle_layout()` in `crates/mantaray-gui/src/app.rs`:
 
 `tile` `rows` `help` `analyse` `dialogs` `charts` `hardware` `roi` `nolabels`
-`empty` `insight` `select` `isotope` `cal` `job`
+`empty` `insight` `select` `isotope` `cal` `recall` `job`
 
 Prefix with a theme to check a palette: `paper:isotope`, `amber:roi`.
 Some take extra variables, e.g. `MANTARAY_DEMO_ISOTOPE=eu152`.
