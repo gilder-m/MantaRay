@@ -201,15 +201,25 @@ little-endian `f32`s at offset `0x94`: the three energy terms, then the three
 shape terms. No units are stored; MAESTRO writes keV.
 
 This was recovered from samples rather than from a specification, which there
-is none of. Four `.Clb` files were compared against `.Spe` files saved by the
-same detector on the same days, whose `$MCA_CAL` and `$SHAPE_CAL` records state
-the calibration in plain text. The coefficients are at `0x94` in every one, to
-every digit the `.Spe` prints, across two calibration epochs of one instrument:
+is none of. Four `.Clb` files were read, three of them against `.Spe` files
+saved by the same detector on the same days, whose `$MCA_CAL` and `$SHAPE_CAL`
+records state the calibration in plain text. The coefficients are at `0x94` in
+every one, agreeing with the paired `.Spe` to six significant figures across
+three calibration epochs of one instrument and one file from another:
 
-| `.Clb` | a0 | a1 | a2 | agrees with |
-|---|---|---|---|---|
-| `9_19_2025` | 19.1197 | 0.420412 | 3.06048e-7 | `calibration_9_19_2025.Spe` |
-| `2_20_2026` | 16.5096 | 0.359362 | 2.27116e-7 | `Sample93179_2_27_2026.Spe` |
+| `.Clb` | a0 at `0x94` | `.Spe` states | agrees with |
+|---|---|---|---|
+| `9_19_2025` | 19.1196995 | 19.11970 | `calibration_9_19_2025.Spe` |
+| `2_20_2026` | 16.5096378 | 16.50960 | `Sample93179_2_27_2026.Spe` |
+| `11_10_2025` | 16.6497726 | 16.64980 | `sample93179_11_10-17_2025.Spe` |
+| `11-19-19-calibration` | 14.3407850 | — | a different detector, unpaired |
+
+Six significant figures rather than every printed digit: a `.Spe` prints seven,
+and on two of the three pairs the last of them differs by a unit or two. That
+is a rounding difference of about two parts in a million - seven thousandths of
+a keV at 3 MeV - and not a disagreement about where the coefficients live. Six
+consecutive values matching to six figures on four files is what identifies the
+offset.
 
 An earlier note here put "the gain" at `0x98`. The offset was right and the
 description was not: `0x98` is `a1`, the linear term, and the constant sits in

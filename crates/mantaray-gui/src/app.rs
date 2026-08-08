@@ -3147,11 +3147,27 @@ impl App {
                         )
                     })
                     .unwrap_or_default();
+                // `$SHAPE_CAL` is optional in a spectrum file, so a perfectly
+                // good energy calibration can arrive with no shape beside it.
+                // Assigning that absence would throw away the peak widths in
+                // hand - the same loss the guard above exists to prevent, one
+                // field over, and quieter: the energies would still be right,
+                // while peak fitting and every MDA computed from them lost
+                // what they were using.
+                let mut kept_a_shape = false;
                 if let Some(spectrum) = self.active_spectrum_mut() {
                     spectrum.energy_calibration = energy;
-                    spectrum.shape_calibration = shape;
+                    match shape {
+                        Some(shape) => spectrum.shape_calibration = Some(shape),
+                        None => kept_a_shape = spectrum.shape_calibration.is_some(),
+                    }
                 }
-                self.status = format!("calibration from {}: {described}", path.display());
+                let note = if kept_a_shape {
+                    " (it holds no peak shape; the one in hand is kept)"
+                } else {
+                    ""
+                };
+                self.status = format!("calibration from {}: {described}{note}", path.display());
             }
             Err(error) => self.status = format!("could not read the file: {error}"),
         }

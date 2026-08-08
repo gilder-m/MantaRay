@@ -8,17 +8,23 @@
 //! and then the three shape terms.
 //!
 //! That was not read off a specification - there is none - but recovered from
-//! samples with known answers. Four `.Clb` files were compared against `.Spe`
-//! files saved from the same detector on the same days, whose `$MCA_CAL` and
-//! `$SHAPE_CAL` records say in plain text what the calibration was. The
-//! coefficients appear at `0x94` in every one of them, to every digit the
-//! `.Spe` prints, across two different calibration epochs of the same
-//! instrument:
+//! samples with known answers. Four `.Clb` files were read, three of them
+//! against `.Spe` files saved from the same detector on the same days, whose
+//! `$MCA_CAL` and `$SHAPE_CAL` records say in plain text what the calibration
+//! was. The coefficients appear at `0x94` in every one, agreeing with the
+//! paired `.Spe` to six significant figures, across three calibration epochs of
+//! one instrument and one file from another:
 //!
-//! | File | a0 | a1 | a2 | matched against |
-//! |---|---|---|---|---|
-//! | `9_19_2025.Clb` | 19.1197 | 0.420412 | 3.06048e-7 | `calibration_9_19_2025.Spe` |
-//! | `2_20_2026.Clb` | 16.5096 | 0.359362 | 2.27116e-7 | `Sample93179_2_27_2026.Spe` |
+//! | File | a0 at `0x94` | `.Spe` states | matched against |
+//! |---|---|---|---|
+//! | `9_19_2025.Clb` | 19.1196995 | 19.11970 | `calibration_9_19_2025.Spe` |
+//! | `2_20_2026.Clb` | 16.5096378 | 16.50960 | `Sample93179_2_27_2026.Spe` |
+//! | `11_10_2025.Clb` | 16.6497726 | 16.64980 | `sample93179_11_10-17_2025.Spe` |
+//!
+//! Six figures rather than every printed digit: a `.Spe` prints seven, and on
+//! two of the three pairs the last differs by a unit or two - about two parts
+//! in a million, which is seven thousandths of a keV at 3 MeV. Six consecutive
+//! values matching to six figures on four files is what fixes the offset.
 //!
 //! An earlier note in `docs/formats.md` put "the gain" at `0x98`. That offset
 //! is right and the description was not: `0x98` is `a1`, the linear term, and

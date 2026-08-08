@@ -570,3 +570,45 @@ fn recalling_from_a_file_without_a_calibration_keeps_the_one_in_hand() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn recalling_an_energy_calibration_keeps_the_peak_shape_in_hand() {
+    // `$SHAPE_CAL` is optional in a spectrum file, so a perfectly good energy
+    // calibration can arrive with no shape beside it. Assigning that absence
+    // throws away the peak widths in hand, which is quieter than losing the
+    // energy calibration and no less costly: the energies stay right while
+    // peak fitting and every MDA computed from them lose what they used.
+    let mut app = App::headless();
+    let mut spectrum = Spectrum::new(1024);
+    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 0.36));
+    spectrum.shape_calibration = Some(mantaray_core::ShapeCalibration {
+        coefficients: [4.5439, 0.0, 0.0],
+    });
+    app.open_buffer("calibrated.Spe".into(), spectrum, None);
+
+    let path = scratch("energy-only.Spe");
+    std::fs::write(
+        &path,
+        "$DATA:\n0 3\n10\n12\n14\n16\n$MCA_CAL:\n3\n\
+         5.000000E+000 5.000000E-001 0.000000E+000 keV\n",
+    )
+    .expect("write");
+    app.apply_calibration_from(&path);
+
+    let spectrum = app.active_spectrum().expect("a spectrum");
+    assert_eq!(
+        spectrum
+            .energy_calibration
+            .as_ref()
+            .map(|energy| energy.coefficients[1]),
+        Some(0.5),
+        "the energy calibration should have been taken: {}",
+        app.status
+    );
+    assert!(
+        spectrum.shape_calibration.is_some(),
+        "the peak shape in hand was thrown away by a file that carries none: {}",
+        app.status
+    );
+    let _ = std::fs::remove_file(&path);
+}
