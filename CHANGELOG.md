@@ -40,6 +40,36 @@ against an instrument.
 
 ## Unreleased
 
+**macOS ships (2026-08-07).** It was held back on the rule that an untested
+binary for a platform nobody has used is a promise this project cannot keep.
+That has now been paid: an ORTEC 926 was driven from a Mac through a DPM-USB
+adapter over libusb, with no vendor driver and none of ORTEC's user-mode
+software - enumerated, identified, read out whole in about 90 ms, counted
+through a live preset it stopped itself on, and carried into the desktop
+application. There is no permission step; macOS needs no equivalent of the
+Linux udev rule, because nothing claims a vendor-specific interface. The
+archive is for Apple silicon and is unsigned, so the first run needs the
+quarantine attribute removed. Intel macs are still not built, for exactly the
+reason macOS was not.
+
+**A calibration can be recalled from the file that holds one (2026-08-07).**
+MAESTRO saves an energy and peak-shape calibration to a `.Clb` of its own so it
+can be put onto a spectrum taken later, and `Calibrate / Recall Calibration`
+read spectra only - so the one file whose entire purpose is this was the one
+thing it would not take. The format was decoded from samples against `.Spe`
+files the same detectors saved on the same days; `docs/formats.md` records what
+is known and, at more length, what is not. Writing `.Clb` is not implemented,
+because the rest of the file cannot be reproduced faithfully.
+
+Recalling is now the same operation wherever it is reached from. A `.JOB` gets
+`.Clb` files too, and the guards that used to exist only in the menu now hold
+in automation as well: a file carrying no calibration is refused rather than
+copied over a good one, and a peak shape already in hand outlives a file that
+records none - including a `.Clb` whose shape terms are all zero, which is the
+absence of a shape rather than a shape of zero width. Recalling with no
+spectrum open says so instead of reporting the coefficients it applied to
+nothing.
+
 **No nuclide library ships any more, and there is a way to build one
 (2026-08-07).** Line energies and emission probabilities are somebody's
 evaluation: they have authors, a publication cut-off and stated uncertainties,

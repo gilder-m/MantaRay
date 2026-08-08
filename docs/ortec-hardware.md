@@ -737,8 +737,25 @@ adapter `08134079`, and every assumption recorded above held on first contact:
   application - Scan, Open all, and a live detector window - through the same
   `Session` translation the Windows bridge uses.
 
-What is **still unverified**: macOS, which type-checks and nothing more; and
-multiple adapters on one Linux bus (the bench has one).
+What is **still unverified**: multiple adapters on one bus (each bench has one).
+
+**Verified on macOS, 2026-08-07.** The same path met an instrument on Apple
+silicon - macOS 26, an M-series Mac, adapter `11217584`, the one that had been
+on the Windows bench - and nothing about it was a special case:
+
+- enumeration found it by `0a2d:0016` and read its serial;
+- `SHOW_VERSION` answered `$F0926-001`, and the instrument reported 8192
+  channels through `SHOW_GAIN_CONVERSION`;
+- a whole 8192-channel spectrum read out in about 90 ms with process start-up
+  included;
+- a one-second live preset counted, stopped the instrument by itself and left
+  both clocks reading exactly 50 ticks, and a five-second one accumulated real
+  counts from the detector on the bench;
+- `mantaray-mcb serve` carried it into the desktop application, which drew it.
+
+**There was no permission step at all.** macOS has no equivalent of the udev
+rule below and needs none: the adapter's interface is vendor-specific, so no
+kernel driver claims it, and the first open succeeded as an ordinary user.
 
 The permission prediction below also held exactly - the first open failed with
 `errno 13` and nothing else was missing. The rule that fixed it:
@@ -757,12 +774,12 @@ Nothing for the instrument in hand on Windows: commands, clocks, configuration,
 gain, mode, integrals, the dual-port memory, whole spectra and the application
 itself all work with none of ORTEC's user-mode software.
 
-Two things remain, and neither is protocol work:
+Running the libusb path against hardware is done on both platforms that use it
+- Linux on 2026-08-05 and macOS on 2026-08-07, both recorded above - so the
+macOS build is released rather than merely compiled. One thing remains, and it
+is not protocol work:
 
-1. **Run the libusb path against hardware** on macOS. On Linux this is done -
-   see "Away from Windows" above; on macOS it compiles and nothing more is
-   claimed.
-2. **Windows without ORTEC's driver at all.** Binding the adapter to WinUSB
+1. **Windows without ORTEC's driver at all.** Binding the adapter to WinUSB
    instead would remove the last vendor dependency, and `nusb` already speaks
    that. The cost is that ORTEC's own software stops seeing the device while it
    is bound, so it is a choice rather than an improvement - on a machine with no

@@ -59,8 +59,15 @@ const EXPECTED_LENGTH: usize = 1152;
 pub struct Calibration {
     /// Channel to energy, in keV.
     pub energy: EnergyCalibration,
-    /// Peak width against energy.
-    pub shape: ShapeCalibration,
+    /// Peak width against energy, when the file records one.
+    ///
+    /// `None` when all three shape terms are zero. The slots are always
+    /// present in the file, so a `.Clb` written with no shape calibration
+    /// holds three zeros rather than nothing - and three zeros are not a peak
+    /// shape, they are the absence of one. Handing them back as a
+    /// [`ShapeCalibration`] would let a file that records no widths overwrite
+    /// measured ones with a curve that says every peak is infinitely narrow.
+    pub shape: Option<ShapeCalibration>,
 }
 
 /// Reads a `.Clb` file.
@@ -99,14 +106,18 @@ pub fn read(bytes: &[u8]) -> Result<Calibration, FormatError> {
             "a .Clb file",
         ));
     }
+    let shape = ShapeCalibration {
+        coefficients: [terms[3], terms[4], terms[5]],
+    };
     Ok(Calibration {
         energy: EnergyCalibration {
             coefficients: [terms[0], terms[1], terms[2]],
             units: "keV".into(),
         },
-        shape: ShapeCalibration {
-            coefficients: [terms[3], terms[4], terms[5]],
-        },
+        // The same test the rest of the program applies to a shape before it
+        // will use one, so a `.Clb` recording no widths reads as no widths
+        // rather than as widths of zero.
+        shape: shape.is_usable().then_some(shape),
     })
 }
 
@@ -161,7 +172,8 @@ mod tests {
         assert!(same(read.energy.coefficients[1], 0.420_412));
         assert!(same(read.energy.coefficients[2], 3.060_48e-7));
         assert_eq!(read.energy.units, "keV");
-        assert!(same(read.shape.coefficients[0], 4.5439));
+        let shape = read.shape.expect("this file records a peak shape");
+        assert!(same(shape.coefficients[0], 4.5439));
 
         // And the calibration it produces puts a channel where the instrument
         // does: the 661.657 keV line of Cs-137 lands near channel 1527 on this
@@ -184,8 +196,28 @@ mod tests {
         assert!(same(read.energy.coefficients[1], 0.359_362));
         // The shape terms are real here rather than a single width, which is
         // the case that would be missed if only the energy terms were read.
-        assert!(same(read.shape.coefficients[1], 7.744_61e-4));
-        assert!(read.shape.coefficients[2] < 0.0);
+        let shape = read.shape.expect("this file records a peak shape");
+        assert!(same(shape.coefficients[1], 7.744_61e-4));
+        assert!(shape.coefficients[2] < 0.0);
+    }
+
+    /// A `.Clb` whose shape slots are empty records no peak shape.
+    ///
+    /// The slots are always there, so "no shape calibration" reaches the reader
+    /// as three zeros. Handing those back as a `ShapeCalibration` would let a
+    /// file that says nothing about peak widths overwrite measured ones with a
+    /// curve saying every peak has zero width - which is not a shape the rest
+    /// of the program will even use, so the widths in hand would be lost for
+    /// nothing.
+    #[test]
+    fn a_file_recording_no_peak_shape_reads_as_none_rather_than_zero() {
+        let bytes = sample([19.1197, 0.420412, 3.060_48e-7], [0.0, 0.0, 0.0]);
+        let read = read(&bytes).expect("the energy calibration is still good");
+        assert!(same(read.energy.coefficients[1], 0.420_412));
+        assert_eq!(
+            read.shape, None,
+            "three zeros are the absence of a shape, not a shape of zero"
+        );
     }
 
     #[test]

@@ -200,6 +200,13 @@ The file is 1152 bytes and mostly zero. The six coefficients are consecutive
 little-endian `f32`s at offset `0x94`: the three energy terms, then the three
 shape terms. No units are stored; MAESTRO writes keV.
 
+The shape slots are always present, so a file recording no peak shape holds
+three zeros there. Those read as *no* shape rather than as a shape of zero
+width - a curve saying every peak is infinitely narrow is one nothing will use,
+so taking it literally would discard measured widths and put nothing in their
+place. A file with no gain is refused outright, for the stronger version of the
+same reason: every channel would map to one energy.
+
 This was recovered from samples rather than from a specification, which there
 is none of. Four `.Clb` files were read, three of them against `.Spe` files
 saved by the same detector on the same days, whose `$MCA_CAL` and `$SHAPE_CAL`

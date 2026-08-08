@@ -612,3 +612,98 @@ fn recalling_an_energy_calibration_keeps_the_peak_shape_in_hand() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// A `.Clb` file with the given terms, written where a test can reach it.
+fn written_clb(name: &str, energy: [f32; 3], shape: [f32; 3]) -> PathBuf {
+    let mut bytes = vec![0u8; 1152];
+    for (index, value) in energy.iter().chain(shape.iter()).enumerate() {
+        let at = 0x94 + index * 4;
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let path = scratch(name);
+    std::fs::write(&path, &bytes).expect("write the calibration");
+    path
+}
+
+/// A `.Clb` that records no peak shape must not take away the one in hand.
+///
+/// The shape slots are always present in the file, so "no shape calibration"
+/// arrives as three zeros. Reading those as a shape replaced measured widths
+/// with a curve saying every peak has zero width - which nothing will use, so
+/// the widths were lost and nothing gained, and the status line said only that
+/// a calibration had been applied.
+#[test]
+fn a_clb_recording_no_peak_shape_keeps_the_one_in_hand() {
+    let mut app = App::headless();
+    let mut spectrum = Spectrum::new(1024);
+    spectrum.shape_calibration = Some(mantaray_core::ShapeCalibration {
+        coefficients: [4.5439, 0.0, 0.0],
+    });
+    app.open_buffer("calibrated.Spe".into(), spectrum, None);
+
+    let path = written_clb(
+        "no-shape.Clb",
+        [19.1197, 0.420412, 3.060_48e-7],
+        [0.0, 0.0, 0.0],
+    );
+    app.apply_calibration_from(&path);
+
+    let spectrum = app.active_spectrum().expect("a spectrum");
+    // A `.Clb` stores single-precision floats, so the widened value is close
+    // to the printed one rather than equal to it.
+    let gain = spectrum
+        .energy_calibration
+        .as_ref()
+        .map(|energy| energy.coefficients[1])
+        .expect("the energy calibration should still have been taken");
+    assert!(
+        (gain - 0.420_412).abs() < 0.420_412 * 1e-6,
+        "the energy calibration should still have been taken, got {gain}: {}",
+        app.status
+    );
+    assert_eq!(
+        spectrum
+            .shape_calibration
+            .as_ref()
+            .map(|shape| shape.coefficients[0]),
+        Some(4.5439),
+        "the measured peak shape was replaced by one of zero width: {}",
+        app.status
+    );
+    assert!(
+        app.status.contains("peak shape"),
+        "the status line should say the shape in hand was kept: {}",
+        app.status
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Recalling with nothing to recall onto must not report success.
+///
+/// Every window can be closed, and the calibration menu is still there. The
+/// status line used to name the coefficients it had read while no spectrum had
+/// received them - the same false report the other guards exist to prevent,
+/// arriving at the end instead of the beginning.
+#[test]
+fn recalling_with_no_spectrum_open_says_so() {
+    let mut app = App::headless();
+    let ids: Vec<usize> = app.windows.iter().map(|window| window.id).collect();
+    for id in ids {
+        app.apply_action(Action::ForceCloseWindow(id));
+    }
+    assert!(app.active_spectrum().is_none(), "every window is closed");
+
+    let path = written_clb(
+        "nowhere.Clb",
+        [19.1197, 0.420412, 3.060_48e-7],
+        [4.5439, 0.0, 0.0],
+    );
+    app.apply_calibration_from(&path);
+
+    assert!(
+        !app.status.contains("0.420412"),
+        "the status named a calibration that was applied to nothing: {}",
+        app.status
+    );
+    let _ = std::fs::remove_file(&path);
+}

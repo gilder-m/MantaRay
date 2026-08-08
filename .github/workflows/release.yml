@@ -4,9 +4,11 @@ name: Release
 # attaches the archives to a GitHub release, with a SHA-256 for each so a
 # download can be checked against what was built here.
 #
-# Linux and Windows ship. macOS is built by CI on main and is not released yet:
-# nothing has run there on real hardware, and an untested binary for a platform
-# nobody has used is a promise this project cannot keep.
+# Linux, Windows and macOS on Apple silicon ship. macOS was held back until
+# somebody had driven an instrument from one, which happened on 2026-08-07: an
+# ORTEC 926 through a DPM-USB adapter, over libusb with no vendor driver, read
+# out and stepped through a preset from a Mac. Intel macs are still not built,
+# for the same reason macOS was not: nothing has run there.
 on:
   push:
     tags: ["v*"]
@@ -32,11 +34,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: MantaRay-linux-x86_64.tar.gz
-          # macOS is built by CI on every push and is deliberately not
-          # released. Nothing has been run there on real hardware, and an
-          # untested binary for a platform nobody has used is a promise this
-          # project cannot keep. Add it back when somebody has driven an
-          # instrument from one.
+          # Apple silicon only. macos-latest runners are arm64, which is what
+          # the instrument was driven from; an Intel build would be the same
+          # untested promise this list used to refuse to make.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: MantaRay-macos-arm64.tar.gz
     steps:
       - uses: actions/checkout@v4
 
@@ -124,11 +127,13 @@ jobs:
             cat SHA256SUMS.txt
             echo '```'
             echo
-            echo '`sha256sum -c SHA256SUMS.txt` on Linux, or'
+            echo '`sha256sum -c SHA256SUMS.txt` on Linux and macOS, or'
             echo '`Get-FileHash <file> -Algorithm SHA256` on Windows.'
             echo
-            echo 'macOS is built by CI but not released: nothing has been run'
-            echo 'there against an instrument yet.'
+            echo 'The macOS build is for Apple silicon and is unsigned, so the'
+            echo 'first run needs `xattr -d com.apple.quarantine` on the'
+            echo 'extracted binaries or a right-click Open. Intel macs are not'
+            echo 'built: nothing has run there.'
           } > release-notes.md
 
       - uses: softprops/action-gh-release@v2
@@ -138,4 +143,5 @@ jobs:
           files: |
             MantaRay-windows-x86_64.zip
             MantaRay-linux-x86_64.tar.gz
+            MantaRay-macos-arm64.tar.gz
             SHA256SUMS.txt

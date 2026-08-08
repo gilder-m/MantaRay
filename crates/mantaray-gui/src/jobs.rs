@@ -333,16 +333,33 @@ impl JobHost for App {
         Ok(())
     }
 
+    /// The same recall the menu does, through the same reader.
+    ///
+    /// A `.JOB` reaches this and so does `Calibrate / Recall Calibration`; when
+    /// the two read files differently, automation quietly does something else
+    /// than the operator watching it would. So both take a `.Clb` as well as a
+    /// spectrum, and both refuse to overwrite a calibration in hand with a file
+    /// that carries none.
     fn recall_calibration(&mut self, path: &str) -> Result<(), JobError> {
         let target = self.job_path(path);
-        let other = mantaray_formats::load_spectrum(&target)
+        let (energy, shape) = mantaray_formats::load_calibration(&target)
             .map_err(|error| JobError::host(error.to_string()))?;
         self.job_variables
             .set_spectrum_path(&target.display().to_string());
-        let (energy, shape) = (other.energy_calibration, other.shape_calibration);
+        let Some(energy) = energy else {
+            return Err(JobError::host(format!(
+                "{} holds no calibration",
+                target.display()
+            )));
+        };
         if let Some(spectrum) = self.active_spectrum_mut() {
-            spectrum.energy_calibration = energy;
-            spectrum.shape_calibration = shape;
+            spectrum.energy_calibration = Some(energy);
+            // Only when the file has one to give: a spectrum need not carry
+            // `$SHAPE_CAL`, and assigning its absence would throw away the
+            // peak widths the run is about to be measured with.
+            if let Some(shape) = shape {
+                spectrum.shape_calibration = Some(shape);
+            }
         }
         Ok(())
     }

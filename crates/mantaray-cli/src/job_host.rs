@@ -318,13 +318,26 @@ impl JobHost for CliSession {
         Ok(())
     }
 
+    /// Recalls a calibration from a `.Clb` or from any spectrum file.
+    ///
+    /// The same reader and the same guards the desktop application uses, so a
+    /// `.JOB` run here and the same `.JOB` run there do the same thing: a file
+    /// carrying no calibration is refused rather than assigned, and a peak
+    /// shape already in hand outlives a file that records none.
     fn recall_calibration(&mut self, path: &str) -> Result<(), JobError> {
         let source = self.resolve(path);
-        let other = load_spectrum(&source).map_err(io)?;
-        let (energy, shape) = (other.energy_calibration, other.shape_calibration);
+        let (energy, shape) = mantaray_formats::load_calibration(&source).map_err(io)?;
+        let Some(energy) = energy else {
+            return Err(JobError::host(format!(
+                "{} holds no calibration",
+                source.display()
+            )));
+        };
         let target = self.active_mut();
-        target.energy_calibration = energy;
-        target.shape_calibration = shape;
+        target.energy_calibration = Some(energy);
+        if let Some(shape) = shape {
+            target.shape_calibration = Some(shape);
+        }
         self.variables
             .set_spectrum_path(&source.display().to_string());
         Ok(())

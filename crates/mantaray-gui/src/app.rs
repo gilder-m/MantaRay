@@ -3113,21 +3113,7 @@ impl App {
     /// Takes it from a `.Clb`, which holds a calibration and nothing else, or
     /// from any spectrum file, which carries the one it was saved with.
     pub fn apply_calibration_from(&mut self, path: &std::path::Path) {
-        let is_clb = path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("clb"));
-        let found = if is_clb {
-            std::fs::read(path)
-                .map_err(|error| error.to_string())
-                .and_then(|bytes| {
-                    mantaray_formats::clb::read(&bytes).map_err(|error| error.to_string())
-                })
-                .map(|calibration| (Some(calibration.energy), Some(calibration.shape)))
-        } else {
-            load_spectrum(path)
-                .map_err(|error| error.to_string())
-                .map(|other| (other.energy_calibration, other.shape_calibration))
-        };
+        let found = mantaray_formats::load_calibration(path).map_err(|error| error.to_string());
 
         match found {
             Ok((energy, shape)) => {
@@ -3150,12 +3136,18 @@ impl App {
                 // while peak fitting and every MDA computed from them lost
                 // what they were using.
                 let mut kept_a_shape = false;
-                if let Some(spectrum) = self.active_spectrum_mut() {
-                    spectrum.energy_calibration = Some(energy);
-                    match shape {
-                        Some(shape) => spectrum.shape_calibration = Some(shape),
-                        None => kept_a_shape = spectrum.shape_calibration.is_some(),
-                    }
+                // Nothing to put it on is not a calibration applied. Saying so
+                // would be the same false report the guards above exist to
+                // prevent, at the end instead of the beginning: the line would
+                // name the coefficients and the spectrum would not have them.
+                let Some(spectrum) = self.active_spectrum_mut() else {
+                    self.status = "open a spectrum first".into();
+                    return;
+                };
+                spectrum.energy_calibration = Some(energy);
+                match shape {
+                    Some(shape) => spectrum.shape_calibration = Some(shape),
+                    None => kept_a_shape = spectrum.shape_calibration.is_some(),
                 }
                 let note = if kept_a_shape {
                     " (it holds no peak shape; the one in hand is kept)"
