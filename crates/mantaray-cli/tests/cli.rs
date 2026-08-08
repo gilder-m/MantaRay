@@ -493,3 +493,85 @@ fn a_job_with_an_unknown_command_fails_with_its_line() {
     assert!(!ok);
     assert!(stderr.contains("line 2"), "{stderr}");
 }
+
+/// `RECALL_CALIBRATION` takes a `.Clb`, which is the file that carries one.
+///
+/// The desktop menu learned to read a `.Clb` before automation did, so a `.JOB`
+/// naming one failed outright with "no reader for that extension" - the same
+/// command doing two different things depending on who ran it. Both go through
+/// the one reader now.
+#[test]
+fn a_job_recalls_a_calibration_from_a_clb_file() {
+    let dir = workspace();
+    let spectrum = dir.join("uncalibrated.chn");
+    sample(&spectrum);
+
+    // A `.Clb` of the shape MAESTRO writes: six little-endian floats at 0x94.
+    let mut bytes = vec![0u8; 1152];
+    for (index, value) in [19.1197f32, 0.420412, 3.060_48e-7, 4.5439, 0.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        let at = 0x94 + index * 4;
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let calibration = dir.join("detector.Clb");
+    std::fs::write(&calibration, &bytes).unwrap();
+
+    let job = dir.join("recall-clb.job");
+    std::fs::write(
+        &job,
+        format!(
+            "RECALL \"{}\"\nRECALL_CALIBRATION \"{}\"\nSAVE \"FROM-A-CLB.CHN\"\n",
+            spectrum.display(),
+            calibration.display()
+        ),
+    )
+    .unwrap();
+
+    let (_, stderr, ok) = run(&["job", job.to_str().unwrap()]);
+    assert!(ok, "a .Clb should be recallable from a job: {stderr}");
+
+    let saved = mantaray_formats::load_spectrum(dir.join("FROM-A-CLB.CHN")).unwrap();
+    let energy = saved
+        .energy_calibration
+        .expect("the calibration should have been applied");
+    assert!(
+        (energy.coefficients[1] - 0.420_412).abs() < 1e-6,
+        "got {:?}",
+        energy.coefficients
+    );
+}
+
+/// A file holding no calibration must not wipe the one already in hand.
+///
+/// The guard the desktop application has, in the path automation takes. A job
+/// that quietly replaced a good calibration with nothing would put every energy
+/// in every report it went on to write silently wrong.
+#[test]
+fn a_job_refuses_to_recall_a_calibration_from_a_file_that_has_none() {
+    let dir = workspace();
+    let spectrum = dir.join("calibrated-source.chn");
+    sample(&spectrum);
+
+    // A .Clb of the right length holding nothing at all.
+    let empty = dir.join("empty.Clb");
+    std::fs::write(&empty, vec![0u8; 1152]).unwrap();
+
+    let job = dir.join("recall-empty.job");
+    std::fs::write(
+        &job,
+        format!(
+            "RECALL \"{}\"\nRECALL_CALIBRATION \"{}\"\n",
+            spectrum.display(),
+            empty.display()
+        ),
+    )
+    .unwrap();
+
+    let (_, stderr, ok) = run(&["job", job.to_str().unwrap()]);
+    assert!(
+        !ok,
+        "a file with no calibration should stop the job rather than empty the calibration: {stderr}"
+    );
+}

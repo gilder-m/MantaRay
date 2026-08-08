@@ -190,12 +190,57 @@ A four-column form (`nuclide,half_life_s,energy_kev,yield_percent`) is also
 accepted. Rows are grouped by nuclide, keeping the order of first appearance,
 because reports follow library order.
 
-## Formats not implemented
+## `.Clb` - a calibration on its own
 
-- **`.Clb`** - a 768-byte ORTEC calibration file. One sample was available; the
-  gain float is identifiable at offset 0x98 (0.36605 keV per channel, matching the
-  `.Spe` files from the same detector) but a single file is not enough to decode
-  the rest safely. Send more samples and it can be finished.
+MAESTRO saves an energy and peak-shape calibration to a file of its own so it
+can be put onto a spectrum taken later. **Calibrate / Recall Calibration**
+reads one.
+
+The file is 1152 bytes and mostly zero. The six coefficients are consecutive
+little-endian `f32`s at offset `0x94`: the three energy terms, then the three
+shape terms. No units are stored; MAESTRO writes keV.
+
+The shape slots are always present, so a file recording no peak shape holds
+three zeros there. Those read as *no* shape rather than as a shape of zero
+width - a curve saying every peak is infinitely narrow is one nothing will use,
+so taking it literally would discard measured widths and put nothing in their
+place. A file with no gain is refused outright, for the stronger version of the
+same reason: every channel would map to one energy.
+
+This was recovered from samples rather than from a specification, which there
+is none of. Four `.Clb` files were read, three of them against `.Spe` files
+saved by the same detector on the same days, whose `$MCA_CAL` and `$SHAPE_CAL`
+records state the calibration in plain text. The coefficients are at `0x94` in
+every one, agreeing with the paired `.Spe` to six significant figures across
+three calibration epochs of one instrument and one file from another:
+
+| `.Clb` | a0 at `0x94` | `.Spe` states | agrees with |
+|---|---|---|---|
+| `9_19_2025` | 19.1196995 | 19.11970 | `calibration_9_19_2025.Spe` |
+| `2_20_2026` | 16.5096378 | 16.50960 | `Sample93179_2_27_2026.Spe` |
+| `11_10_2025` | 16.6497726 | 16.64980 | `sample93179_11_10-17_2025.Spe` |
+| `11-19-19-calibration` | 14.3407850 | — | a different detector, unpaired |
+
+Six significant figures rather than every printed digit: a `.Spe` prints seven,
+and on two of the three pairs the last of them differs by a unit or two. That
+is a rounding difference of about two parts in a million - seven thousandths of
+a keV at 3 MeV - and not a disagreement about where the coefficients live. Six
+consecutive values matching to six figures on four files is what identifies the
+offset.
+
+An earlier note here put "the gain" at `0x98`. The offset was right and the
+description was not: `0x98` is `a1`, the linear term, and the constant sits in
+front of it at `0x94`. An earlier sample was also recorded as 768 bytes rather
+than 1152.
+
+**Most of the file is still unknown.** Two 16-bit fields at `0x24` and `0x2c`
+hold 3 in every sample, matching the term counts the paired `.Spe` files report
+- but three samples all saying "3" is not evidence, so they are not read. The
+file also carries its own name, a timestamp and the Windows path it was written
+from. None of that is a calibration and none of it is read. Writing `.Clb` is
+not implemented, because the rest of the file cannot be reproduced faithfully.
+
+## Formats not implemented
 - **`.Cfg`, `.Cxt`** - detector configuration and context files. MantaRay keeps its
   own detector list and settings as JSON.
 - **`.Cnf`** (Canberra Genie) and **IEC-1455** - not ORTEC formats, but both are

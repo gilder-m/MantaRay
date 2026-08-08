@@ -17,6 +17,7 @@
 
 pub mod ascii;
 pub mod chn;
+pub mod clb;
 pub mod library;
 pub mod list_mode;
 pub mod n42;
@@ -28,7 +29,7 @@ pub mod spe;
 
 use std::path::Path;
 
-use mantaray_core::{RoiSet, Spectrum};
+use mantaray_core::{EnergyCalibration, RoiSet, ShapeCalibration, Spectrum};
 use thiserror::Error;
 
 pub use ascii::AsciiOptions;
@@ -274,6 +275,34 @@ fn looks_like_ascii_channels(text: &str) -> bool {
         counted += 1;
     }
     counted >= 3
+}
+
+/// The calibration a file carries, whether that is all it carries or not.
+///
+/// A `.Clb` holds a calibration and nothing else; every spectrum format holds
+/// the one it was saved with. Recalling a calibration accepts either, so the
+/// choice between them is made here rather than at each place that recalls -
+/// the desktop menu and `.JOB` automation both reach an instrument's
+/// calibration this way, and a guard written at only one of them is a guard
+/// that half the program does not have.
+///
+/// Either half may be absent, and absent is reported rather than substituted:
+/// a spectrum file need not carry `$SHAPE_CAL`, and a `.Clb` may record no
+/// widths. It is for the caller to decide what to do with what is missing,
+/// and the useful decision is almost always to keep what is already in hand.
+pub fn load_calibration(
+    path: impl AsRef<Path>,
+) -> Result<(Option<EnergyCalibration>, Option<ShapeCalibration>), FormatError> {
+    let path = path.as_ref();
+    let is_clb = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("clb"));
+    if is_clb {
+        let calibration = clb::read(&std::fs::read(path)?)?;
+        return Ok((Some(calibration.energy), calibration.shape));
+    }
+    let spectrum = load_spectrum(path)?;
+    Ok((spectrum.energy_calibration, spectrum.shape_calibration))
 }
 
 /// Loads a spectrum, choosing the reader by extension.
