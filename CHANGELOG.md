@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2-alpha (2026-08-12)
 
 **A count already running when the window opens keeps its start date
 (2026-08-11).** Start an acquisition, close MantaRay, open it again, and the
