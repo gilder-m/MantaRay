@@ -55,8 +55,26 @@ nothing more.
 It selects photons — the `g` rows — and drops betas, conversion electrons and
 alphas, none of which make a peak in a gamma spectrum. It tells gammas, X-rays
 and the annihilation line apart from the export's own subtype column. Where the
-same line appears under more than one decay branch it keeps the strongest, and
-it marks each nuclide's strongest true gamma as the key line.
+same line appears under more than one decay branch it keeps the strongest.
+
+It marks the **key lines** — the lines the analysis requires before it will name
+a nuclide, all of them rather than any one of them. So the set has to be lines
+that arrive whenever the nuclide does: every true gamma at least half as
+probable as that nuclide's strongest, and at most two. Co-60 is keyed on 1173
+and 1332 together, Tl-208 on 583 and 2614, Ba-133 on 81 and 356; Cs-137 emits
+one gamma and is keyed on it alone. One key line is a weak test for a nuclide
+that always emits two — any stray peak near 1332 would then pass for Co-60 —
+and a long list is the opposite failure, because a single line lost to a short
+count or a poor efficiency loses the nuclide with it.
+
+The cap is two rather than three because the half-as-strong rule is *relative*:
+a nuclide whose strongest gamma is faint has a low bar for the next one, so a
+spread-out decay scheme collects more required lines than a clean one, which is
+backwards. Eu-152 is the case in point — its strongest gamma is 28.53%, so a
+third line arrives at 1408 keV and 20.87%, and requiring that puts this
+program's own calibration source out of reach of a NaI detector or a brief
+count. X-rays and the annihilation line are never keyed on: neither says which
+nuclide it came from.
 
 It keeps each **decaying state** separate, which matters more than it sounds.
 The export gives one row per emission per *parent state*, and a nuclide's
@@ -80,18 +98,24 @@ undetermined, the result says undetermined rather than substituting a number.
 
 ### Getting the export
 
-A prebuilt export and library are attached to the
-[releases](https://github.com/gilder-m/MantaRay/releases) so you do not have to
-assemble one to get started.
+**No export or library is attached to the releases yet**, so one has to be
+assembled before the converter above has anything to read. This said otherwise
+for a while, which cost somebody an afternoon looking for a file that was never
+there.
 
-To build the export yourself, the compiled NNDC gamma database used here comes
-from the Berkeley RadWatch [`spectral-analysis`](https://github.com/RadWatch)
-project, where it is produced with
-[carsus](https://github.com/tardis-sn/carsus) — the TARDIS project's tool for
-retrieving and caching NNDC tables. The
+Two sources serve the same ENSDF evaluations. The
 [IAEA Live Chart of Nuclides API](https://www-nds.iaea.org/relnsd/vcharthtml/api_v0_guide.html)
-serves the same ENSDF evaluations one nuclide at a time and is a good check
-against a single value.
+answers one nuclide at a time over HTTP and needs no account, which makes it the
+practical way to build an export for a chosen list of nuclides - it carries the
+energies, intensities, half-lives, the parent state's level energy and the ENSDF
+publication cut-off, which is every column the converter looks for. NuDat's own
+bulk export is the other, and is the better one if you want everything at once.
+
+The compiled NNDC gamma database this converter was developed against comes
+from the Berkeley RadWatch
+[`spectral-analysis`](https://gitlab.com/radwatch/spectral-analysis) project,
+where it is produced with [carsus](https://github.com/tardis-sn/carsus) — the
+TARDIS project's tool for retrieving and caching NNDC tables.
 
 ## Credit and terms
 
@@ -102,9 +126,9 @@ against a single value.
   required.
 - **[carsus](https://github.com/tardis-sn/carsus)**, TARDIS project — retrieval
   and caching.
-- **Dani Solakian** and Berkeley **[RadWatch](https://github.com/RadWatch)** —
-  the compiled gamma database this converter is built around, used with
-  permission.
+- **Dani Solakian** and Berkeley
+  **[RadWatch](https://gitlab.com/radwatch/spectral-analysis)** — the compiled
+  gamma database this converter is built around, used with permission.
 
 If you publish a result computed with a library built this way, cite the
 evaluation, not this program. The provenance line the converter prints is there

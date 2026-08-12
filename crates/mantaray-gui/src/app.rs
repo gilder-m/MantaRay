@@ -3337,6 +3337,17 @@ impl App {
                 self.dialogs.open(Dialog::McbProperties);
                 return;
             }
+            // The library editor over a real library, which is the only way to
+            // see how it holds one: the list is as long as whatever was loaded,
+            // and the sample library is too short to show what a long one does.
+            "library" => {
+                if self.library.is_empty() {
+                    self.library = NuclideLibrary::sample_for_tests();
+                }
+                self.dialogs.library_selection = Some(0);
+                self.dialogs.open(Dialog::Library);
+                return;
+            }
             "charts" => {
                 // Filled QA and efficiency charts, for the screenshots.
                 let mut chart = QaChart::new(
@@ -3608,6 +3619,20 @@ impl App {
                         self.library_path = Some(path.clone());
                     }
                     Err(error) => self.status = error.to_string(),
+                },
+                // `.json` is this program's own spectrum format and also the
+                // lossless form of a library, so the extension does not say
+                // which and the contents have to. A library read that comes
+                // back with nuclides in it settles the question; anything else
+                // is a spectrum, including a file that is neither, so that its
+                // complaint is the spectrum reader's rather than this one's.
+                "json" => match mantaray_formats::library::load(path) {
+                    Ok(library) if !library.is_empty() => {
+                        self.status = format!("library {} loaded", path.display());
+                        self.library = library;
+                        self.library_path = Some(path.clone());
+                    }
+                    _ => self.recall_path(path.clone()),
                 },
                 _ => self.recall_path(path.clone()),
             }

@@ -1,5 +1,133 @@
 # Changelog
 
+## Unreleased
+
+**A count already running when the window opens keeps its start date
+(2026-08-11).** Start an acquisition, close MantaRay, open it again, and the
+start time was gone - reported from the bench, and the reason a 5073-second
+count came off it with no date at all. Nothing on this road reports a
+measurement date: `MIOGetStartTime` belongs to ORTEC's Windows library and has
+no counterpart over libusb, so a session that did not watch the run begin had
+nothing to ask. The real-time clock is what survives - it advances only while
+the run does - so the start is reconstructed as that many seconds ago. Only
+while the instrument is still counting, because an idle one holding this
+morning's spectrum would otherwise be dated to this minute; and only into a gap,
+because a start this session saw for itself is the real one. A run stopped and
+resumed reads late by however long it stood paused, which is why this is a
+reconstruction and is written down as one.
+
+**A spectrum with no start time no longer claims to have been counted in 1970
+(2026-08-11).** `.Spe` was written with `01/01/1970 00:00:00` whenever the start
+was not recorded, and that reads back as a measurement made at the Unix epoch -
+a date nothing can tell from one that was meant, and one a decay correction will
+use without complaint, wrong by decades. The keyword is now left out when there
+is no date, which is what the `.Chn` writer has always done by leaving the field
+blank; and the old placeholder is read as the absence it stood for, so files
+already carrying it stop asserting a date. Found on a 5073-second Cs-137 count
+off the bench, which `info` reported as acquired on 1 January 1970.
+
+**The nuclide report's numbers are four significant figures.** The text report
+kept three decimal places of its own after the interface's table had moved on,
+so a detection limit printed as `2528199.244` and a small activity as `0.003` -
+and a report could disagree with the window it came from.
+
+**`docs/nuclide-data.md` no longer promises an export that is not there.** It
+said a prebuilt NNDC export and library were attached to the releases; neither
+is, on any of them. It now says so, and points at the two sources that do serve
+the evaluations.
+
+**The nuclide library dialog shows more than its first few nuclides
+(2026-08-11).** The list was built inside a horizontal layout, and a scroll area
+lays its contents out the way it was reached - so the names ran off the right
+edge in a single line instead of stacking, and everything past the width of the
+window was unreachable. With 86 nuclides loaded, most of the library could not
+be selected at all.
+
+**A `.json` library opens by being dropped in or named on the command line.**
+Only `.lib` and `.csv` were recognised there, so the lossless form of a library -
+the one `mantaray library` writes by default - was read as a spectrum instead
+and refused with `missing field mantaray`. A `.json` is now offered to the
+library reader first and treated as a spectrum only when it holds no nuclides.
+
+**A half life is written in scientific notation when it needs to be.** K-40's
+read `1247973344.4968 y`, which claims a precision to the ten-thousandth of a
+year that no evaluation states - the digits past the fourth are the length of a
+year, not a measurement. Four significant figures throughout, so `1.248e9 y`.
+
+Significant figures, not decimal places, which is a distinction this got wrong
+on the first pass: `{:.4}` gave nine figures to an activity of 37 000 Bq - a
+microcurie, squarely in the range an operator meets - and two to one of 0.001
+Bq, so the wall of digits it was meant to remove survived in the middle of the
+range while the weak end lost precision instead. A number is now four figures
+wherever it falls, with one changeover into scientific notation rather than a
+jump from `99999.9876` to `1e5`. An infinity reads `inf` rather than
+`NaNe2147483647`.
+
+**Looking at a half life does not change it.** The field showing one shortens
+it for the eye, and egui fills its editor from that shortened text the moment
+the field takes focus, then reads the text back when focus leaves - whether or
+not anybody typed. So merely clicking in the field rewrote the number: Co-60's
+half life lost twelve hours, K-40's ten thousand years, and `Save as...` would
+have written the rounding down as though it were evaluated. The field now
+recognises its own shortened output and keeps the value that produced it, while
+anything actually typed is still read as typed.
+
+**A nuclide is keyed on every strong line it has, not only its strongest.**
+Confirmation requires *all* of a nuclide's key lines, so keying Co-60 on 1332
+keV alone let any stray peak there pass for cobalt while its 1173 keV twin went
+unasked for. Every true gamma at least half as probable as the strongest is now
+a key line, up to two - which gives the pairs a spectroscopist would use
+(Co-60 1173/1332, Tl-208 583/2614, Ba-133 81/356) without making a nuclide with
+a dozen strong lines the hardest one to find. X-rays and the annihilation line
+are never keyed on, because neither says which nuclide it came from.
+
+The cap is two rather than three because the half-as-strong rule is relative: a
+nuclide whose strongest gamma is faint has a low bar for the next one, so a
+spread-out decay scheme collects more required lines than a clean one, which is
+backwards - those are exactly the lines a short count loses. Eu-152 is the case
+in point, and it is this program's own calibration source: leading at 28.53%,
+it admitted a third line at 1408 keV and 20.87%, and requiring that would have
+put Eu-152 beyond a NaI detector or a brief count.
+
+**A wedged adapter can be recovered away from Windows (2026-08-11).**
+`mantaray-mcb usbfix` existed only on the platform that has ORTEC's driver. Off
+it, an adapter whose reply stream had slipped - answering every question with
+the answer to the one before, which looks like a working instrument giving
+wrong numbers - could be fixed by nothing but the cable. It is now the same
+three steps on every platform: drain the queued replies, then, with `--cycle`,
+a replug in software, and a plain refusal when neither reaches it. A second 926
+on a Mac turned up already in that state, which is how this was found.
+
+Nothing settles automatically, and that is deliberate rather than an omission.
+The Linux bench had already established that draining an adapter that was
+working stops it working; the same thing on macOS turned three answers out of
+three into none, and `docs/ortec-hardware.md` now records the mechanism, which
+is specific to libusb. Settling drains before clearing the endpoint halts, not
+after, because clearing a halt resets the data toggle that the draining is
+liable to have disturbed.
+
+**`mantaray-mcb usbspectrum --out` writes the file it promised.** The flag was
+in the usage text on the libusb platforms and did nothing; the spectrum was read
+and then dropped. It now saves through the same writer the Windows `dump` uses,
+with both clocks in the instrument's own ticks and marked regions carried over
+as regions rather than as one per channel. The file records the model the way
+`probe` prints it - `0926-001`, not the raw `$F0926-001` record - and `--out`
+with no file after it says so before the adapter is opened rather than reading
+four thousand channels and then exiting quietly as though it had written them.
+
+**The 926 bench test can be run the way it says to run it.** Its three tests
+each claim the adapter exclusively and cargo runs tests in parallel, so at most
+one could pass and the others failed reporting a busy interface - which reads as
+broken hardware. They now take turns on the same lock `bridge_hardware.rs` uses.
+
+**The command-line tests stop pulling their fixture out from under each other.**
+Four of them share one library file and rewrote it on every call, so cargo
+running them in parallel meant one test truncating the file while another read
+it - which surfaced as `peaks` exiting with "missing library rows" and an empty
+stdout, reading as a broken peak search rather than as a broken fixture. It
+failed that way on CI on 2026-08-12. The fixture is now written once per test
+binary.
+
 ## 0.2.1-alpha (2026-08-08)
 
 **macOS ships (2026-08-07).** It was held back on the rule that an untested

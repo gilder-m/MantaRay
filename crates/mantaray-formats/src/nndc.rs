@@ -162,12 +162,7 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
                 .partial_cmp(&a.yield_percent)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        if let Some(first) = peaks
-            .iter_mut()
-            .find(|peak| peak.photon == PhotonKind::Gamma)
-        {
-            first.key_line = true;
-        }
+        mark_key_lines(&mut peaks);
         library.push(Nuclide::new(&name, entry.half_life_seconds, peaks));
     }
 
@@ -373,6 +368,59 @@ impl Level {
     }
 }
 
+/// How faint a gamma may be, against the strongest, and still be required.
+///
+/// Half. A line at least half as probable as the strongest is one that arrives
+/// whenever the nuclide does, so asking for it costs no real identification;
+/// below that the line starts to be one a short count or a poor efficiency can
+/// genuinely miss.
+const KEY_LINE_FRACTION: f64 = 0.5;
+
+/// At most this many, however many clear the fraction.
+///
+/// Every key line is another line that must be found, so a nuclide with a
+/// dozen strong gammas would otherwise become the hardest to identify rather
+/// than the easiest.
+///
+/// Two, and the reason is that the fraction is relative. A nuclide whose
+/// strongest gamma is faint has a low bar for "half as strong", so a spread-out
+/// decay scheme sweeps in more required lines than a clean one - which is
+/// backwards, because those are exactly the lines a short count loses. Eu-152
+/// is the case that shows it: its strongest gamma is 28.53%, so a third line
+/// arrives at 1408 keV and 20.87%, and requiring it puts this program's own
+/// calibration source out of reach of a NaI detector or a brief count. Every
+/// pair the rule exists to capture - Co-60 1173/1332, Tl-208 583/2614, Ba-133
+/// 81/356 - is a pair.
+const KEY_LINE_LIMIT: usize = 2;
+
+/// Marks the lines a nuclide has to show to be believed.
+///
+/// Not the single strongest. A key line is a *requirement* - the analysis
+/// confirms a nuclide only when every one of them is present - and one line is
+/// too weak a test for a nuclide that always emits two. Co-60's 1173 and 1332
+/// keV arrive together in a fixed ratio, and asking for the pair is what tells
+/// it from a stray peak near 1332; the same is true of Tl-208's 583 and 2614,
+/// and of Ba-133's 81 and 356.
+///
+/// `peaks` must already be sorted strongest first.
+fn mark_key_lines(peaks: &mut [LibraryPeak]) {
+    let strongest = peaks
+        .iter()
+        .find(|peak| peak.photon == PhotonKind::Gamma)
+        .map(|peak| peak.yield_percent);
+    let Some(strongest) = strongest else {
+        return; // X-rays and annihilation only: nothing specific to key on.
+    };
+    for peak in peaks
+        .iter_mut()
+        .filter(|peak| peak.photon == PhotonKind::Gamma)
+        .filter(|peak| peak.yield_percent >= strongest * KEY_LINE_FRACTION)
+        .take(KEY_LINE_LIMIT)
+    {
+        peak.key_line = true;
+    }
+}
+
 /// The export names X-rays and the annihilation line in its subtype column;
 /// a blank subtype is a nuclear transition.
 fn photon_kind(subtype: &str) -> PhotonKind {
@@ -403,6 +451,11 @@ Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,1173.228,99.85
 Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,1332.492,99.9826
 Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,347.14,0.0075
 Na22,22,Na,11,11,0.0,False,82053000.0,22Ne,g,Annihil.,511.0,180.7
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,121.7817,28.53
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,344.2785,26.59
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,1408.013,20.87
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,964.057,14.51
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,244.6974,7.55
 Al24,24,Al,13,11,0.0,False,2.053,24Mg,g,,1368.6,100.0
 Al24,24,Al,13,11,425.81,True,0.1307,24Mg,g,,426.0,98.0
 ";
@@ -485,6 +538,65 @@ Al24,24,Al,13,11,425.81,True,0.1307,24Mg,g,,426.0,98.0
         let cobalt = library.nuclide("Co-60").expect("Co-60");
         assert!((cobalt.peaks[0].yield_percent - 99.9826).abs() < 1e-9);
         assert!(cobalt.peaks[0].key_line, "the strongest gamma keys it");
+    }
+
+    /// A nuclide that always emits two strong gammas should be asked for both.
+    ///
+    /// Confirmation requires every key line, so keying Co-60 on 1332 alone
+    /// accepts any stray peak that lands there; asking for 1173 as well is
+    /// what makes the identification mean something.
+    #[test]
+    fn a_nuclide_with_two_strong_gammas_is_keyed_on_both() {
+        let library = built(1.0).library;
+        let cobalt = library.nuclide("Co-60").expect("Co-60");
+        let keyed: Vec<f64> = cobalt
+            .peaks
+            .iter()
+            .filter(|peak| peak.key_line)
+            .map(|peak| peak.energy)
+            .collect();
+        assert_eq!(keyed.len(), 2, "both of Co-60's gammas key it: {keyed:?}");
+        assert!(keyed.iter().any(|energy| (energy - 1332.492).abs() < 1e-6));
+        assert!(keyed.iter().any(|energy| (energy - 1173.228).abs() < 1e-6));
+    }
+
+    /// A spread-out decay scheme must not become the hardest thing to find.
+    ///
+    /// The half-as-strong rule is relative, so a nuclide whose strongest gamma
+    /// is itself faint admits more lines: Eu-152 leads at 28.53%, which lets
+    /// in 344 keV *and* 1408 keV. Requiring all three would put this program's
+    /// own calibration source beyond a NaI detector or a short count, so the
+    /// cap holds it to the two that a spectroscopist would actually reach for.
+    #[test]
+    fn a_nuclide_with_many_strong_gammas_is_not_keyed_on_all_of_them() {
+        let library = built(1.0).library;
+        let europium = library.nuclide("Eu-152").expect("Eu-152");
+        let keyed: Vec<f64> = europium
+            .peaks
+            .iter()
+            .filter(|peak| peak.key_line)
+            .map(|peak| peak.energy)
+            .collect();
+        assert_eq!(keyed.len(), 2, "two lines are enough to mean it: {keyed:?}");
+        assert!(keyed.iter().any(|energy| (energy - 121.7817).abs() < 1e-6));
+        assert!(keyed.iter().any(|energy| (energy - 344.2785).abs() < 1e-6));
+        assert!(
+            !keyed.iter().any(|energy| (energy - 1408.013).abs() < 1e-6),
+            "1408 keV at 20.87% is a line a short count loses"
+        );
+    }
+
+    /// A line the nuclide only sometimes shows must not be a requirement.
+    #[test]
+    fn a_faint_line_is_not_made_a_requirement() {
+        let library = built(1.0).library;
+        let caesium = library.nuclide("Cs-137").expect("Cs-137");
+        // The barium K X-rays are far weaker than the 661.657 keV gamma, and
+        // are X-rays besides - neither may be asked for.
+        let keyed: Vec<&LibraryPeak> = caesium.peaks.iter().filter(|peak| peak.key_line).collect();
+        assert_eq!(keyed.len(), 1, "only the gamma keys it: {keyed:?}");
+        assert!((keyed[0].energy - 661.657).abs() < 1e-6);
+        assert_eq!(keyed[0].photon, PhotonKind::Gamma);
     }
 
     #[test]

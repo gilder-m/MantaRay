@@ -374,6 +374,42 @@ fn case_variants(extensions: &[&str]) -> Vec<String> {
     out
 }
 
+/// A number field shown at four significant figures that does not round the
+/// number it was given.
+///
+/// The two halves of a `DragValue`'s text mode are not symmetrical, and the
+/// asymmetry bites: egui fills the editor from the formatter the moment the
+/// field takes focus, then writes back whatever the parser makes of that text
+/// when focus leaves - whether or not anybody typed. With a formatter that
+/// shortens, merely clicking in a field rewrites the value. Co-60's half life
+/// went from 166 344 000 s to 166 300 000 s that way, twelve hours lost to
+/// having looked at it, and K-40's lost ten thousand years; a library saved
+/// afterwards would carry the rounding as though it were evaluated.
+///
+/// So the parser recognises its own formatter's output and hands back the
+/// value that produced it. Anything actually typed is read as typed, which is
+/// what makes `1.365e10` and `13651526177` both work.
+fn significant_drag(value: &mut f64) -> egui::DragValue<'_> {
+    let original = *value;
+    egui::DragValue::new(value)
+        .custom_formatter(|value, _| mantaray_core::significant(value))
+        .custom_parser(move |text| reparse(text, original))
+}
+
+/// What such a field makes of its text, given the value it was showing.
+///
+/// Text the formatter itself would have produced means nothing was typed, so
+/// the value that produced it comes back whole. Anything else is somebody's
+/// own number and is read as written.
+fn reparse(text: &str, shown: f64) -> Option<f64> {
+    let text = text.trim();
+    if text == mantaray_core::significant(shown) {
+        Some(shown)
+    } else {
+        text.parse().ok()
+    }
+}
+
 /// Opens a native file dialog, when one is available.
 pub fn pick_open_file(filters: &[(&str, &[&str])]) -> Option<PathBuf> {
     #[cfg(feature = "native-dialogs")]
@@ -2987,10 +3023,18 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                                             egui::RichText::new(text).weak()
                                         }
                                     };
-                                    ui.label(number(format!("{:.3}", nuclide.activity)));
-                                    ui.label(number(format!("{:.3}", nuclide.uncertainty)));
+                                    // Four significant figures rather than three
+                                    // decimal places: an activity runs from
+                                    // millibecquerels to gigabecquerels, and a
+                                    // fixed point is wrong at both ends - it
+                                    // prints a strong source as a wall of
+                                    // digits and a weak one as 0.000.
+                                    ui.label(number(mantaray_core::significant(nuclide.activity)));
+                                    ui.label(number(mantaray_core::significant(
+                                        nuclide.uncertainty,
+                                    )));
                                     ui.label(if nuclide.mda > 0.0 {
-                                        number(format!("{:.3}", nuclide.mda))
+                                        number(mantaray_core::significant(nuclide.mda))
                                     } else {
                                         egui::RichText::new("\u{2014}").weak()
                                     });
@@ -3070,7 +3114,10 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                         }
                     });
                 ui.add(
-                    egui::DragValue::new(&mut app.dialogs.source_activity_bq)
+                    // A microcurie is 37 000 Bq and a millicurie 3.7e7, so
+                    // this field spans the range where digits stop being
+                    // countable by eye. Typed in either form.
+                    significant_drag(&mut app.dialogs.source_activity_bq)
                         .speed(10.0)
                         .range(0.0..=1e12)
                         .suffix(" Bq"),
@@ -3311,23 +3358,33 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                 .max_height(280.0)
                 .show(ui, |ui| {
                     ui.set_min_width(140.0);
-                    for index in 0..app.library.len() {
-                        let name = app.library.nuclides[index].name.clone();
-                        if ui
-                            .selectable_label(app.dialogs.library_selection == Some(index), name)
-                            .clicked()
-                        {
-                            app.dialogs.library_selection = Some(index);
+                    // A scroll area builds its contents in whatever layout it
+                    // was reached in, and this one is reached from a horizontal
+                    // one - so without asking for top-down here the names run
+                    // off the right-hand edge in a single line instead of
+                    // stacking, and a library of any size is mostly unreachable.
+                    ui.vertical(|ui| {
+                        for index in 0..app.library.len() {
+                            let name = app.library.nuclides[index].name.clone();
+                            if ui
+                                .selectable_label(
+                                    app.dialogs.library_selection == Some(index),
+                                    name,
+                                )
+                                .clicked()
+                            {
+                                app.dialogs.library_selection = Some(index);
+                            }
                         }
-                    }
-                    if ui.button("+ nuclide").clicked() {
-                        app.library.push(Nuclide::new(
-                            "New",
-                            0.0,
-                            vec![LibraryPeak::new(100.0, 100.0)],
-                        ));
-                        app.dialogs.library_selection = Some(app.library.len() - 1);
-                    }
+                        if ui.button("+ nuclide").clicked() {
+                            app.library.push(Nuclide::new(
+                                "New",
+                                0.0,
+                                vec![LibraryPeak::new(100.0, 100.0)],
+                            ));
+                            app.dialogs.library_selection = Some(app.library.len() - 1);
+                        }
+                    });
                 });
             ui.separator();
             ui.vertical(|ui| {
@@ -3344,7 +3401,14 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut nuclide.name).desired_width(100.0));
                     ui.label("Half life (s)");
-                    ui.add(egui::DragValue::new(&mut nuclide.half_life_seconds).speed(100.0));
+                    // Half lives in seconds run from a fraction of one to
+                    // 10^16, and the long ones are unreadable written out -
+                    // Am-241's is 13651526177. Shown the way the line below
+                    // shows it, and still typed in plainly: the parser takes
+                    // `1.365e10` and `13651526177` alike. Shortening it for
+                    // the eye must not shorten the number, which is what
+                    // `significant_drag` is for.
+                    ui.add(significant_drag(&mut nuclide.half_life_seconds).speed(100.0));
                 });
                 ui.label(format!("= {}", nuclide.half_life_display()));
                 ui.separator();
@@ -5448,8 +5512,45 @@ fn open_path_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
 
 #[cfg(test)]
 mod tests {
-    use super::{case_variants, strongest_centroid};
+    use super::{case_variants, reparse, strongest_centroid};
     use mantaray_core::{LineResult, NuclideResult};
+
+    /// Looking at a half life must not change it.
+    ///
+    /// egui fills a `DragValue`'s editor from the formatter on focus and reads
+    /// it back through the parser on focus loss, whether or not anybody typed.
+    /// A four-figure formatter and a plain parser therefore rewrote every
+    /// field an operator clicked in: Co-60 lost twelve hours, K-40 ten
+    /// thousand years, and `Save as...` would have written the rounding down
+    /// as though it were evaluated.
+    #[test]
+    fn a_field_that_is_only_looked_at_keeps_its_number() {
+        for seconds in [
+            166_344_000.0_f64, // Co-60
+            949_252_608.0,     // Cs-137
+            3.939_033_6e16,    // K-40
+            426_902_400.0,     // Eu-152
+            21_624.0,          // Tc-99m, short enough to survive either way
+        ] {
+            let shown = mantaray_core::significant(seconds);
+            assert_eq!(
+                reparse(&shown, seconds),
+                Some(seconds),
+                "{shown} came back as something else"
+            );
+        }
+    }
+
+    /// A number actually typed is the number that is meant, however it is
+    /// written - which is the whole reason the field is worth shortening.
+    #[test]
+    fn a_typed_half_life_is_read_as_typed() {
+        let shown = 166_344_000.0_f64;
+        assert_eq!(reparse("1.365e10", shown), Some(1.365e10));
+        assert_eq!(reparse("13651526177", shown), Some(13_651_526_177.0));
+        assert_eq!(reparse(" 5000 ", shown), Some(5000.0));
+        assert_eq!(reparse("not a number", shown), None);
+    }
 
     #[test]
     fn a_filter_matches_the_capitals_ortec_actually_writes() {

@@ -40,7 +40,33 @@ const IN: u8 = 0x81;
 pub struct Device {
     out: RefCell<nusb::Endpoint<Bulk, Out>>,
     input: RefCell<nusb::Endpoint<Bulk, In>>,
+    /// Kept for [`Device::cycle`], which is the only thing that needs the
+    /// device itself rather than one of its endpoints.
+    device: nusb::Device,
     serial: String,
+}
+
+/// How long to wait on a leftover answer before deciding there is not one.
+///
+/// An answer already sitting in the adapter arrives at once, so this only has
+/// to outlast the bus, not the instrument.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Reads away answers left over from whoever held the adapter last.
+///
+/// Bounded rather than "until it goes quiet": an adapter that talks without
+/// stopping would otherwise keep the program in here for good, and a handful
+/// of frames is already far more than the one stale reply this is for.
+fn drain(input: &mut nusb::Endpoint<Bulk, In>) {
+    let packet = input.max_packet_size().max(1);
+    for _ in 0..8 {
+        let buffer = input.allocate(packet);
+        let done = input.transfer_blocking(buffer, DRAIN_TIMEOUT);
+        // Timing out is the expected end of this: nothing was waiting.
+        if done.status.is_err() || done.actual_len == 0 {
+            return;
+        }
+    }
 }
 
 /// Every DPM-USB adapter the bus can see.
@@ -126,9 +152,18 @@ impl Device {
         let input = interface
             .endpoint::<Bulk, In>(IN)
             .map_err(|error| format!("opening endpoint {IN:#04x}: {error}"))?;
+        // Deliberately *not* settled here. Draining an endpoint that has
+        // nothing to say costs a run of cancelled reads, and on this transport
+        // that is not free: the instrument answers an IN token it is never
+        // given credit for, advances its data toggle, and from then on speaks
+        // past a host whose own toggle never moved. Measured on a 926, opening
+        // like that turned an adapter that answers into one that never answers
+        // again. Settling is a repair, so it is asked for - see `usbfix` - and
+        // not done to a healthy adapter on the way past.
         Ok(Self {
             out: RefCell::new(out),
             input: RefCell::new(input),
+            device,
             serial,
         })
     }
@@ -136,6 +171,58 @@ impl Device {
     /// The adapter's serial number, which is the instrument's identity here.
     pub fn serial(&self) -> &str {
         &self.serial
+    }
+
+    /// Brings both bulk endpoints back to a known state.
+    ///
+    /// The counterpart of the Windows `settle`, for the fault it is named
+    /// after: the adapter answers what it was last asked whether or not anyone
+    /// is still listening, so a request abandoned by some earlier program
+    /// leaves a reply queued, and every answer after it is one question late.
+    /// Reading until nothing more comes back is what puts the two back in step.
+    ///
+    /// Unlike the Windows one this is **not** run on opening or after a
+    /// transfer times out. Over libusb the reads it costs do their own harm -
+    /// see the note in [`Device::open`] - so it is worth doing only once an
+    /// adapter is known to be stuck, which is [`crate::usb_fix`]'s job.
+    /// The order matters and is the opposite of the obvious one. Reading the
+    /// queue empty is what puts question and answer back in step, but every
+    /// read that finds nothing is a cancelled transfer, and those are what put
+    /// the two ends' data toggles out of step in the first place. So the halts
+    /// are cleared last, once there is nothing left to read: clearing a halt
+    /// resets the toggle, and doing it first only means throwing away the
+    /// repair before the damage.
+    pub fn settle(&self) {
+        {
+            let mut input = self.input.borrow_mut();
+            drain(&mut input);
+        }
+        self.out.borrow_mut().clear_halt().wait().ok();
+        self.input.borrow_mut().clear_halt().wait().ok();
+    }
+
+    /// Unplugs and replugs the adapter, in software.
+    ///
+    /// For the state a pipe reset cannot reach: the adapter's own state machine
+    /// stuck, refusing even to take a frame. It re-enumerates, so this handle
+    /// is finished afterwards - hence taking `self` - and the caller opens the
+    /// adapter afresh.
+    pub fn cycle(self) -> Result<(), String> {
+        let Self {
+            out,
+            input,
+            device,
+            serial,
+        } = self;
+        // A device with a claimed interface will not reset, and the endpoints
+        // are what hold the claim, so they have to go first. This is the reason
+        // the whole handle is consumed rather than borrowed.
+        drop(out);
+        drop(input);
+        device
+            .reset()
+            .wait()
+            .map_err(|error| format!("cycling adapter {serial}: {error}"))
     }
 }
 
@@ -151,6 +238,13 @@ impl BulkDevice for Device {
         use nusb::transfer::TransferError;
         // The top bit of an endpoint address is its direction, which decides
         // whether these bytes are being sent or are about to be filled in.
+        // A failure here is deliberately left where it lies rather than settled
+        // on the spot. Settling costs a run of cancelled reads, and cancelled
+        // reads are what put the two ends' data toggles out of step in the
+        // first place - so settling on every timeout would manufacture the
+        // fault it is meant to cure, and would do it fastest on a link that is
+        // merely slow. Recovery belongs to `usbfix`, where somebody has looked
+        // at the adapter and decided it is actually stuck.
         if endpoint & 0x80 == 0 {
             let mut out = self.out.borrow_mut();
             let done = out.transfer_blocking(data.to_vec().into(), timeout);
@@ -162,24 +256,33 @@ impl BulkDevice for Device {
                 Err(error) => Err(format!("writing to endpoint {endpoint:#04x}: {error}")),
             }
         } else {
-            let mut input = self.input.borrow_mut();
-            // A read must be submitted in whole packets; the protocol layer
-            // already rounds up, and this keeps the promise explicit.
-            let packet = input.max_packet_size().max(1);
-            let room = data.len().div_ceil(packet) * packet;
-            let buffer = input.allocate(room);
-            let done = input.transfer_blocking(buffer, timeout);
-            match done.status {
-                Ok(()) => {
-                    let taken = done.actual_len.min(data.len());
-                    data[..taken].copy_from_slice(&done.buffer[..taken]);
-                    Ok(taken)
-                }
-                Err(TransferError::Cancelled) => Err(format!(
-                    "the instrument did not answer within {milliseconds} ms"
-                )),
-                Err(error) => Err(format!("reading from endpoint {endpoint:#04x}: {error}")),
+            self.read(data, timeout, milliseconds)
+        }
+    }
+}
+
+impl Device {
+    /// The reading half of [`BulkDevice::bulk`], which is the longer of the
+    /// two and the only one that has to size its own buffer.
+    fn read(&self, data: &mut [u8], timeout: Duration, milliseconds: u32) -> Result<usize, String> {
+        use nusb::transfer::TransferError;
+        let mut input = self.input.borrow_mut();
+        // A read must be submitted in whole packets; the protocol layer
+        // already rounds up, and this keeps the promise explicit.
+        let packet = input.max_packet_size().max(1);
+        let room = data.len().div_ceil(packet) * packet;
+        let buffer = input.allocate(room);
+        let done = input.transfer_blocking(buffer, timeout);
+        match done.status {
+            Ok(()) => {
+                let taken = done.actual_len.min(data.len());
+                data[..taken].copy_from_slice(&done.buffer[..taken]);
+                Ok(taken)
             }
+            Err(TransferError::Cancelled) => Err(format!(
+                "the instrument did not answer within {milliseconds} ms"
+            )),
+            Err(error) => Err(format!("reading from endpoint {IN:#04x}: {error}")),
         }
     }
 }

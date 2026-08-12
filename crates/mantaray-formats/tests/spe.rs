@@ -113,7 +113,10 @@ fn round_trip_keeps_the_data_and_descriptors() {
 
 #[test]
 fn writes_the_expected_keywords_in_order() {
-    let text = spe::write(&Spectrum::from_counts(vec![1, 2, 3, 4])).unwrap();
+    let mut spectrum = Spectrum::from_counts(vec![1, 2, 3, 4]);
+    spectrum.start_time =
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 11).and_then(|day| day.and_hms_opt(15, 48, 20));
+    let text = spe::write(&spectrum).unwrap();
     let keywords: Vec<&str> = text.lines().filter(|line| line.starts_with('$')).collect();
     assert_eq!(
         keywords,
@@ -130,6 +133,32 @@ fn writes_the_expected_keywords_in_order() {
         ]
     );
     assert!(text.contains("$DATA:\n0 3\n"));
+    assert!(text.contains("08/11/2026 15:48:20"));
+}
+
+/// A spectrum whose start was never recorded says so by leaving the keyword
+/// out, rather than by claiming the Unix epoch.
+///
+/// The placeholder that used to go here read back as a measurement made on
+/// 1 January 1970 - a date nothing could tell from one that was meant, and one
+/// a decay correction would use, wrong by decades and without complaint.
+#[test]
+fn a_spectrum_with_no_start_time_writes_no_date_at_all() {
+    let text = spe::write(&Spectrum::from_counts(vec![1, 2, 3, 4])).unwrap();
+    assert!(!text.contains("$DATE_MEA:"), "{text}");
+    assert!(!text.contains("1970"), "{text}");
+    assert_eq!(spe::read(&text).unwrap().start_time, None);
+}
+
+/// And a file already carrying the old placeholder reads as having no date.
+#[test]
+fn the_old_epoch_placeholder_reads_as_no_date() {
+    let text = "$DATE_MEA:\n01/01/1970 00:00:00\n$DATA:\n0 3\n1\n2\n3\n4\n";
+    assert_eq!(spe::read(text).unwrap().start_time, None);
+
+    // A real date beside it still reads as one.
+    let dated = "$DATE_MEA:\n08/11/2026 15:48:20\n$DATA:\n0 3\n1\n2\n3\n4\n";
+    assert!(spe::read(dated).unwrap().start_time.is_some());
 }
 
 #[test]

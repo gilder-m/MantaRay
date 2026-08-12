@@ -23,7 +23,7 @@ use crate::umcbi::{Hdet, Umcbi};
 /// Checked against hardware rather than assumed: `SHOW_TRUE` answered
 /// `$G0007892556117` while MAESTRO displayed 157851.12 s for the same detector,
 /// and 7892556 * 0.02 is exactly that.
-const TICK: f64 = 0.02;
+pub(crate) const TICK: f64 = 0.02;
 
 /// An instrument the bridge can drive, however it is reached.
 ///
@@ -577,7 +577,7 @@ pub fn calibration_for(mcb: i32) -> Option<(f64, f64, f64)> {
 /// checksum. Only the leading field is wanted here, and every record this is
 /// used on carries exactly one. The letter is checked: under a reply desync a
 /// version record's digits would otherwise parse as a plausible clock.
-fn record_number(reply: &str, letter: char) -> Result<f64, String> {
+pub(crate) fn record_number(reply: &str, letter: char) -> Result<f64, String> {
     let body = reply
         .trim()
         .strip_prefix('$')
@@ -593,7 +593,7 @@ fn record_number(reply: &str, letter: char) -> Result<f64, String> {
 }
 
 /// The text of an `$F` record, which carries no checksum to strip.
-fn record_text(reply: &str) -> String {
+pub(crate) fn record_text(reply: &str) -> String {
     let text = reply.trim().trim_start_matches('$');
     let text = text.strip_prefix('F').unwrap_or(text);
     if text.is_empty() {

@@ -90,6 +90,7 @@ fn direct_main() -> Result<(), String> {
                        mantaray-mcb probe\n  \
                        mantaray-mcb usbtalk [--device SERIAL] <command...>\n  \
                        mantaray-mcb usbspectrum [--device SERIAL] [--out FILE]\n  \
+                       mantaray-mcb usbfix [--device SERIAL] [--cycle]\n  \
                        mantaray-mcb serve [N] [--device SERIAL]\n\n\
                      On this platform the adapter is reached over libusb, with no\n\
                      vendor driver. If opening it fails with a permission error, a\n\
@@ -222,6 +223,21 @@ fn direct_main() -> Result<(), String> {
             Ok(())
         }
         "usbspectrum" | "spectrum" => {
+            // Settled before the adapter is touched. A mistyped command line
+            // should not cost an instrument round-trip, and finding out that
+            // `--out` was given nothing only after reading four thousand
+            // channels back is the wrong end to find it out from.
+            let output = match positional.iter().position(|argument| argument == "--out") {
+                None => None,
+                // Asked for and not given. Returning quietly here would read
+                // as a spectrum written, and the operator would go looking
+                // for a file that was never named.
+                Some(at) => Some(
+                    positional
+                        .get(at + 1)
+                        .ok_or("--out needs a file to write to")?,
+                ),
+            };
             let device = direct::Device::open(wanted.as_deref())?;
             eprintln!("adapter {}", device.serial());
             let memory = dpm::Dpm::new(&device);
@@ -237,10 +253,144 @@ fn direct_main() -> Result<(), String> {
                 "{channels} channels, total {total}, {} channel(s) in a region of interest",
                 regions.iter().filter(|inside| **inside).count()
             );
+            let Some(output) = output else {
+                return Ok(());
+            };
+            let mut spectrum = mantaray_core::Spectrum::from_counts(
+                counts.iter().map(|c| u64::from(*c)).collect(),
+            );
+            // Both clocks are in twenty-millisecond ticks, the unit the
+            // instrument counts in, and the same one the Windows dump reads.
+            spectrum.live_time = ticks(&memory, "SHOW_LIVE")?;
+            spectrum.real_time = ticks(&memory, "SHOW_TRUE")?;
+            // The model as `probe` prints it, not the raw record: `0926-001`
+            // rather than `$F0926-001`. The `$F` is protocol framing, and a
+            // file that carries it is showing an operator the wire.
+            spectrum.sample_description = memory
+                .command("SHOW_VERSION")
+                .map(|reply| serve::record_text(&reply))
+                .unwrap_or_default();
+            // The instrument marks regions a channel at a time; a region is the
+            // run those flags make, so the runs are what get marked here. One
+            // region per channel would be the same information in a form
+            // nothing downstream would recognise as a region.
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            for (channel, inside) in regions.iter().enumerate() {
+                match (inside, runs.last_mut()) {
+                    (false, _) => {}
+                    (true, Some(last)) if last.1 + 1 == channel => last.1 = channel,
+                    (true, _) => runs.push((channel, channel)),
+                }
+            }
+            spectrum.rois = mantaray_core::RoiSet::from_pairs(runs);
+            mantaray_formats::save_spectrum(&spectrum, std::path::Path::new(output))
+                .map_err(|error| format!("writing {output}: {error}"))?;
+            println!(
+                "wrote {output}: {} counts over {:.2} s live, {:.2} s real",
+                spectrum.total_counts(),
+                spectrum.live_time,
+                spectrum.real_time
+            );
             Ok(())
         }
+        "usbfix" | "fix" => usb_fix(wanted.as_deref(), &positional[1..]),
         other => Err(format!(
-            "unknown command {other:?}; try usb, probe, usbtalk, usbspectrum, serve or configure"
+            "unknown command {other:?}; try usb, probe, usbtalk, usbspectrum, usbfix, serve or \
+             configure"
         )),
     }
+}
+
+/// One of the instrument's clocks, in seconds.
+///
+/// The same reading `serve` does, and deliberately through the same record
+/// parser: the clocks come back in twenty-millisecond ticks, and a file written
+/// here has to agree with a window served from the same instrument.
+#[cfg(not(windows))]
+fn ticks(memory: &dpm::Dpm<'_>, command: &str) -> Result<f64, String> {
+    let reply = memory.command(command)?;
+    Ok(serve::record_number(&reply, 'G')? * serve::TICK)
+}
+
+/// Puts a wedged adapter back in step, the libusb counterpart of the Windows
+/// `usbfix`.
+///
+/// Two faults are treated, in the order of how much they disturb. An adapter
+/// whose reply stream has slipped answers every question with the answer to the
+/// one before, and settling the endpoints puts it back. An adapter whose own
+/// state machine has stopped will not so much as take a frame, and only a
+/// replug reaches that - so `--cycle` is asked for rather than taken, because a
+/// device that re-enumerates is briefly a device that is not there.
+#[cfg(not(windows))]
+fn usb_fix(wanted: Option<&str>, arguments: &[String]) -> Result<(), String> {
+    let cycle = arguments.iter().any(|argument| argument == "--cycle");
+
+    // Answering is not enough: an adapter that is one reply behind still
+    // answers, so the reply has to be the right *kind* of answer, twice over.
+    // Once could be the stale tail of the question before it.
+    let sane = |device: &direct::Device| {
+        (0..2).all(|_| {
+            dpm::Dpm::new(device)
+                .command("SHOW_VERSION")
+                .map(|reply| reply.starts_with("$F"))
+                .unwrap_or(false)
+        })
+    };
+
+    // Opening deliberately does not settle - see `Device::open` - so this
+    // first look is the adapter as it was found, and the only thing that says
+    // whether there is anything here to repair. A healthy adapter answers it
+    // and goes no further, which matters: the step after this one is the one
+    // that can wedge a working adapter.
+    let device = direct::Device::open(wanted)?;
+    let serial = device.serial().to_string();
+    println!("adapter {serial}");
+    if sane(&device) {
+        println!("the instrument answers, and correctly; nothing to fix");
+        return Ok(());
+    }
+    println!("wrong or no answers; clearing the pipes...");
+    device.settle();
+    if sane(&device) {
+        println!("recovered by clearing the pipes");
+        return Ok(());
+    }
+    if !cycle {
+        return Err(
+            "clearing the pipes was not enough. `usbfix --cycle` will cycle the port, which is a \
+             replug in software"
+                .into(),
+        );
+    }
+    println!("still wrong; cycling the port (a replug, in software)...");
+    device.cycle()?;
+    // Re-enumeration takes a moment, and the adapter comes back under the same
+    // serial number, which is what it is found by here.
+    for attempt in 1..=20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Ok(device) = direct::Device::open(Some(&serial)) else {
+            continue;
+        };
+        if sane(&device) {
+            println!("recovered by cycling the port, after {} ms", attempt * 500);
+            return Ok(());
+        }
+    }
+    // Which of the two failures this is decides the advice, and they want
+    // opposite things. Still on the bus and still wrong is an instrument that
+    // needs its power cycled; gone from the bus is the adapter having taken the
+    // replug literally and not come back up, and only the cable fixes that.
+    let listed = direct::Device::list().unwrap_or_default();
+    if listed.iter().any(|found| found.contains(&serial)) {
+        return Err(
+            "the adapter came back but still answers wrongly; the instrument's own power is what \
+             is left to cycle"
+                .into(),
+        );
+    }
+    Err(
+        "the adapter did not come back onto the bus. Unplug the USB cable and plug it in again - \
+         a cycled port that stays down needs a real replug, and nothing in software can reach it"
+            .into(),
+    )
 }

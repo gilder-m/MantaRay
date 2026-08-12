@@ -176,12 +176,18 @@ pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
     ));
     out.push_str(concat!("AP# mantaray ", env!("CARGO_PKG_VERSION"), "\n"));
 
-    out.push_str("$DATE_MEA:\n");
-    match spectrum.start_time {
-        Some(start) => out.push_str(&start.format("%m/%d/%Y %H:%M:%S").to_string()),
-        None => out.push_str("01/01/1970 00:00:00"),
+    // Written only when there is one. A spectrum whose start was never
+    // recorded used to be given `01/01/1970 00:00:00`, which reads back as a
+    // measurement made at the Unix epoch - a date no reader can tell from one
+    // that was meant, and one that decay correction will happily use, wrong by
+    // decades and silently. The `.Chn` writer has always left the field blank
+    // in this case; a missing keyword is the same statement here, and the
+    // reader above treats its absence as "no date" rather than as an error.
+    if let Some(start) = spectrum.start_time {
+        out.push_str("$DATE_MEA:\n");
+        out.push_str(&start.format("%m/%d/%Y %H:%M:%S").to_string());
+        out.push('\n');
     }
-    out.push('\n');
 
     out.push_str("$MEAS_TIM:\n");
     out.push_str(&format!(
@@ -257,6 +263,15 @@ fn parse_field<T: std::str::FromStr>(value: Option<&str>, what: &str) -> Result<
 
 fn parse_date(line: &str) -> Option<NaiveDateTime> {
     let line = line.trim();
+    // The Unix epoch is this program's own old placeholder for "no date", and
+    // files carrying it are already out there - the writer above put it in
+    // every spectrum whose start was never recorded. Read as the absence it
+    // stood for, not as a measurement made in 1970, because a spectrum from
+    // before the format existed is not a thing anyone has. A count genuinely
+    // begun at that instant loses its date and nothing else.
+    if line.starts_with("01/01/1970 00:00:00") {
+        return None;
+    }
     for format in [
         "%m/%d/%Y %H:%M:%S%.f",
         "%m/%d/%Y %H:%M:%S",

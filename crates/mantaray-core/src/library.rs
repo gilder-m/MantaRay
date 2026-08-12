@@ -215,9 +215,72 @@ impl Nuclide {
         } else {
             (seconds, "s")
         };
-        let value = format!("{value:.4}");
-        let value = value.trim_end_matches('0').trim_end_matches('.');
-        format!("{value} {unit}")
+        format!("{} {unit}", significant(value))
+    }
+}
+
+/// How many figures of a number are worth showing.
+///
+/// Four. The evaluations state about that many, and past them the digits are
+/// arithmetic rather than measurement - K-40's half life written out in full
+/// ends in the length of a year, not in anything anybody measured.
+const FIGURES: i32 = 4;
+
+/// A number at four significant figures, in the form that stays readable.
+///
+/// Plain digits while they can be taken in at a glance, and `1.248e9` once
+/// they cannot. Significant figures rather than decimal places, which is the
+/// whole point: an activity runs from millibecquerels to gigabecquerels, and
+/// any fixed number of decimals is wrong at one end or the other - a wall of
+/// digits for a strong source, or `0.000` for a weak one.
+///
+/// Not round-trip safe, and cannot be: `significant(166_344_000.0)` is
+/// `"1.663e8"`, which reads back as a different number. Anything that shows a
+/// stored value through this and takes it back again has to keep the original
+/// - see the library dialog's half-life field, which does.
+pub fn significant(value: f64) -> String {
+    // Neither has a four-figure form, and inventing one would print an
+    // arithmetic accident - the old code turned an infinity into
+    // "NaNe2147483647" - where a plain word tells the truth.
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    // Rust's own scientific formatting does the rounding, carry and all: it
+    // is what turns 9.9999e8 into 1.000e9 rather than the "10e8" that doing
+    // this by hand invites. So the exponent it prints is the one the value
+    // has *at four figures*, which is what decides the form below.
+    let decimals = (FIGURES - 1) as usize;
+    let scientific = format!("{value:.decimals$e}");
+    let exponent: i32 = scientific
+        .split('e')
+        .nth(1)
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(0);
+    // Where plain digits still read at a glance. Below a thousandth they are
+    // mostly leading zeros; at a hundred thousand and up they are a run too
+    // long to count, which is the complaint that started this.
+    if !(-3..5).contains(&exponent) {
+        let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+        return format!("{}e{exponent}", trimmed(mantissa));
+    }
+    // Four figures means the decimals left over after the whole part has had
+    // its share, and none at all once the whole part has used them up.
+    let places = (FIGURES - 1 - exponent).max(0) as usize;
+    trimmed(&format!("{value:.places$}"))
+}
+
+/// Drops the zeros a fixed-point format leaves behind, and the lone point.
+///
+/// Only where there is a point to trim towards: `"1200"` has trailing zeros
+/// that are digits of the number, and trimming those would make it twelve.
+fn trimmed(text: &str) -> String {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text.to_string()
     }
 }
 

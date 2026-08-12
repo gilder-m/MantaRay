@@ -12,8 +12,24 @@
 //! overrides which adapter is expected.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use mantaray_device::{BridgeTransport, Mcb, RemoteMcb};
+
+/// One instrument, one holder.
+///
+/// The adapter is claimed exclusively, so only one of these tests can hold it
+/// at a time. Cargo runs them in parallel by default, and without this the
+/// others find the interface already taken and fail saying so - which looks
+/// like a broken instrument rather than like tests standing on each other.
+/// `bridge_hardware.rs` takes turns the same way, for the same reason.
+static BENCH: Mutex<()> = Mutex::new(());
+
+/// Waits for the bench, ignoring a previous test having panicked while holding
+/// it - the lock orders access, it does not guard any state.
+fn bench() -> MutexGuard<'static, ()> {
+    BENCH.lock().unwrap_or_else(|held| held.into_inner())
+}
 
 /// The helper the bridge runs.
 ///
@@ -64,6 +80,7 @@ fn open_unpinned_expecting(expected: &str) -> Result<RemoteMcb, String> {
 #[test]
 #[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
 fn the_instrument_is_learned_then_matched_and_a_stranger_is_refused() {
+    let _bench = bench();
     // First open of a new entry: nothing is expected, so the serial is
     // learned from what the instrument calls itself.
     let learned = {
@@ -118,6 +135,7 @@ fn the_instrument_is_learned_then_matched_and_a_stranger_is_refused() {
 #[test]
 #[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
 fn the_presets_the_instrument_holds_are_read_on_connecting() {
+    let _bench = bench();
     // The bug this covers, found on the bench: preset registers outlive the
     // session that wrote them, and mantaray only ever wrote them - so it
     // opened showing none while the instrument held one.
@@ -145,6 +163,7 @@ fn the_presets_the_instrument_holds_are_read_on_connecting() {
 #[test]
 #[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
 fn a_preset_the_instrument_has_already_reached_refuses_the_next_start() {
+    let _bench = bench();
     // The whole point of reading the presets back, proven end to end on the
     // instrument: count out a short preset, then try to start again. The 926
     // answers START, leaves the clocks where they are and says nothing, so the
@@ -199,4 +218,72 @@ fn a_preset_the_instrument_has_already_reached_refuses_the_next_start() {
         .set_presets(held)
         .expect("the held presets go back");
     instrument.clear().expect("clear");
+}
+
+/// A count already running when the window opens keeps its start date.
+///
+/// Found on the bench and reported plainly: start an acquisition, close
+/// MantaRay, open it again, and the start time was gone - so a `.Spe` saved
+/// afterwards carried none, and the writer filled that gap with the Unix
+/// epoch, which reads back as a measurement made in 1970.
+///
+/// Nothing on this road reports a measurement date. `MIOGetStartTime` is in
+/// ORTEC's Windows library and has no counterpart here, so the start is
+/// reconstructed from the real-time clock, which advances only while the run
+/// does. This is that reconstruction, against a real instrument and a real
+/// clock rather than a simulated one.
+#[test]
+#[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
+fn a_count_already_running_when_the_window_opens_keeps_its_start() {
+    let _bench = bench();
+    let held = {
+        let mut instrument = open(None).expect("the 926 opens");
+        let held = *instrument.presets();
+        // No preset, or a short one would stop the run before the second
+        // session ever sees it counting.
+        instrument
+            .set_presets(mantaray_device::Presets::default())
+            .expect("presets clear");
+        instrument.clear().expect("clear");
+        instrument.start().expect("start");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        instrument.poll(4.0).expect("poll");
+        assert!(
+            instrument.spectrum().start_time.is_some(),
+            "the session that started it must know the date"
+        );
+        held
+        // Dropped here, which is what closing the window does.
+    };
+
+    // A second session, which never saw the run begin.
+    let mut instrument = open(None).expect("the 926 opens again");
+    instrument.poll(0.0).expect("poll");
+    let status = instrument.status();
+    assert!(
+        status.active,
+        "the instrument should still be counting: RT={:.2}",
+        status.real_time
+    );
+    let recovered = instrument
+        .spectrum()
+        .start_time
+        .expect("a run in progress must carry a start date");
+    let ago = (chrono::Local::now().naive_local() - recovered).num_milliseconds() as f64 / 1000.0;
+    println!(
+        "recovered start {recovered}, {ago:.2} s ago, RT={:.2}",
+        status.real_time
+    );
+    assert!(
+        (ago - status.real_time).abs() < 3.0,
+        "the start should sit one real-time clock back: {ago:.2} s ago against RT={:.2} s",
+        status.real_time
+    );
+
+    // Put the instrument back the way it was found.
+    instrument.stop().expect("stop");
+    instrument.clear().expect("clear");
+    instrument
+        .set_presets(held)
+        .expect("the held presets go back");
 }
