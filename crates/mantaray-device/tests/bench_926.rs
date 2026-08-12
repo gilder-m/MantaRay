@@ -219,3 +219,71 @@ fn a_preset_the_instrument_has_already_reached_refuses_the_next_start() {
         .expect("the held presets go back");
     instrument.clear().expect("clear");
 }
+
+/// A count already running when the window opens keeps its start date.
+///
+/// Found on the bench and reported plainly: start an acquisition, close
+/// MantaRay, open it again, and the start time was gone - so a `.Spe` saved
+/// afterwards carried none, and the writer filled that gap with the Unix
+/// epoch, which reads back as a measurement made in 1970.
+///
+/// Nothing on this road reports a measurement date. `MIOGetStartTime` is in
+/// ORTEC's Windows library and has no counterpart here, so the start is
+/// reconstructed from the real-time clock, which advances only while the run
+/// does. This is that reconstruction, against a real instrument and a real
+/// clock rather than a simulated one.
+#[test]
+#[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
+fn a_count_already_running_when_the_window_opens_keeps_its_start() {
+    let _bench = bench();
+    let held = {
+        let mut instrument = open(None).expect("the 926 opens");
+        let held = *instrument.presets();
+        // No preset, or a short one would stop the run before the second
+        // session ever sees it counting.
+        instrument
+            .set_presets(mantaray_device::Presets::default())
+            .expect("presets clear");
+        instrument.clear().expect("clear");
+        instrument.start().expect("start");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        instrument.poll(4.0).expect("poll");
+        assert!(
+            instrument.spectrum().start_time.is_some(),
+            "the session that started it must know the date"
+        );
+        held
+        // Dropped here, which is what closing the window does.
+    };
+
+    // A second session, which never saw the run begin.
+    let mut instrument = open(None).expect("the 926 opens again");
+    instrument.poll(0.0).expect("poll");
+    let status = instrument.status();
+    assert!(
+        status.active,
+        "the instrument should still be counting: RT={:.2}",
+        status.real_time
+    );
+    let recovered = instrument
+        .spectrum()
+        .start_time
+        .expect("a run in progress must carry a start date");
+    let ago = (chrono::Local::now().naive_local() - recovered).num_milliseconds() as f64 / 1000.0;
+    println!(
+        "recovered start {recovered}, {ago:.2} s ago, RT={:.2}",
+        status.real_time
+    );
+    assert!(
+        (ago - status.real_time).abs() < 3.0,
+        "the start should sit one real-time clock back: {ago:.2} s ago against RT={:.2} s",
+        status.real_time
+    );
+
+    // Put the instrument back the way it was found.
+    instrument.stop().expect("stop");
+    instrument.clear().expect("clear");
+    instrument
+        .set_presets(held)
+        .expect("the held presets go back");
+}

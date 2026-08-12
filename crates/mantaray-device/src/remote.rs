@@ -266,6 +266,28 @@ impl RemoteMcb {
         }
         self.spectrum.real_time = self.status.real_time;
         self.spectrum.live_time = self.status.live_time;
+        // A count already running when this connected has no start to read.
+        // The instrument keeps no measurement date of its own, and the one
+        // call that would give it - `MIOGetStartTime` - exists only in ORTEC's
+        // Windows library, so nothing on this road can be asked. Closing the
+        // window and opening it again therefore lost the date outright, and
+        // every file written afterwards carried none.
+        //
+        // The real-time clock is what survives, and it advances only while the
+        // run does, so the run began that many seconds ago. Two limits, both
+        // deliberate. Only while it is still counting: an idle instrument
+        // holding this morning's spectrum would otherwise be dated to this
+        // minute, which is a worse answer than none. And only into a gap - a
+        // start this process watched happen is the real one and is never
+        // overwritten. A run stopped and resumed reads late by however long it
+        // stood paused, which is the residual error and is the reason this is
+        // a reconstruction rather than a reading.
+        if self.spectrum.start_time.is_none() && self.status.active && self.status.real_time > 0.0 {
+            let counted = chrono::Duration::milliseconds((self.status.real_time * 1000.0) as i64);
+            self.spectrum.start_time = chrono::Local::now()
+                .naive_local()
+                .checked_sub_signed(counted);
+        }
         Ok(())
     }
 

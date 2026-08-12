@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**A count already running when the window opens keeps its start date
+(2026-08-11).** Start an acquisition, close MantaRay, open it again, and the
+start time was gone - reported from the bench, and the reason a 5073-second
+count came off it with no date at all. Nothing on this road reports a
+measurement date: `MIOGetStartTime` belongs to ORTEC's Windows library and has
+no counterpart over libusb, so a session that did not watch the run begin had
+nothing to ask. The real-time clock is what survives - it advances only while
+the run does - so the start is reconstructed as that many seconds ago. Only
+while the instrument is still counting, because an idle one holding this
+morning's spectrum would otherwise be dated to this minute; and only into a gap,
+because a start this session saw for itself is the real one. A run stopped and
+resumed reads late by however long it stood paused, which is why this is a
+reconstruction and is written down as one.
+
 **A spectrum with no start time no longer claims to have been counted in 1970
 (2026-08-11).** `.Spe` was written with `01/01/1970 00:00:00` whenever the start
 was not recorded, and that reads back as a measurement made at the Unix epoch -
