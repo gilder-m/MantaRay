@@ -29,8 +29,10 @@ application, a command-line tool and libraries you can build on.
 ```
 mantaray/
 ├── crates/mantaray-core      spectrum model, calibration, peak analysis, libraries
-├── crates/mantaray-formats   .Chn .Spc .Spe .Roi ASCII JSON list-mode codecs
+├── crates/mantaray-formats   .Chn .Spc .Spe .Roi .Lib .Clb ASCII JSON list-mode codecs
 ├── crates/mantaray-device    instrument abstraction, presets, detector simulator
+├── crates/mantaray-mcb       the bridge to real ORTEC hardware: ORTEC's driver on
+│                             Windows, plain libusb everywhere else
 ├── crates/mantaray-jobs      MAESTRO-compatible .JOB automation
 ├── crates/mantaray-report    ROI reports, nuclide reports, printouts
 ├── crates/mantaray-cli       the `mantaray` command-line workbench
@@ -40,13 +42,14 @@ mantaray/
 ## What it does
 
 **Acquisition.** Detectors are driven through one interface, so the built-in
-physics simulator and a network instrument (an MCB served over TCP - another
-MantaRay's simulator today, bench hardware speaking the same `SET_`/`SHOW_`
-dialect tomorrow) behave the same: start, stop, clear, copy to buffer, list
-mode, zero-dead-time modes, amplifier/ADC/bias/stabiliser settings and presets
-on real time, live time, ROI peak, ROI integral, counting uncertainty and
-minimum detectable activity - plus field-mode spectrum storage, the automatic
-Optimize and pole-zero routines, and the InSight virtual oscilloscope.
+physics simulator, a network instrument (an MCB served over TCP) and real ORTEC
+hardware over USB - served over a pipe by the `mantaray-mcb` bridge, speaking
+the same `SET_`/`SHOW_` dialect - behave the same: start, stop, clear, copy to
+buffer, list mode, zero-dead-time modes, amplifier/ADC/bias/stabiliser settings
+and presets on real time, live time, ROI peak, ROI integral, counting
+uncertainty and minimum detectable activity - plus field-mode spectrum storage,
+the automatic Optimize and pole-zero routines, and the InSight virtual
+oscilloscope.
 
 **Display.** Two views per spectrum as MAESTRO has them - an expanded view and an
 inset full view showing where you are - with a marker, rubber-band selection,
@@ -91,13 +94,13 @@ window, exactly as recalling a file does.
 
 ## Installing
 
-Built archives for **Linux** and **Windows** are attached to each
-[release](https://github.com/gilder-m/MantaRay/releases), together with a
-`SHA256SUMS.txt` covering them. Check a download against what the release
-workflow actually built:
+Built archives for **Linux**, **Windows** and **macOS (Apple silicon)** are
+attached to each [release](https://github.com/gilder-m/MantaRay/releases),
+together with a `SHA256SUMS.txt` covering them. Check a download against what
+the release workflow actually built:
 
 ```sh
-sha256sum -c SHA256SUMS.txt              # Linux
+sha256sum -c SHA256SUMS.txt              # Linux and macOS
 ```
 ```powershell
 Get-FileHash MantaRay-windows-x86_64.zip -Algorithm SHA256   # Windows
@@ -107,8 +110,10 @@ Each archive holds the desktop application, the `mantaray` command-line tool and
 the `mantaray-mcb` helper that reaches instruments. Keep the three together: the
 application looks for the helper beside itself.
 
-macOS is **coming soon** - it builds and passes its tests in CI, but nothing has
-run there against an instrument yet, so no binary is published.
+The macOS build is unsigned, so the first run needs the quarantine flag removed
+from the extracted binaries - `xattr -d com.apple.quarantine mantaray-gui
+mantaray mantaray-mcb` - or a right-click Open. Intel macs are not built:
+nothing has run there.
 
 ## Building and running
 
@@ -187,53 +192,11 @@ mantaray job nightly.job --detector 192.168.0.40:2000   # run against an instrum
 | `.Lis` | yes | yes | list-mode events, with time slicing |
 | `.n42` | yes | - | ANSI N42.42 XML, both the 2005 and 2011 revisions |
 | `.csv` | - | yes | channels or analysis results, for spreadsheets |
+| `.Lib` | yes | - | ORTEC binary nuclide libraries, as GammaVision writes them; libraries also read and write as JSON and CSV |
+| `.Clb` | yes | - | GammaVision energy calibrations, recalled by jobs and the application |
 
 See [docs/formats.md](docs/formats.md) for the layouts, including how the `.Spc`
 record map was verified.
-
-## The whole manual runs
-
-Every feature in the MAESTRO v7 manual is implemented or deliberately improved -
-[docs/maestro-parity.md](docs/maestro-parity.md) is the section-by-section
-accounting, including what is different and why. The last pieces to land were
-window tiling and cascade, the unsaved-changes question, Download Spectra and
-field-mode instrument storage, the Optimize and pole-zero routines with an
-InSight virtual oscilloscope on the simulated preamplifier, printing with the
-plot and reports on one page, and the complete §6.5 JOB command set - including
-`RUN`/`WAIT "program"` launching real programs, `LOOP SPECTRA`/`VIEW` walking
-the instrument's stored spectra, and `ZOOM` placing windows.
-
-**Real hardware works, with none of ORTEC's software.** MantaRay drives an ORTEC
-926 over USB using only the kernel driver - no `Mcbcio32.dll`, no `mcbloc32.dll`,
-no `DpmUsbAddIn.dll`, no MAESTRO installed. It finds the instruments, numbers
-them itself, and reads whole spectra: all 8192 channels identical to what
-ORTEC's own library reads from the same detector, clocks matching to the
-millisecond, and the channel sums agreeing with the instrument's own arithmetic.
-A spectrum takes about a sixteenth of a second.
-
-On Linux not even the kernel driver is ORTEC's: the same instrument is reached
-over libusb with no vendor software of any kind, and a one-line udev rule is
-the whole installation. Verified against a real 926 - Scan and Open all in the
-desktop application, and the full spectrum readout - on 2026-08-05.
-
-Instruments are reached through a transport carrying one ASCII dialect, so a
-socket and a local instrument are the same code above the seam. See
-[docs/ortec-hardware.md](docs/ortec-hardware.md), which records the wire format
-and marks what is verified and what is not.
-
-## Checked against real data
-
-The readers and the analysis are tested against genuine instrument files, not
-only ones invented to pass. Drop real spectra into
-`crates/mantaray-formats/tests/fixtures/` and the suite will exercise them: every
-file must load, round-trip through the native format, and - for recognised
-sources - show the expected lines at the expected energies. On a real Cs-137
-spectrum from a MAESTRO Pro system, MantaRay reports the 661.657 keV line at
-661.98 keV with a 1.80 keV FWHM and a net area of 1 286 255 ± 1 185 (0.09 %).
-
-`cargo test --workspace` runs everything.
-[docs/testing.md](docs/testing.md) says what each suite holds to account, and -
-more usefully - what the tests **cannot** cover.
 
 ## Platforms
 
@@ -241,12 +204,13 @@ more usefully - what the tests **cannot** cover.
 |---|---|---|---|
 | **Linux** | yes | yes | yes - USB over libusb, with no vendor driver at all |
 | **Windows** | yes | yes | yes - USB, with only ORTEC's kernel driver |
-| macOS | yes | yes | never run against an instrument |
+| **macOS** | yes | yes | yes - USB over libusb, same road as Linux (Apple silicon) |
 
-Linux and Windows are released. macOS is built and tested by CI on every push
-and is deliberately **not** released: nothing has been run there against real
-hardware, and an untested binary for a platform nobody has used is a promise
-this project cannot keep.
+All three are released. Each platform earned its release the same way: by
+driving a real instrument first - macOS was held back until that happened, on
+2026-08-07. Intel macs are still not built, for the same reason macOS once was
+not: nothing has run there, and an untested binary for a platform nobody has
+used is a promise this project will not make.
 
 A few suites are about Windows itself - file-type registration, the crash
 report, the bridge to ORTEC's library - and are skipped elsewhere.
@@ -256,6 +220,9 @@ report, the bridge to ORTEC's library - and are skipped elsewhere.
 - [docs/maestro-parity.md](docs/maestro-parity.md) - every feature in the MAESTRO
   manual, where it lives here, and what is deliberately different
 - [docs/formats.md](docs/formats.md) - file format details
+- [docs/ortec-hardware.md](docs/ortec-hardware.md) - driving real ORTEC
+  instruments over USB: the wire dialect, the bench records, and what is
+  verified against hardware as opposed to assumed
 - [docs/architecture.md](docs/architecture.md) - how the crates fit together
 - [docs/nuclide-data.md](docs/nuclide-data.md) - why no nuclide library ships, and
   how to bring or build one
@@ -280,7 +247,8 @@ make them reachable:
   same evaluations in machine-readable form;
 - **[carsus](https://github.com/tardis-sn/carsus)**, from the TARDIS project,
   which retrieves and caches the NNDC tables;
-- **Dani Solakian** and the Berkeley **[RadWatch](https://github.com/RadWatch)**
+- **Dani Solakian** and the Berkeley
+  **[RadWatch](https://gitlab.com/radwatch/spectral-analysis)**
   `spectral-analysis` project, whose compiled NNDC gamma database MantaRay's
   library builder is designed around, used here with permission.
 
@@ -312,17 +280,8 @@ language model working from the MAESTRO manual, under human direction, rather
 than typed line by line. That is stated plainly because it should change how you
 read the code and how much you trust it before checking it yourself.
 
-What that does **not** mean is that it is unverified. The behaviour is pinned by
-an automated suite that runs on every push, the file readers are checked against
-genuine ORTEC files, and the hardware path was validated against a real ORTEC
-926 - the in-house USB readout returns all 8192 channels identically to ORTEC's
-own library, with the clocks matching to the millisecond. Where something could
-not be confirmed, it is marked unverified in the documentation rather than
-quietly assumed: [docs/testing.md](docs/testing.md) ends with what the tests
-cannot cover, and several formats are left unimplemented for the same reason.
-
-What it does mean is the ordinary caution owed to any young instrument
-program: this is alpha software, it has not had a long shakedown across many
-machines and detectors, and nobody should stake a measurement that matters on
-it without checking the result against something already trusted. Bug reports
-are welcome, and so is a careful reading of the parts you intend to rely on.
+What this means is the ordinary caution owed to any young instrument program:
+this is alpha software, it has not had a long shakedown across many machines and
+detectors, and nobody should stake a measurement that matters on it without
+checking the result against something already trusted. Bug reports are welcome,
+and so is a careful reading of the parts you intend to rely on.

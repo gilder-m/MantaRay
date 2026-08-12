@@ -111,14 +111,11 @@ energies, intensities, half-lives, the parent state's level energy and the ENSDF
 publication cut-off, which is every column the converter looks for. NuDat's own
 bulk export is the other, and is the better one if you want everything at once.
 
-To build the export yourself, the compiled NNDC gamma database used here comes
-from the Berkeley RadWatch [`spectral-analysis`](https://github.com/RadWatch)
-project, where it is produced with
-[carsus](https://github.com/tardis-sn/carsus) — the TARDIS project's tool for
-retrieving and caching NNDC tables. The
-[IAEA Live Chart of Nuclides API](https://www-nds.iaea.org/relnsd/vcharthtml/api_v0_guide.html)
-serves the same ENSDF evaluations one nuclide at a time and is a good check
-against a single value.
+The compiled NNDC gamma database this converter was developed against comes
+from the Berkeley RadWatch
+[`spectral-analysis`](https://gitlab.com/radwatch/spectral-analysis) project,
+where it is produced with [carsus](https://github.com/tardis-sn/carsus) — the
+TARDIS project's tool for retrieving and caching NNDC tables.
 
 ## Credit and terms
 
@@ -129,9 +126,9 @@ against a single value.
   required.
 - **[carsus](https://github.com/tardis-sn/carsus)**, TARDIS project — retrieval
   and caching.
-- **Dani Solakian** and Berkeley **[RadWatch](https://github.com/RadWatch)** —
-  the compiled gamma database this converter is built around, used with
-  permission.
+- **Dani Solakian** and Berkeley
+  **[RadWatch](https://gitlab.com/radwatch/spectral-analysis)** — the compiled
+  gamma database this converter is built around, used with permission.
 
 If you publish a result computed with a library built this way, cite the
 evaluation, not this program. The provenance line the converter prints is there
