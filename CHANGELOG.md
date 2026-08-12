@@ -20,14 +20,40 @@ read `1247973344.4968 y`, which claims a precision to the ten-thousandth of a
 year that no evaluation states - the digits past the fourth are the length of a
 year, not a measurement. Four significant figures throughout, so `1.248e9 y`.
 
+Significant figures, not decimal places, which is a distinction this got wrong
+on the first pass: `{:.4}` gave nine figures to an activity of 37 000 Bq - a
+microcurie, squarely in the range an operator meets - and two to one of 0.001
+Bq, so the wall of digits it was meant to remove survived in the middle of the
+range while the weak end lost precision instead. A number is now four figures
+wherever it falls, with one changeover into scientific notation rather than a
+jump from `99999.9876` to `1e5`. An infinity reads `inf` rather than
+`NaNe2147483647`.
+
+**Looking at a half life does not change it.** The field showing one shortens
+it for the eye, and egui fills its editor from that shortened text the moment
+the field takes focus, then reads the text back when focus leaves - whether or
+not anybody typed. So merely clicking in the field rewrote the number: Co-60's
+half life lost twelve hours, K-40's ten thousand years, and `Save as...` would
+have written the rounding down as though it were evaluated. The field now
+recognises its own shortened output and keeps the value that produced it, while
+anything actually typed is still read as typed.
+
 **A nuclide is keyed on every strong line it has, not only its strongest.**
 Confirmation requires *all* of a nuclide's key lines, so keying Co-60 on 1332
 keV alone let any stray peak there pass for cobalt while its 1173 keV twin went
 unasked for. Every true gamma at least half as probable as the strongest is now
-a key line, up to three - which gives the pairs a spectroscopist would use
+a key line, up to two - which gives the pairs a spectroscopist would use
 (Co-60 1173/1332, Tl-208 583/2614, Ba-133 81/356) without making a nuclide with
 a dozen strong lines the hardest one to find. X-rays and the annihilation line
 are never keyed on, because neither says which nuclide it came from.
+
+The cap is two rather than three because the half-as-strong rule is relative: a
+nuclide whose strongest gamma is faint has a low bar for the next one, so a
+spread-out decay scheme collects more required lines than a clean one, which is
+backwards - those are exactly the lines a short count loses. Eu-152 is the case
+in point, and it is this program's own calibration source: leading at 28.53%,
+it admitted a third line at 1408 keV and 20.87%, and requiring that would have
+put Eu-152 beyond a NaI detector or a brief count.
 
 **A wedged adapter can be recovered away from Windows (2026-08-11).**
 `mantaray-mcb usbfix` existed only on the platform that has ORTEC's driver. Off
@@ -50,12 +76,23 @@ liable to have disturbed.
 in the usage text on the libusb platforms and did nothing; the spectrum was read
 and then dropped. It now saves through the same writer the Windows `dump` uses,
 with both clocks in the instrument's own ticks and marked regions carried over
-as regions rather than as one per channel.
+as regions rather than as one per channel. The file records the model the way
+`probe` prints it - `0926-001`, not the raw `$F0926-001` record - and `--out`
+with no file after it says so before the adapter is opened rather than reading
+four thousand channels and then exiting quietly as though it had written them.
 
 **The 926 bench test can be run the way it says to run it.** Its three tests
 each claim the adapter exclusively and cargo runs tests in parallel, so at most
 one could pass and the others failed reporting a busy interface - which reads as
 broken hardware. They now take turns on the same lock `bridge_hardware.rs` uses.
+
+**The command-line tests stop pulling their fixture out from under each other.**
+Four of them share one library file and rewrote it on every call, so cargo
+running them in parallel meant one test truncating the file while another read
+it - which surfaced as `peaks` exiting with "missing library rows" and an empty
+stdout, reading as a broken peak search rather than as a broken fixture. It
+failed that way on CI on 2026-08-12. The fixture is now written once per test
+binary.
 
 ## 0.2.1-alpha (2026-08-08)
 

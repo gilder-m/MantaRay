@@ -239,12 +239,12 @@ impl BulkDevice for Device {
         // The top bit of an endpoint address is its direction, which decides
         // whether these bytes are being sent or are about to be filled in.
         // A failure here is deliberately left where it lies rather than settled
-        // on the spot. A timed-out read is the ordinary way this instrument
-        // says "not yet" - the first question after an adapter is opened goes
-        // unanswered every time on a 926 - and settling in response would treat
-        // the common case as damage, at the price of the cancelled reads that
-        // cause the real thing. Recovery belongs to `usbfix`, where somebody
-        // has decided the adapter is actually stuck.
+        // on the spot. Settling costs a run of cancelled reads, and cancelled
+        // reads are what put the two ends' data toggles out of step in the
+        // first place - so settling on every timeout would manufacture the
+        // fault it is meant to cure, and would do it fastest on a link that is
+        // merely slow. Recovery belongs to `usbfix`, where somebody has looked
+        // at the adapter and decided it is actually stuck.
         if endpoint & 0x80 == 0 {
             let mut out = self.out.borrow_mut();
             let done = out.transfer_blocking(data.to_vec().into(), timeout);
@@ -262,8 +262,8 @@ impl BulkDevice for Device {
 }
 
 impl Device {
-    /// The reading half of [`BulkDevice::bulk`], split out so that the borrow
-    /// of the endpoint is over before a failure is settled.
+    /// The reading half of [`BulkDevice::bulk`], which is the longer of the
+    /// two and the only one that has to size its own buffer.
     fn read(&self, data: &mut [u8], timeout: Duration, milliseconds: u32) -> Result<usize, String> {
         use nusb::transfer::TransferError;
         let mut input = self.input.borrow_mut();

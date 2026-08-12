@@ -782,12 +782,26 @@ data toggle advanced while the host's has not moved, and from then on the two
 talk past each other. Clearing a halt resets the toggle, which is why `settle`
 drains *first* and clears *after* - the reverse order throws the repair away
 before the damage is done. Nothing settles automatically: not on open, not
-after a timeout. A first read that times out is ordinary on a 926, and treating
-it as damage costs exactly the cancelled transfers that cause the real thing.
+after a timeout. Settling on a timeout would treat a slow link as a broken one
+and pay for it in exactly the cancelled transfers that cause the real fault.
 
 The port cycle then failed the way the Windows note predicts - the adapter left
 the bus and did not come back for a full minute of polling, and a physical
 replug was what recovered it. Once replugged it was in step, and stayed so.
+
+*What a healthy adapter actually does on the first question, measured
+2026-08-12.* An earlier draft of this note recorded that a first read after an
+open goes unanswered "every time" on a 926, and used it to argue that a
+timed-out read is ordinary. It is not: against this same adapter, once
+replugged and in step, five fresh opens answered `SHOW_VERSION` with
+`$F0926-001` five times, `usbfix` reported "nothing to fix" without settling,
+and `probe` read the model and conversion gain straight off. `ViaDirect::open`
+says the same thing structurally - it propagates the first command's error, so
+`probe` and `serve` could never have opened an instrument at all if the first
+read really did always fail. The observation was almost certainly made while
+the adapter was still slipped, and it does not generalise. The reason not to
+settle on a timeout stands on its own and is the sentence above; it never
+needed this one.
 
 The permission prediction below also held exactly - the first open failed with
 `errno 13` and nothing else was missing. The rule that fixed it:

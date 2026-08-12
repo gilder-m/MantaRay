@@ -380,8 +380,18 @@ const KEY_LINE_FRACTION: f64 = 0.5;
 ///
 /// Every key line is another line that must be found, so a nuclide with a
 /// dozen strong gammas would otherwise become the hardest to identify rather
-/// than the easiest. Three is enough to be sure and few enough to be met.
-const KEY_LINE_LIMIT: usize = 3;
+/// than the easiest.
+///
+/// Two, and the reason is that the fraction is relative. A nuclide whose
+/// strongest gamma is faint has a low bar for "half as strong", so a spread-out
+/// decay scheme sweeps in more required lines than a clean one - which is
+/// backwards, because those are exactly the lines a short count loses. Eu-152
+/// is the case that shows it: its strongest gamma is 28.53%, so a third line
+/// arrives at 1408 keV and 20.87%, and requiring it puts this program's own
+/// calibration source out of reach of a NaI detector or a brief count. Every
+/// pair the rule exists to capture - Co-60 1173/1332, Tl-208 583/2614, Ba-133
+/// 81/356 - is a pair.
+const KEY_LINE_LIMIT: usize = 2;
 
 /// Marks the lines a nuclide has to show to be believed.
 ///
@@ -441,6 +451,11 @@ Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,1173.228,99.85
 Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,1332.492,99.9826
 Co60,60,Co,27,33,0.0,False,166344000.0,60Ni,g,,347.14,0.0075
 Na22,22,Na,11,11,0.0,False,82053000.0,22Ne,g,Annihil.,511.0,180.7
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,121.7817,28.53
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,344.2785,26.59
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,1408.013,20.87
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,964.057,14.51
+Eu152,152,Eu,63,89,0.0,False,426902400.0,152Sm,g,,244.6974,7.55
 Al24,24,Al,13,11,0.0,False,2.053,24Mg,g,,1368.6,100.0
 Al24,24,Al,13,11,425.81,True,0.1307,24Mg,g,,426.0,98.0
 ";
@@ -543,6 +558,32 @@ Al24,24,Al,13,11,425.81,True,0.1307,24Mg,g,,426.0,98.0
         assert_eq!(keyed.len(), 2, "both of Co-60's gammas key it: {keyed:?}");
         assert!(keyed.iter().any(|energy| (energy - 1332.492).abs() < 1e-6));
         assert!(keyed.iter().any(|energy| (energy - 1173.228).abs() < 1e-6));
+    }
+
+    /// A spread-out decay scheme must not become the hardest thing to find.
+    ///
+    /// The half-as-strong rule is relative, so a nuclide whose strongest gamma
+    /// is itself faint admits more lines: Eu-152 leads at 28.53%, which lets
+    /// in 344 keV *and* 1408 keV. Requiring all three would put this program's
+    /// own calibration source beyond a NaI detector or a short count, so the
+    /// cap holds it to the two that a spectroscopist would actually reach for.
+    #[test]
+    fn a_nuclide_with_many_strong_gammas_is_not_keyed_on_all_of_them() {
+        let library = built(1.0).library;
+        let europium = library.nuclide("Eu-152").expect("Eu-152");
+        let keyed: Vec<f64> = europium
+            .peaks
+            .iter()
+            .filter(|peak| peak.key_line)
+            .map(|peak| peak.energy)
+            .collect();
+        assert_eq!(keyed.len(), 2, "two lines are enough to mean it: {keyed:?}");
+        assert!(keyed.iter().any(|energy| (energy - 121.7817).abs() < 1e-6));
+        assert!(keyed.iter().any(|energy| (energy - 344.2785).abs() < 1e-6));
+        assert!(
+            !keyed.iter().any(|energy| (energy - 1408.013).abs() < 1e-6),
+            "1408 keV at 20.87% is a line a short count loses"
+        );
     }
 
     /// A line the nuclide only sometimes shows must not be a requirement.

@@ -223,6 +223,21 @@ fn direct_main() -> Result<(), String> {
             Ok(())
         }
         "usbspectrum" | "spectrum" => {
+            // Settled before the adapter is touched. A mistyped command line
+            // should not cost an instrument round-trip, and finding out that
+            // `--out` was given nothing only after reading four thousand
+            // channels back is the wrong end to find it out from.
+            let output = match positional.iter().position(|argument| argument == "--out") {
+                None => None,
+                // Asked for and not given. Returning quietly here would read
+                // as a spectrum written, and the operator would go looking
+                // for a file that was never named.
+                Some(at) => Some(
+                    positional
+                        .get(at + 1)
+                        .ok_or("--out needs a file to write to")?,
+                ),
+            };
             let device = direct::Device::open(wanted.as_deref())?;
             eprintln!("adapter {}", device.serial());
             let memory = dpm::Dpm::new(&device);
@@ -238,10 +253,6 @@ fn direct_main() -> Result<(), String> {
                 "{channels} channels, total {total}, {} channel(s) in a region of interest",
                 regions.iter().filter(|inside| **inside).count()
             );
-            let output = positional
-                .iter()
-                .position(|argument| argument == "--out")
-                .and_then(|at| positional.get(at + 1));
             let Some(output) = output else {
                 return Ok(());
             };
@@ -252,7 +263,13 @@ fn direct_main() -> Result<(), String> {
             // instrument counts in, and the same one the Windows dump reads.
             spectrum.live_time = ticks(&memory, "SHOW_LIVE")?;
             spectrum.real_time = ticks(&memory, "SHOW_TRUE")?;
-            spectrum.sample_description = memory.command("SHOW_VERSION").unwrap_or_default();
+            // The model as `probe` prints it, not the raw record: `0926-001`
+            // rather than `$F0926-001`. The `$F` is protocol framing, and a
+            // file that carries it is showing an operator the wire.
+            spectrum.sample_description = memory
+                .command("SHOW_VERSION")
+                .map(|reply| serve::record_text(&reply))
+                .unwrap_or_default();
             // The instrument marks regions a channel at a time; a region is the
             // run those flags make, so the runs are what get marked here. One
             // region per channel would be the same information in a form
@@ -320,8 +337,11 @@ fn usb_fix(wanted: Option<&str>, arguments: &[String]) -> Result<(), String> {
         })
     };
 
-    // Opening settles the endpoints on its own, so this first look is already
-    // the verdict on whether settling was enough.
+    // Opening deliberately does not settle - see `Device::open` - so this
+    // first look is the adapter as it was found, and the only thing that says
+    // whether there is anything here to repair. A healthy adapter answers it
+    // and goes no further, which matters: the step after this one is the one
+    // that can wedge a working adapter.
     let device = direct::Device::open(wanted)?;
     let serial = device.serial().to_string();
     println!("adapter {serial}");

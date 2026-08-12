@@ -52,6 +52,18 @@ fn sample(path: &Path) {
 /// provenance; a real library is a `.Lib` file or one built with
 /// `mantaray library` from an evaluated export.
 fn library_file() -> PathBuf {
+    // Written once, however many tests ask for it. Four of them do, they share
+    // the one path, and cargo runs them in parallel - so writing on every call
+    // means one test truncating the file while another is reading it. What
+    // that looks like from the far end is `mantaray peaks` exiting with
+    // "missing library rows" and an empty stdout, which reads as the peak
+    // search having broken rather than as the fixture having been pulled out
+    // from under it. It failed exactly that way on CI on 2026-08-12.
+    static LIBRARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    LIBRARY.get_or_init(write_library_file).clone()
+}
+
+fn write_library_file() -> PathBuf {
     let path = workspace().join("test-library.csv");
     std::fs::write(
         &path,

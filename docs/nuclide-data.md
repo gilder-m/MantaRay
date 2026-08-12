@@ -60,13 +60,21 @@ same line appears under more than one decay branch it keeps the strongest.
 It marks the **key lines** — the lines the analysis requires before it will name
 a nuclide, all of them rather than any one of them. So the set has to be lines
 that arrive whenever the nuclide does: every true gamma at least half as
-probable as that nuclide's strongest, and at most three. Co-60 is keyed on 1173
+probable as that nuclide's strongest, and at most two. Co-60 is keyed on 1173
 and 1332 together, Tl-208 on 583 and 2614, Ba-133 on 81 and 356; Cs-137 emits
 one gamma and is keyed on it alone. One key line is a weak test for a nuclide
 that always emits two — any stray peak near 1332 would then pass for Co-60 —
 and a long list is the opposite failure, because a single line lost to a short
-count or a poor efficiency loses the nuclide with it. X-rays and the
-annihilation line are never keyed on: neither says which nuclide it came from.
+count or a poor efficiency loses the nuclide with it.
+
+The cap is two rather than three because the half-as-strong rule is *relative*:
+a nuclide whose strongest gamma is faint has a low bar for the next one, so a
+spread-out decay scheme collects more required lines than a clean one, which is
+backwards. Eu-152 is the case in point — its strongest gamma is 28.53%, so a
+third line arrives at 1408 keV and 20.87%, and requiring that puts this
+program's own calibration source out of reach of a NaI detector or a brief
+count. X-rays and the annihilation line are never keyed on: neither says which
+nuclide it came from.
 
 It keeps each **decaying state** separate, which matters more than it sounds.
 The export gives one row per emission per *parent state*, and a nuclide's

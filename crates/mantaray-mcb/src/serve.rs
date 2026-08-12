@@ -593,7 +593,7 @@ pub(crate) fn record_number(reply: &str, letter: char) -> Result<f64, String> {
 }
 
 /// The text of an `$F` record, which carries no checksum to strip.
-fn record_text(reply: &str) -> String {
+pub(crate) fn record_text(reply: &str) -> String {
     let text = reply.trim().trim_start_matches('$');
     let text = text.strip_prefix('F').unwrap_or(text);
     if text.is_empty() {

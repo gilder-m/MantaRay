@@ -281,3 +281,36 @@ fn a_long_half_life_is_written_in_scientific_notation() {
         carried.half_life_display()
     );
 }
+
+/// Four *significant figures*, which is not four decimal places.
+///
+/// The distinction is the whole point of the helper and it was got wrong
+/// once: `{:.4}` gave nine figures to an activity of 37 000 Bq - a microcurie,
+/// squarely in the range an operator meets - and two to one of 0.001 Bq. A
+/// fixed number of decimals is wrong at whichever end you are not looking at.
+#[test]
+fn a_number_is_shown_at_four_figures_wherever_it_falls() {
+    use mantaray_core::significant;
+    assert_eq!(significant(1234.5678), "1235");
+    assert_eq!(significant(37_000.123_456), "37000");
+    assert_eq!(significant(661.657), "661.7");
+    assert_eq!(significant(12.34567), "12.35");
+    assert_eq!(significant(9.876543), "9.877");
+    assert_eq!(significant(0.001234), "0.001234");
+
+    // Past the range plain digits can be taken in at a glance, scientific -
+    // and the changeover carries rather than printing "10e4".
+    assert_eq!(significant(99_999.987_65), "1e5");
+    assert_eq!(significant(1.248e9), "1.248e9");
+    assert_eq!(significant(0.000_123_4), "1.234e-4");
+
+    // Zeros that are digits of the number, not padding, stay.
+    assert_eq!(significant(1200.0), "1200");
+    assert_eq!(significant(0.0), "0");
+
+    // Neither of these has a four-figure form; an earlier version turned an
+    // infinity into "NaNe2147483647", which is an arithmetic accident wearing
+    // the clothes of a measurement.
+    assert_eq!(significant(f64::NAN), "NaN");
+    assert_eq!(significant(f64::INFINITY), "inf");
+}
