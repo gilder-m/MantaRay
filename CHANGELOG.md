@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**A spectrum with no start time no longer claims to have been counted in 1970
+(2026-08-11).** `.Spe` was written with `01/01/1970 00:00:00` whenever the start
+was not recorded, and that reads back as a measurement made at the Unix epoch -
+a date nothing can tell from one that was meant, and one a decay correction will
+use without complaint, wrong by decades. The keyword is now left out when there
+is no date, which is what the `.Chn` writer has always done by leaving the field
+blank; and the old placeholder is read as the absence it stood for, so files
+already carrying it stop asserting a date. Found on a 5073-second Cs-137 count
+off the bench, which `info` reported as acquired on 1 January 1970.
+
+**The nuclide report's numbers are four significant figures.** The text report
+kept three decimal places of its own after the interface's table had moved on,
+so a detection limit printed as `2528199.244` and a small activity as `0.003` -
+and a report could disagree with the window it came from.
+
+**`docs/nuclide-data.md` no longer promises an export that is not there.** It
+said a prebuilt NNDC export and library were attached to the releases; neither
+is, on any of them. It now says so, and points at the two sources that do serve
+the evaluations.
+
 **The nuclide library dialog shows more than its first few nuclides
 (2026-08-11).** The list was built inside a horizontal layout, and a scroll area
 lays its contents out the way it was reached - so the names ran off the right

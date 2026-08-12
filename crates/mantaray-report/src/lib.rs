@@ -327,12 +327,17 @@ pub fn nuclide_report(analysis: &QuantitativeReport) -> String {
             .iter()
             .map(|line| format!("{:.2}", line.energy))
             .collect();
+        // Four significant figures, not three decimal places: an activity runs
+        // from millibecquerels to gigabecquerels and a fixed point is wrong at
+        // both ends of that - a wall of digits for a strong source, `0.000` for
+        // a weak one. The same rule the interface's table uses, so a report and
+        // the window it came from cannot disagree about a number.
         out.push_str(&format!(
-            "{:<10} {:>12.3} {:>12.3} {:>12.3}  {:<12} {}\n",
+            "{:<10} {:>12} {:>12} {:>12}  {:<12} {}\n",
             nuclide.nuclide,
-            nuclide.activity,
-            nuclide.uncertainty,
-            nuclide.mda,
+            mantaray_core::significant(nuclide.activity),
+            mantaray_core::significant(nuclide.uncertainty),
+            mantaray_core::significant(nuclide.mda),
             if nuclide.detected {
                 "detected"
             } else {
@@ -359,7 +364,10 @@ pub fn nuclide_report(analysis: &QuantitativeReport) -> String {
     }
     let total = analysis.total_activity();
     if total > 0.0 {
-        out.push_str(&format!("\nTotal detected activity: {total:.3} {unit}\n"));
+        out.push_str(&format!(
+            "\nTotal detected activity: {} {unit}\n",
+            mantaray_core::significant(total)
+        ));
     }
     if !analysis.notes.is_empty() {
         out.push('\n');

@@ -98,9 +98,18 @@ undetermined, the result says undetermined rather than substituting a number.
 
 ### Getting the export
 
-A prebuilt export and library are attached to the
-[releases](https://github.com/gilder-m/MantaRay/releases) so you do not have to
-assemble one to get started.
+**No export or library is attached to the releases yet**, so one has to be
+assembled before the converter above has anything to read. This said otherwise
+for a while, which cost somebody an afternoon looking for a file that was never
+there.
+
+Two sources serve the same ENSDF evaluations. The
+[IAEA Live Chart of Nuclides API](https://www-nds.iaea.org/relnsd/vcharthtml/api_v0_guide.html)
+answers one nuclide at a time over HTTP and needs no account, which makes it the
+practical way to build an export for a chosen list of nuclides - it carries the
+energies, intensities, half-lives, the parent state's level energy and the ENSDF
+publication cut-off, which is every column the converter looks for. NuDat's own
+bulk export is the other, and is the better one if you want everything at once.
 
 To build the export yourself, the compiled NNDC gamma database used here comes
 from the Berkeley RadWatch [`spectral-analysis`](https://github.com/RadWatch)
