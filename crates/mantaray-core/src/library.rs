@@ -215,10 +215,37 @@ impl Nuclide {
         } else {
             (seconds, "s")
         };
-        let value = format!("{value:.4}");
-        let value = value.trim_end_matches('0').trim_end_matches('.');
-        format!("{value} {unit}")
+        format!("{} {unit}", significant(value))
     }
+}
+
+/// A number at four significant figures, in the form that stays readable.
+///
+/// Plain digits while they can be taken in at a glance, and `1.248e9` once
+/// they cannot. The cut matters most for half lives: picking the largest unit
+/// that fits still leaves K-40 at 1.248 thousand million years, and writing
+/// that out claims a precision the evaluation does not - the digits past the
+/// fourth are the length of a year, not a measurement.
+pub fn significant(value: f64) -> String {
+    if !(0.001..100_000.0).contains(&value) && value != 0.0 {
+        return scientific(value);
+    }
+    let text = format!("{value:.4}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Four significant figures as `1.248e9`, the way the evaluations write them.
+fn scientific(value: f64) -> String {
+    let mut exponent = value.abs().log10().floor() as i32;
+    let mut mantissa = value / 10_f64.powi(exponent);
+    // Rounding can carry: 9.9999e8 would otherwise print as "10e8".
+    if format!("{mantissa:.3}").starts_with("10") {
+        mantissa /= 10.0;
+        exponent += 1;
+    }
+    let text = format!("{mantissa:.3}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{text}e{exponent}")
 }
 
 /// A library line together with the nuclide that owns it.

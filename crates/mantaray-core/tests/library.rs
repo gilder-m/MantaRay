@@ -253,3 +253,31 @@ fn a_typed_name_finds_the_nuclide() {
     ));
     assert!(odd.find_typed("background").is_some());
 }
+
+/// A half life is four significant figures, however long or short it is.
+///
+/// K-40's is a thousand million years, and printed in full it claims a
+/// precision to the ten-thousandth of a year that no evaluation states.
+#[test]
+fn a_long_half_life_is_written_in_scientific_notation() {
+    use mantaray_core::{LibraryPeak, Nuclide};
+    let potassium = Nuclide::new(
+        "K-40",
+        3.938_304_361_629_082e16,
+        vec![LibraryPeak::new(1460.82, 10.66)],
+    );
+    assert_eq!(potassium.half_life_display(), "1.248e9 y");
+
+    // Short ones keep the plain form, which is easier to read at that size.
+    let thallium = Nuclide::new("Tl-208", 183.18, vec![LibraryPeak::new(2614.511, 99.754)]);
+    assert_eq!(thallium.half_life_display(), "3.053 m");
+
+    // And one that rounds up onto the next power of ten must not print "10e".
+    let carried = Nuclide::new("X-1", 0.999_99e9 * 31_557_600.0, vec![]);
+    assert!(
+        carried.half_life_display().starts_with("1e9 ")
+            || carried.half_life_display().starts_with("1.0e9 "),
+        "carried badly: {}",
+        carried.half_life_display()
+    );
+}

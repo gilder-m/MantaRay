@@ -55,8 +55,18 @@ nothing more.
 It selects photons — the `g` rows — and drops betas, conversion electrons and
 alphas, none of which make a peak in a gamma spectrum. It tells gammas, X-rays
 and the annihilation line apart from the export's own subtype column. Where the
-same line appears under more than one decay branch it keeps the strongest, and
-it marks each nuclide's strongest true gamma as the key line.
+same line appears under more than one decay branch it keeps the strongest.
+
+It marks the **key lines** — the lines the analysis requires before it will name
+a nuclide, all of them rather than any one of them. So the set has to be lines
+that arrive whenever the nuclide does: every true gamma at least half as
+probable as that nuclide's strongest, and at most three. Co-60 is keyed on 1173
+and 1332 together, Tl-208 on 583 and 2614, Ba-133 on 81 and 356; Cs-137 emits
+one gamma and is keyed on it alone. One key line is a weak test for a nuclide
+that always emits two — any stray peak near 1332 would then pass for Co-60 —
+and a long list is the opposite failure, because a single line lost to a short
+count or a poor efficiency loses the nuclide with it. X-rays and the
+annihilation line are never keyed on: neither says which nuclide it came from.
 
 It keeps each **decaying state** separate, which matters more than it sounds.
 The export gives one row per emission per *parent state*, and a nuclide's

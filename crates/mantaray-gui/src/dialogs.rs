@@ -2987,10 +2987,18 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                                             egui::RichText::new(text).weak()
                                         }
                                     };
-                                    ui.label(number(format!("{:.3}", nuclide.activity)));
-                                    ui.label(number(format!("{:.3}", nuclide.uncertainty)));
+                                    // Four significant figures rather than three
+                                    // decimal places: an activity runs from
+                                    // millibecquerels to gigabecquerels, and a
+                                    // fixed point is wrong at both ends - it
+                                    // prints a strong source as a wall of
+                                    // digits and a weak one as 0.000.
+                                    ui.label(number(mantaray_core::significant(nuclide.activity)));
+                                    ui.label(number(mantaray_core::significant(
+                                        nuclide.uncertainty,
+                                    )));
                                     ui.label(if nuclide.mda > 0.0 {
-                                        number(format!("{:.3}", nuclide.mda))
+                                        number(mantaray_core::significant(nuclide.mda))
                                     } else {
                                         egui::RichText::new("\u{2014}").weak()
                                     });
@@ -3073,7 +3081,12 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                     egui::DragValue::new(&mut app.dialogs.source_activity_bq)
                         .speed(10.0)
                         .range(0.0..=1e12)
-                        .suffix(" Bq"),
+                        .suffix(" Bq")
+                        // A microcurie is 37 000 Bq and a millicurie 3.7e7, so
+                        // this field spans the range where digits stop being
+                        // countable by eye. Typed in either form.
+                        .custom_formatter(|value, _| mantaray_core::significant(value))
+                        .custom_parser(|text| text.trim().parse().ok()),
                 );
                 ui.label("±");
                 ui.add(
@@ -3311,23 +3324,33 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                 .max_height(280.0)
                 .show(ui, |ui| {
                     ui.set_min_width(140.0);
-                    for index in 0..app.library.len() {
-                        let name = app.library.nuclides[index].name.clone();
-                        if ui
-                            .selectable_label(app.dialogs.library_selection == Some(index), name)
-                            .clicked()
-                        {
-                            app.dialogs.library_selection = Some(index);
+                    // A scroll area builds its contents in whatever layout it
+                    // was reached in, and this one is reached from a horizontal
+                    // one - so without asking for top-down here the names run
+                    // off the right-hand edge in a single line instead of
+                    // stacking, and a library of any size is mostly unreachable.
+                    ui.vertical(|ui| {
+                        for index in 0..app.library.len() {
+                            let name = app.library.nuclides[index].name.clone();
+                            if ui
+                                .selectable_label(
+                                    app.dialogs.library_selection == Some(index),
+                                    name,
+                                )
+                                .clicked()
+                            {
+                                app.dialogs.library_selection = Some(index);
+                            }
                         }
-                    }
-                    if ui.button("+ nuclide").clicked() {
-                        app.library.push(Nuclide::new(
-                            "New",
-                            0.0,
-                            vec![LibraryPeak::new(100.0, 100.0)],
-                        ));
-                        app.dialogs.library_selection = Some(app.library.len() - 1);
-                    }
+                        if ui.button("+ nuclide").clicked() {
+                            app.library.push(Nuclide::new(
+                                "New",
+                                0.0,
+                                vec![LibraryPeak::new(100.0, 100.0)],
+                            ));
+                            app.dialogs.library_selection = Some(app.library.len() - 1);
+                        }
+                    });
                 });
             ui.separator();
             ui.vertical(|ui| {
@@ -3344,7 +3367,17 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     ui.label("Name");
                     ui.add(egui::TextEdit::singleline(&mut nuclide.name).desired_width(100.0));
                     ui.label("Half life (s)");
-                    ui.add(egui::DragValue::new(&mut nuclide.half_life_seconds).speed(100.0));
+                    // Half lives in seconds run from a fraction of one to
+                    // 10^16, and the long ones are unreadable written out -
+                    // Am-241's is 13651526177. Shown the way the line below
+                    // shows it, and still typed in plainly: the parser takes
+                    // `1.365e10` and `13651526177` alike.
+                    ui.add(
+                        egui::DragValue::new(&mut nuclide.half_life_seconds)
+                            .speed(100.0)
+                            .custom_formatter(|value, _| mantaray_core::significant(value))
+                            .custom_parser(|text| text.trim().parse().ok()),
+                    );
                 });
                 ui.label(format!("= {}", nuclide.half_life_display()));
                 ui.separator();
