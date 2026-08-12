@@ -11,3 +11,6 @@
 crates/mantaray-formats/tests/fixtures/*
 !crates/mantaray-formats/tests/fixtures/README.md
 !crates/mantaray-formats/tests/fixtures/.gitkeep
+
+# Local Claude Code configuration and skills
+/.claude
