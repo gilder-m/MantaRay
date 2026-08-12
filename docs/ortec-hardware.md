@@ -484,14 +484,17 @@ An abandoned transfer leaves the adapter holding a reply nobody collected, and
 from then on every answer is one question behind. Left alone this needs a
 physical replug, which is not a thing to ask of anyone using the program.
 
-Three levels of recovery are implemented, tried in order by `mantaray-mcb usbfix`:
+Three levels of recovery are implemented, tried in order by `mantaray-mcb
+usbfix`, on every platform - the steps are the same, only the call that performs
+each one differs:
 
 1. **Abort and reset both pipes**, then read the in endpoint until it stops
    answering. This drains queued replies and is enough for most slips.
-2. **Cycle the port** - `IOCTL_ADAPT_CYCLE_PORT`, which is a replug in software.
-   The device re-enumerates under the same path, because the path carries the
-   serial number. Verified to bring back an adapter that nothing else would
-   revive.
+2. **Cycle the port** - a replug in software: `IOCTL_ADAPT_CYCLE_PORT` on
+   Windows, a libusb device reset elsewhere. The device re-enumerates under the
+   same path, because the path carries the serial number. Verified to bring
+   back an adapter that nothing else would revive - and, on macOS, verified to
+   sometimes not bring one back at all.
 3. If neither works, say so plainly: the cable and the instrument's power are
    what is left, and those are things only a person can check.
 
@@ -756,6 +759,35 @@ on the Windows bench - and nothing about it was a special case:
 **There was no permission step at all.** macOS has no equivalent of the udev
 rule below and needs none: the adapter's interface is vendor-specific, so no
 kernel driver claims it, and the first open succeeded as an ordinary user.
+
+**A second 926 on macOS, 2026-08-11.** Adapter `08134079`, 4096 channels, met
+the same way. Two things came out of it that the first bench could not show.
+
+*Recovery had never been built here.* The three-step ladder above existed only
+on the Windows side; away from it `usbfix` did not exist at all, so a slipped
+reply stream had no cure but the cable. This adapter arrived already slipped -
+`SHOW_VERSION` answering with a conversion gain and `SHOW_ACTIVE` with the
+version - which is exactly the fault the ladder is for, met on the one platform
+that had no ladder. `mantaray-mcb usbfix [--cycle]` is now the same three steps
+over libusb: drain, then `Device::reset()` in place of `IOCTL_ADAPT_CYCLE_PORT`,
+with the same double-`$F` check. Resetting needs the interface released first,
+so the handle is consumed rather than borrowed.
+
+*"Draining wedges a healthy adapter" is true here too, and worse.* Draining on
+open was tried before that warning was re-read, and it turned an adapter that
+answered every time into one that answered never - three runs out of three,
+against a stock build that managed two out of three beside it. The mechanism
+fits libusb specifically: a cancelled IN transfer can leave the instrument's
+data toggle advanced while the host's has not moved, and from then on the two
+talk past each other. Clearing a halt resets the toggle, which is why `settle`
+drains *first* and clears *after* - the reverse order throws the repair away
+before the damage is done. Nothing settles automatically: not on open, not
+after a timeout. A first read that times out is ordinary on a 926, and treating
+it as damage costs exactly the cancelled transfers that cause the real thing.
+
+The port cycle then failed the way the Windows note predicts - the adapter left
+the bus and did not come back for a full minute of polling, and a physical
+replug was what recovered it. Once replugged it was in step, and stayed so.
 
 The permission prediction below also held exactly - the first open failed with
 `errno 13` and nothing else was missing. The rule that fixed it:

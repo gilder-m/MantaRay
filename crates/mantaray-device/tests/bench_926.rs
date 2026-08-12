@@ -12,8 +12,24 @@
 //! overrides which adapter is expected.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use mantaray_device::{BridgeTransport, Mcb, RemoteMcb};
+
+/// One instrument, one holder.
+///
+/// The adapter is claimed exclusively, so only one of these tests can hold it
+/// at a time. Cargo runs them in parallel by default, and without this the
+/// others find the interface already taken and fail saying so - which looks
+/// like a broken instrument rather than like tests standing on each other.
+/// `bridge_hardware.rs` takes turns the same way, for the same reason.
+static BENCH: Mutex<()> = Mutex::new(());
+
+/// Waits for the bench, ignoring a previous test having panicked while holding
+/// it - the lock orders access, it does not guard any state.
+fn bench() -> MutexGuard<'static, ()> {
+    BENCH.lock().unwrap_or_else(|held| held.into_inner())
+}
 
 /// The helper the bridge runs.
 ///
@@ -64,6 +80,7 @@ fn open_unpinned_expecting(expected: &str) -> Result<RemoteMcb, String> {
 #[test]
 #[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
 fn the_instrument_is_learned_then_matched_and_a_stranger_is_refused() {
+    let _bench = bench();
     // First open of a new entry: nothing is expected, so the serial is
     // learned from what the instrument calls itself.
     let learned = {
@@ -118,6 +135,7 @@ fn the_instrument_is_learned_then_matched_and_a_stranger_is_refused() {
 #[test]
 #[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
 fn the_presets_the_instrument_holds_are_read_on_connecting() {
+    let _bench = bench();
     // The bug this covers, found on the bench: preset registers outlive the
     // session that wrote them, and mantaray only ever wrote them - so it
     // opened showing none while the instrument held one.
@@ -145,6 +163,7 @@ fn the_presets_the_instrument_holds_are_read_on_connecting() {
 #[test]
 #[ignore = "needs the ORTEC 926 on the bus; run with --ignored"]
 fn a_preset_the_instrument_has_already_reached_refuses_the_next_start() {
+    let _bench = bench();
     // The whole point of reading the presets back, proven end to end on the
     // instrument: count out a short preset, then try to start again. The 926
     // answers START, leaves the clocks where they are and says nothing, so the
