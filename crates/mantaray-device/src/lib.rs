@@ -20,6 +20,7 @@ pub mod alarm;
 pub mod any;
 pub mod bridge;
 pub mod changer;
+mod courier;
 pub mod detector;
 pub mod error;
 pub mod mcb;

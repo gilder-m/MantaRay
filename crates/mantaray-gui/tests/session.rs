@@ -1020,21 +1020,31 @@ fn a_network_instrument_joins_the_pick_list_and_counts() {
     );
     assert!(app.status.contains("connected"), "{}", app.status);
 
-    // Open its window, start it, and let the far clock run.
+    // Open its window, start it, and let the far clock run. The application
+    // keeps a network instrument on a courier, so its counts arrive when the
+    // round trip completes rather than inside `advance_by` - the loop gives
+    // that real wall time, bounded so a genuine failure still fails.
     app.apply_action(Action::OpenDetector(before));
     app.apply_action(Action::Start);
-    for _ in 0..4 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
         {
             let mut instrument = served.lock().unwrap();
             mantaray_device::advance(&mut *instrument, 1.0).expect("far clock");
         }
         app.advance_by(1.0);
+        if app
+            .active_spectrum()
+            .is_some_and(|spectrum| spectrum.total_counts() > 0)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "counts from the far instrument should be on screen"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(
-        app.active_spectrum()
-            .is_some_and(|spectrum| spectrum.total_counts() > 0),
-        "counts from the far instrument should be on screen"
-    );
 }
 
 #[test]
@@ -1075,14 +1085,19 @@ fn a_network_instrument_that_drops_mid_count_is_reported_not_fatal() {
     wire.shutdown(std::net::Shutdown::Both).expect("shutdown");
 
     // The session must survive the loss and say which instrument it lost.
-    for _ in 0..3 {
+    // The courier meets the dead wire on its own thread, so the report
+    // arrives on whichever poll collects the failure - bounded, because a
+    // report that never comes must still fail loudly here.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !app.status.contains("42") {
         app.advance_by(1.0);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the trouble should name the detector: {:?}",
+            app.status
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(
-        app.status.contains("42"),
-        "the trouble should name the detector: {:?}",
-        app.status
-    );
 }
 
 #[test]
