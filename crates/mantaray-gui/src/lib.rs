@@ -27,6 +27,7 @@ pub const APPLICATION_ID: &str = "mantaray";
 pub mod app;
 pub mod assoc;
 pub mod crash;
+pub mod debug;
 pub mod dialogs;
 pub mod icons;
 pub mod jobs;
