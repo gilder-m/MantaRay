@@ -1,5 +1,87 @@
 # Changelog
 
+## Unreleased
+
+**A detector's calibration survives the session (2026-08-13).** Calibrating a
+detector window wrote to a mirror that lives exactly as long as the
+connection: the next session - or the next reconnect - rebuilt the mirror
+from the configuration's `CAL` field, or from nothing, and the operator's
+calibration was quietly gone. Reported from the bench as "calibration is not
+being saved", intermittently, because whether it seemed saved depended on
+what the operator did next. A calibration made on a detector is now filed
+under the serial the instrument reports and put back at every connect,
+outranking the configuration's own: the remembered one is what the operator
+did, on this screen, since that file was written. Pinned end to end - two
+sessions, one served instrument - and the memory follows the instrument, not
+the session.
+
+**A calibration can be saved to a file of its own (2026-08-13).** The `.Clb`
+reader has a writer beside it now, and the Calibration dialog a "Save to
+file..." next to its "Recall from file...": the road a calibration takes to
+another machine without dragging a spectrum along. What is written is
+exactly what reading understands - the six coefficients at the offsets four
+known-good samples agree on - and it round-trips through the reader that was
+checked against those samples. Whether MAESTRO itself accepts one has not
+yet been tried against a Windows installation, and the writer's notes say so.
+
+**A stopped instrument's clocks are read after the stop (2026-08-13).** The
+bridge assembles a status from three separate instrument reads, and an
+instrument counting out a preset could stop *between* them: clocks first and
+the flag last, a reply could say "stopped, LT=0.98" about a one-second
+preset the instrument had honoured to the tick - and the refusal that
+depends on the preset being reached never fired. The flag is read first, so
+a reply that says stopped carries clocks read after the stop. Caught by the
+926 on the bench counting out a one-second live preset, and proven there
+three runs in a row.
+
+**The peak-shape fit reads the wings, weighted by what they know
+(2026-08-13).** The Gaussian fit behind Peak Info fitted a parabola to the
+logarithm of the net counts - correct for the shape, but blind below thirty
+percent of the peak and unweighted above it. Blind low, it read a real
+peak's width off its cap alone, which is why the drawn fit sat visibly
+narrower than bench peaks; unweighted, the logarithm inflates exactly the
+channels with the fewest counts, so the wings it did admit steered it
+hardest. It now reaches down to a twentieth of the peak and weights each
+channel by its own count - the variance of a counted channel's logarithm is
+about one over the count - so the wings inform the width without deciding
+it. Pinned by a clean Gaussian recovered to its own parameters and by
+deliberately mangled wings that no longer move the answer.
+
+**The linear axis earns the same care the logarithmic one had
+(2026-08-13).** On automatic linear scaling the full scale was exactly the
+tallest visible channel: the peak sat clipped flat against the frame, over
+quarter gridlines labelled with quarters of an arbitrary count - 40737 made
+gridlines at 10184 and 20368. The automatic axis now climbs the same 1-2-5
+ladder the logarithmic one does, so the peak clears the frame and the labels
+are quarters of a round number. A fixed linear scale stays exactly where the
+operator put it.
+
+**Zooming centres the marker (2026-08-13).** Zoom kept the marker at
+whatever fraction of the window it already occupied, so zooming toward a
+peak near the edge kept it pinned at the edge - each step giving the marked
+peak the least room it could. The keyboard and menu zoom now put the marker
+in the middle of the window, as far as the spectrum's own edges allow; the
+wheel still zooms about the pointer, which is where the eye already is.
+
+**The toolbar's Save does what its hover text says (2026-08-13).** The
+button promised Ctrl+S and pushed the overwrite-in-place action instead -
+Ctrl+Shift+S's. On a file the system would not let the program write over,
+the overwrite failed with one status line, read from the bench as the button
+doing nothing while the shortcut "worked" - the shortcut's save dialog is
+itself what grants the access. Button and key now do the same thing: ask
+where, every time.
+
+**One symbol per button (2026-08-13).** With the toolbar set to icons and
+words together, the buttons whose labels carry their own symbol - Start,
+Stop, to-Buffer - drew the symbol twice: once as the icon, once in the text.
+The glyph belongs to the words-only arrangement; beside a drawn icon the
+label sheds it.
+
+**Files are suggested with their formats' own capitals (2026-08-13).**
+A saved spectrum was offered as `.spe` where MAESTRO writes `.Spe`; the
+suggestion and the format picker now spell `.Spe`, `.Chn` and `.Spc` the way
+the files' own tools do. Reading was always case-insensitive and stays so.
+
 ## 0.2.3-alpha (2026-08-13)
 
 **Naming a peak no longer walks the whole library (2026-08-13).** Every
