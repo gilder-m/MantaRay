@@ -828,6 +828,11 @@ pub struct App {
     pub settings: CalculationSettings,
     /// Working nuclide library.
     pub library: NuclideLibrary,
+    /// Energy-sorted index over the library's lines, for the lookups drawing
+    /// does per marked region, per frame. Verified against the library at the
+    /// top of every [`Self::draw`], so edits through the public field are
+    /// seen the same frame they are made.
+    pub library_index: mantaray_core::EnergyIndex,
     /// The nuclide being checked against the spectrum, from the sidebar.
     pub isotope: IsotopeCheck,
     /// Where the library came from.
@@ -907,6 +912,10 @@ pub struct App {
     pub log_decade_top: bool,
     /// When the working session was last written to disk.
     last_autosave: Instant,
+    /// Whether the last autosave found nothing open. One clearing of the
+    /// snapshot is meaning; clearing it again every twenty seconds is a
+    /// directory walk and an unlink of a file that is not there, forever.
+    autosaved_empty: bool,
     /// A snapshot found at start-up, waiting to be offered back.
     pub recovered: Option<crate::session::Session>,
     /// How each detector's count has behaved while it ran, by detector number.
@@ -1083,6 +1092,7 @@ impl App {
             next_id: 1,
             settings: CalculationSettings::default(),
             library: NuclideLibrary::new(""),
+            library_index: Default::default(),
             isotope: IsotopeCheck {
                 min_intensity: IsotopeCheck::DEFAULT_MIN_INTENSITY,
                 ..IsotopeCheck::default()
@@ -1122,6 +1132,7 @@ impl App {
             auto_clear_roi: false,
             log_decade_top: false,
             last_autosave: Instant::now(),
+            autosaved_empty: false,
             recovered: None,
             stability: std::collections::HashMap::new(),
             peak_font: 11.0,
@@ -1279,10 +1290,15 @@ impl App {
         self.last_autosave = Instant::now();
         let session = self.snapshot_session();
         // Nothing open is worth recording too: it clears a snapshot from
-        // earlier in the run that no longer describes anything.
+        // earlier in the run that no longer describes anything. Once cleared,
+        // there is nothing to clear again until something opens.
         if session.is_empty() {
-            crate::session::clear();
+            if !self.autosaved_empty {
+                crate::session::clear();
+                self.autosaved_empty = true;
+            }
         } else {
+            self.autosaved_empty = false;
             let _ = crate::session::write(&session);
         }
     }
@@ -1811,13 +1827,15 @@ impl App {
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::CopyPeakInfo => {
+                self.library_index.ensure(&self.library);
                 let text = self.active.and_then(|index| {
                     let info = self.windows[index].peak_info.as_ref()?;
                     let spectrum = Self::spectrum_of(&self.windows, &self.detectors, index)?;
-                    Some(
-                        crate::view::peak_info_lines(spectrum, info, Some(&self.library))
-                            .join("\n"),
-                    )
+                    let library = crate::view::LibraryView {
+                        library: &self.library,
+                        index: &self.library_index,
+                    };
+                    Some(crate::view::peak_info_lines(spectrum, info, Some(library)).join("\n"))
                 });
                 match text {
                     Some(text) => {
@@ -2488,24 +2506,23 @@ impl App {
                     .into();
             return;
         }
-        let settings = self.settings;
-        let library = self.library.clone();
-        let efficiency = self.efficiency.clone();
-        let sample = self.sample.clone();
-        let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index).cloned()
-        else {
-            return;
-        };
+        // The spectrum and the library are borrowed, not cloned: cloning both
+        // per click was sixteen thousand channels and every line of an
+        // evaluated library copied to satisfy a borrow the analysis releases
+        // the moment it returns.
         let options = AnalysisOptions {
-            settings,
-            efficiency,
-            sample,
+            settings: self.settings,
+            efficiency: self.efficiency.clone(),
+            sample: self.sample.clone(),
             report_mda_for_absent_nuclides: self.dialogs.report_mda,
             correct_decay_during_count: self.dialogs.correct_during_count,
             decay_correct_to_reference: self.dialogs.correct_to_reference,
             ..AnalysisOptions::default()
         };
-        let report = analyse(&spectrum, &library, &options);
+        let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index) else {
+            return;
+        };
+        let report = analyse(spectrum, &self.library, &options);
         self.status = format!(
             "{} nuclide(s) reported, {} detected",
             report.nuclides.len(),
@@ -2519,12 +2536,11 @@ impl App {
     fn build_roi_report(&mut self) {
         let Some(index) = self.active else { return };
         let settings = self.settings;
-        let library = self.library.clone();
         let column = self.dialogs.report_columns;
         let displayed = self.dialogs.report_displayed_only;
         let visible = self.windows[index].display.visible();
-        let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index).cloned()
-        else {
+        // Borrowed, not cloned - as in `run_analysis` above.
+        let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index) else {
             return;
         };
         let mut options = if column {
@@ -2533,11 +2549,12 @@ impl App {
             ReportOptions::paragraph()
         }
         .with_settings(settings)
-        .with_library(&library);
+        .with_library(&self.library);
         if displayed {
             options = options.displayed(visible.0, visible.1);
         }
-        self.report_text = Some(roi_report(&spectrum, &options));
+        let text = roi_report(spectrum, &options);
+        self.report_text = Some(text);
         self.dialogs.open(Dialog::Report);
     }
 
@@ -2768,11 +2785,15 @@ impl App {
 
     /// The dialog-free half of the plot export, for tests and jobs.
     pub fn write_plot_svg(&mut self, spectrum: &Spectrum, index: usize, path: &std::path::Path) {
+        self.library_index.ensure(&self.library);
         let svg = crate::snapshot::plot_svg(
             spectrum,
             &self.windows[index].display,
             &self.colors,
-            Some(&self.library),
+            Some(crate::view::LibraryView {
+                library: &self.library,
+                index: &self.library_index,
+            }),
             1280.0,
             720.0,
         );
@@ -2819,11 +2840,18 @@ impl App {
         let index = self.active?;
         let spectrum = Self::spectrum_of(&self.windows, &self.detectors, index)?;
         let colors = crate::theme::Theme::Paper.colors();
+        // Built here rather than borrowed from the app: printing takes &self,
+        // and a one-off export is not worth an ensure-before-use contract.
+        let mut library_index = mantaray_core::EnergyIndex::default();
+        library_index.ensure(&self.library);
         let svg = crate::snapshot::plot_svg(
             spectrum,
             &self.windows[index].display,
             &colors,
-            Some(&self.library),
+            Some(crate::view::LibraryView {
+                library: &self.library,
+                index: &library_index,
+            }),
             1000.0,
             560.0,
         );
@@ -4133,6 +4161,10 @@ impl App {
     /// Separate from [`eframe::App::ui`] so a test can run frames against a bare
     /// [`egui::Context`], with no window and no event loop.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        // The frame's library lookups - sidebar names, peak labels, isotope
+        // markers - go through the index, so it is squared with the library
+        // before anything draws.
+        self.library_index.ensure(&self.library);
         // One rule for every window, including ones opened since the setting
         // was last touched: the axis preference lives on the application and
         // the windows follow it.
@@ -4214,12 +4246,23 @@ impl App {
         // Redraw while anything is counting, tuning or running a job - the
         // clock only advances on frames, so a stalled screen would stall an
         // Optimize left running with its dialog closed.
-        let busy = self.job.is_some()
-            || self.detectors.iter().any(|detector| {
-                detector.is_active() || detector.optimizing() || detector.pole_zeroing()
-            });
-        if busy {
+        //
+        // Two paces, because the two reasons want different clocks. A job or
+        // a tuning routine steps forward on every frame, so it keeps the
+        // 100 ms tick. A count only *shows* differently when the instrument's
+        // mirror changes, which is at the 0.5 s poll - ten frames a second
+        // against that were four identical redraws for every real one, which
+        // is heat and battery on a small machine for nothing.
+        let stepping = self.job.is_some()
+            || self
+                .detectors
+                .iter()
+                .any(|detector| detector.optimizing() || detector.pole_zeroing());
+        let counting = self.detectors.iter().any(|detector| detector.is_active());
+        if stepping {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if counting {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 
@@ -4293,13 +4336,29 @@ impl App {
     /// Keyboard commands (MAESTRO §5).
     fn keyboard(&mut self, ctx: &egui::Context) -> Vec<Action> {
         let mut actions = Vec::new();
-        let events = ctx.input(|input| input.clone());
-        let input = &events;
+        // Only what the bindings read leaves the input lock. This used to
+        // clone the entire InputState - event queue, touch state, pointer
+        // history - every frame, to read a few dozen booleans out of the
+        // copy.
+        let (pressed, modifiers) = ctx.input(|input| {
+            let pressed: Vec<egui::Key> = input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => Some(*key),
+                    _ => None,
+                })
+                .collect();
+            (pressed, input.modifiers)
+        });
+        let key_pressed = |key: egui::Key| pressed.contains(&key);
         {
             use egui::Key;
-            let shift = input.modifiers.shift;
-            let ctrl = input.modifiers.command || input.modifiers.ctrl;
-            let alt = input.modifiers.alt;
+            let shift = modifiers.shift;
+            let ctrl = modifiers.command || modifiers.ctrl;
+            let alt = modifiers.alt;
             let step = if shift { 10 } else { 1 };
             // A focused text field owns the plain keys: Delete is deleting a
             // typo, not the ROI under the marker; arrows move the caret, not
@@ -4310,60 +4369,60 @@ impl App {
             let typing = ctx.egui_wants_keyboard_input();
 
             if !typing
-                && input.key_pressed(Key::ArrowRight)
+                && key_pressed(Key::ArrowRight)
                 && let Some(index) = self.active
             {
                 self.windows[index].display.move_marker(step as i64);
             }
             if !typing
-                && input.key_pressed(Key::ArrowLeft)
+                && key_pressed(Key::ArrowLeft)
                 && let Some(index) = self.active
             {
                 self.windows[index].display.move_marker(-(step as i64));
             }
-            if !typing && input.key_pressed(Key::Home) {
+            if !typing && key_pressed(Key::Home) {
                 actions.push(Action::Marker(0));
             }
-            if !typing && input.key_pressed(Key::End) {
+            if !typing && key_pressed(Key::End) {
                 actions.push(Action::Marker(usize::MAX));
             }
             if !typing
-                && input.key_pressed(Key::PageUp)
+                && key_pressed(Key::PageUp)
                 && let Some(index) = self.active
             {
                 let width = self.windows[index].display.view_width as i64;
                 actions.push(Action::Scroll(width / 2));
             }
             if !typing
-                && input.key_pressed(Key::PageDown)
+                && key_pressed(Key::PageDown)
                 && let Some(index) = self.active
             {
                 let width = self.windows[index].display.view_width as i64;
                 actions.push(Action::Scroll(-width / 2));
             }
-            if !typing && (input.key_pressed(Key::Plus) || input.key_pressed(Key::Equals)) {
+            if !typing && (key_pressed(Key::Plus) || key_pressed(Key::Equals)) {
                 actions.push(Action::ZoomIn);
             }
-            if !typing && input.key_pressed(Key::Minus) {
+            if !typing && key_pressed(Key::Minus) {
                 actions.push(Action::ZoomOut);
             }
-            if !typing && input.key_pressed(Key::Slash) {
+            if !typing && key_pressed(Key::Slash) {
                 actions.push(Action::ToggleLog);
             }
             // egui has no keypad-* key, so automatic scaling is on A.
-            if !typing && input.key_pressed(Key::A) && !ctrl && !alt {
+            if !typing && key_pressed(Key::A) && !ctrl && !alt {
                 actions.push(Action::AutoScale);
             }
-            if !typing && input.key_pressed(Key::Num5) && !ctrl {
+            if !typing && key_pressed(Key::Num5) && !ctrl {
                 actions.push(Action::Center);
             }
-            if !typing && input.key_pressed(Key::Insert) {
+            if !typing && key_pressed(Key::Insert) {
                 actions.push(Action::MarkPeak);
             }
-            if !typing && input.key_pressed(Key::Delete) {
+            if !typing && key_pressed(Key::Delete) {
                 actions.push(Action::ClearRoi);
             }
-            if input.key_pressed(Key::F2) {
+            if key_pressed(Key::F2) {
                 let next = match self.mark_mode {
                     MarkMode::Off => MarkMode::Mark,
                     MarkMode::Mark => MarkMode::UnMark,
@@ -4371,16 +4430,16 @@ impl App {
                 };
                 actions.push(Action::MarkMode(next));
             }
-            if input.key_pressed(Key::F3) {
+            if key_pressed(Key::F3) {
                 actions.push(Action::ViewZdt);
             }
-            if input.key_pressed(Key::F4) {
+            if key_pressed(Key::F4) {
                 actions.push(Action::OpenBuffer);
             }
             // A focused text field owns Escape (it releases focus); otherwise
             // Escape peels the topmost layer: open dialogs close first, and
             // only then does it clear the plot's own overlays.
-            if input.key_pressed(Key::Escape) && !typing {
+            if key_pressed(Key::Escape) && !typing {
                 if self.dialogs.any_open() {
                     self.dialogs.close_all();
                     self.pending_close = None;
@@ -4392,13 +4451,13 @@ impl App {
                     }
                 }
             }
-            if ctrl && input.key_pressed(Key::M) {
+            if ctrl && key_pressed(Key::M) {
                 actions.push(Action::MaximizeActive);
             }
             // Shift with the up and down arrows offsets the comparison trace.
             if !typing
                 && shift
-                && (input.key_pressed(Key::ArrowUp) || input.key_pressed(Key::ArrowDown))
+                && (key_pressed(Key::ArrowUp) || key_pressed(Key::ArrowDown))
                 && let Some(index) = self.active
                 && self.windows[index].compare.is_some()
             {
@@ -4411,16 +4470,16 @@ impl App {
                     })
                     .unwrap_or(1_000);
                 let step = (scale / 20).max(1) as i64;
-                self.windows[index].compare_offset += if input.key_pressed(Key::ArrowUp) {
+                self.windows[index].compare_offset += if key_pressed(Key::ArrowUp) {
                     step
                 } else {
                     -step
                 };
             }
-            if input.key_pressed(Key::F1) {
+            if key_pressed(Key::F1) {
                 actions.push(Action::Show(Dialog::Shortcuts));
             }
-            if ctrl && input.key_pressed(Key::Tab) {
+            if ctrl && key_pressed(Key::Tab) {
                 actions.push(Action::CycleWindow(if shift { -1 } else { 1 }));
             }
             // Ctrl+F1..F12 select detectors 1-12 (MAESTRO §5).
@@ -4441,25 +4500,25 @@ impl App {
             .into_iter()
             .enumerate()
             {
-                if ctrl && input.key_pressed(key) && offset < self.detectors.len() {
+                if ctrl && key_pressed(key) && offset < self.detectors.len() {
                     actions.push(Action::OpenDetector(offset));
                 }
             }
-            if ctrl && input.key_pressed(Key::Z) {
+            if ctrl && key_pressed(Key::Z) {
                 actions.push(if shift { Action::Redo } else { Action::Undo });
             }
-            if ctrl && input.key_pressed(Key::Y) {
+            if ctrl && key_pressed(Key::Y) {
                 actions.push(Action::Redo);
             }
-            if ctrl && input.key_pressed(Key::O) {
+            if ctrl && key_pressed(Key::O) {
                 actions.push(Action::Recall);
             }
-            if ctrl && input.key_pressed(Key::P) {
+            if ctrl && key_pressed(Key::P) {
                 actions.push(Action::Print);
             }
             // Ctrl+C copies the open peak card - unless a text field has the
             // keyboard, whose own copy must win.
-            if ctrl && input.key_pressed(Key::C) && !typing {
+            if ctrl && key_pressed(Key::C) && !typing {
                 let card_open = self
                     .active
                     .and_then(|index| self.windows.get(index))
@@ -4468,19 +4527,19 @@ impl App {
                     actions.push(Action::CopyPeakInfo);
                 }
             }
-            if ctrl && input.key_pressed(Key::S) {
+            if ctrl && key_pressed(Key::S) {
                 actions.push(save_action(shift));
             }
-            if alt && input.key_pressed(Key::Num1) {
+            if alt && key_pressed(Key::Num1) {
                 actions.push(Action::Start);
             }
-            if alt && input.key_pressed(Key::Num2) {
+            if alt && key_pressed(Key::Num2) {
                 actions.push(Action::Stop);
             }
-            if alt && input.key_pressed(Key::Num3) {
+            if alt && key_pressed(Key::Num3) {
                 actions.push(Action::Clear);
             }
-            if alt && input.key_pressed(Key::Num5) {
+            if alt && key_pressed(Key::Num5) {
                 actions.push(Action::CopyToBuffer);
             }
         }
@@ -4568,6 +4627,7 @@ impl App {
             style,
             mark_mode,
             library,
+            library_index,
             isotope,
             active,
             window_area,
@@ -4575,6 +4635,12 @@ impl App {
             peak_font,
             ..
         } = self;
+        // Ensured at the top of `draw`, so this frame's index matches this
+        // frame's library.
+        let library_view = crate::view::LibraryView {
+            library: &*library,
+            index: &*library_index,
+        };
         let area = *window_area;
         let maximized_id = *maximized;
         let peak_font = *peak_font;
@@ -4681,7 +4747,7 @@ impl App {
                         colors,
                         style: *style,
                         mark_mode: *mark_mode,
-                        library: Some(library),
+                        library: Some(library_view),
                         isotope: checked,
                         isotope_min_intensity,
                         selection: *selection,

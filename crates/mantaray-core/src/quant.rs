@@ -315,16 +315,33 @@ pub fn analyse(
         false
     };
 
+    // The identified peaks bucketed by nuclide name, once. The loop below
+    // used to walk every analysed peak for every library nuclide - the whole
+    // peak list, thousands of times over an evaluated library, almost all of
+    // it filtering out everything. A nuclide with no peaks and no MDA to
+    // report now costs one lookup, and skips its decay arithmetic too.
+    let mut by_nuclide: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, peak) in peaks.iter().enumerate() {
+        if let Some(id) = &peak.identification {
+            by_nuclide
+                .entry(id.nuclide.as_str())
+                .or_default()
+                .push(index);
+        }
+    }
+
     let mut nuclides: Vec<NuclideResult> = Vec::new();
     for nuclide in library.iter() {
+        let matched = by_nuclide.get(nuclide.name.as_str());
+        if matched.is_none() && !(mda_possible && !nuclide.flags.no_mda) {
+            continue;
+        }
         let decay_correction = decay_corrections(spectrum, options, nuclide.half_life_seconds);
-        let lines: Vec<LineResult> = peaks
-            .iter()
-            .filter(|peak| {
-                peak.identification
-                    .as_ref()
-                    .is_some_and(|id| id.nuclide == nuclide.name)
-            })
+        let lines: Vec<LineResult> = matched
+            .into_iter()
+            .flatten()
+            .map(|&index| &peaks[index])
             .map(|peak| {
                 let id = peak.identification.as_ref().expect("filtered above");
                 let library_peak = nuclide

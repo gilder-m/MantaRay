@@ -211,12 +211,15 @@ impl<'a> Dpm<'a> {
             // replies carry no terminator or the driver absorbs it; do not
             // "fix" this without an instrument to prove the change against.
             let room = (reply.len() - got).min(HELPING);
-            let mut piece = vec![0_u8; room];
-            let arrived = self.device.bulk(IN, &mut piece, PATIENCE)?;
+            // Straight into the reply at its offset. A scratch piece here was
+            // a zeroed allocation per chunk and a copy of every byte moved -
+            // sixty-four kilobytes of memcpy to carry a thirty-two.
+            let arrived = self
+                .device
+                .bulk(IN, &mut reply[got..got + room], PATIENCE)?;
             if arrived == 0 {
                 break;
             }
-            reply[got..got + arrived].copy_from_slice(&piece[..arrived]);
             got += arrived;
         }
         if got < length {
@@ -297,12 +300,12 @@ impl<'a> Dpm<'a> {
         let mut reply = vec![0_u8; packet_aligned(length) + MAX_PACKET];
         let mut got = 0;
         while got < length {
-            let mut piece = vec![0_u8; reply.len() - got];
-            let arrived = self.device.bulk(IN, &mut piece, PATIENCE)?;
+            // Straight into the reply, as in `read_in` above.
+            let end = reply.len();
+            let arrived = self.device.bulk(IN, &mut reply[got..end], PATIENCE)?;
             if arrived == 0 {
                 break;
             }
-            reply[got..got + arrived].copy_from_slice(&piece[..arrived]);
             got += arrived;
         }
         if got < length {

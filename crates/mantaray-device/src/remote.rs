@@ -64,6 +64,10 @@ pub struct RemoteMcb {
     mode: AcquisitionMode,
     locked_by: Option<(String, String)>,
     since_poll: f64,
+    /// Whether the latest poll (or command) moved the mirror - what
+    /// [`Mcb::poll_freshened`] answers, so preset walks run against new
+    /// numbers rather than sixty times a second against the same ones.
+    freshened: bool,
     /// Where a fetch's channel counts are parsed before they reach the
     /// mirror - see [`Self::integrate`] for why they do not go straight in.
     scratch: Vec<u64>,
@@ -187,6 +191,7 @@ impl RemoteMcb {
             mode: AcquisitionMode::Pha,
             locked_by: None,
             since_poll: f64::MAX,
+            freshened: true,
             scratch: Vec::new(),
             pending_length: None,
         };
@@ -463,6 +468,7 @@ impl RemoteMcb {
                 .naive_local()
                 .checked_sub_signed(counted);
         }
+        self.freshened = true;
         Ok(())
     }
 
@@ -577,6 +583,7 @@ impl Mcb for RemoteMcb {
         }
         self.command("START")?;
         self.status.active = true;
+        self.freshened = true;
         // The instrument reports no measurement date of its own, so the moment
         // START was accepted is the record - as the simulator keeps it. A
         // resumed count keeps the original date; Clear resets it.
@@ -605,6 +612,7 @@ impl Mcb for RemoteMcb {
         // moment cleared - and a job's CLEAR / START does not start at all.
         self.status.real_time = 0.0;
         self.status.live_time = 0.0;
+        self.freshened = true;
         Ok(())
     }
 
@@ -625,6 +633,7 @@ impl Mcb for RemoteMcb {
     }
 
     fn poll(&mut self, elapsed_seconds: f64) -> Result<(), DeviceError> {
+        self.freshened = false;
         self.since_poll += elapsed_seconds;
         match &mut self.line {
             // The direct line fetches here and now, on the calling thread -
@@ -652,6 +661,10 @@ impl Mcb for RemoteMcb {
                 }
             }
         }
+    }
+
+    fn poll_freshened(&self) -> bool {
+        self.freshened
     }
 
     fn set_mode(&mut self, mode: AcquisitionMode) -> Result<(), DeviceError> {

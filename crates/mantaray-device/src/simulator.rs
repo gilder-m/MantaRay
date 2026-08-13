@@ -572,7 +572,12 @@ impl Mcb for SimulatedMcb {
         let mut events: Vec<(f64, usize)> = Vec::new();
         let start_time = self.real_time;
 
-        let lines = self.source.lines.clone();
+        // Taken out and put back rather than cloned: the borrow checker wants
+        // the lines separate from the RNG, and a clone was a heap allocation
+        // per tick for that alone. (The timestamp draws stay in every mode so
+        // a seeded run produces the same spectrum whether or not list mode is
+        // on - tests pin seeded output.)
+        let lines = std::mem::take(&mut self.source.lines);
         let photopeak = self.source.photopeak_fraction.clamp(0.0, 1.0);
         for line in &lines {
             let total = self.rng.poisson(line.cps * live_increment);
@@ -594,6 +599,8 @@ impl Mcb for SimulatedMcb {
             }
         }
 
+        self.source.lines = lines;
+
         let continuum = self.rng.poisson(self.source.continuum_cps * live_increment);
         let decay = self.source.continuum_decay_kev.max(1.0);
         let top_energy = self.raw.len() as f64 * self.gain_kev_per_channel;
@@ -609,7 +616,13 @@ impl Mcb for SimulatedMcb {
             }
         }
 
-        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Only list mode reads the timestamps; sorted, they keep the list
+        // monotonic. A histogram is the same histogram in any order, so the
+        // ordinary mode was sorting - at source rates, tens of thousands of
+        // events a tick - for a property nothing looked at.
+        if self.list.is_some() {
+            events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
 
         let zdt = matches!(self.mode, AcquisitionMode::Zdt | AcquisitionMode::Ltc);
         for (time, channel) in &events {

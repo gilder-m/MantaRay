@@ -193,22 +193,35 @@ pub fn build(text: &str, min_intensity: f64) -> Result<Built, FormatError> {
 /// has it. Rows are still whole lines: a field may hold a comma, but nothing
 /// in this export holds a newline.
 fn split_row(row: &str, into: &mut Vec<String>) {
-    into.clear();
-    let mut field = String::new();
+    // The field buffers are reused by index, not rebuilt: `clear()` on the
+    // vector would free every String, and `mem::take` gave each buffer away
+    // per comma - together, an allocate-and-free per field per row, ten
+    // million of them over a full export, under a comment claiming reuse.
+    let mut at = 0usize;
+    if into.is_empty() {
+        into.push(String::new());
+    }
+    into[at].clear();
     let mut quoted = false;
     let mut rest = row.chars().peekable();
     while let Some(character) = rest.next() {
         match character {
             '"' if quoted && rest.peek() == Some(&'"') => {
-                field.push('"');
+                into[at].push('"');
                 rest.next();
             }
             '"' => quoted = !quoted,
-            ',' if !quoted => into.push(std::mem::take(&mut field)),
-            _ => field.push(character),
+            ',' if !quoted => {
+                at += 1;
+                if at == into.len() {
+                    into.push(String::new());
+                }
+                into[at].clear();
+            }
+            _ => into[at].push(character),
         }
     }
-    into.push(field);
+    into.truncate(at + 1);
 }
 
 /// Gives every state its name: the ground one plain, the excited ones `m`.

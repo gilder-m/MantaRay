@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+**Naming a peak no longer walks the whole library (2026-08-13).** Every
+frame, for every marked region on screen, the display asked the library which
+nuclide sits at that energy - and each ask read every line of every nuclide,
+allocated a list and sorted it, to keep one name. With an evaluated library
+and a background spectrum's two hundred regions that was millions of line
+visits per frame, and it is why a marked-up spectrum dragged exactly when a
+real library was loaded. The lines are now indexed by energy once and each
+ask is a binary search; the frame timing harness puts the worst case (16384
+channels, 200 regions, a 27,000-line library) at 0.32 ms/frame where it
+measured 2.42 before. The index checks itself against the library every
+frame - the library is open data and the editor writes straight through it -
+so an edit is seen the frame it is made, never trusted to a stale copy.
+
+**The counting redraw now matches the data it draws (2026-08-13).** While a
+count ran, the interface redrew ten times a second against an instrument
+mirror that changes twice a second - four identical frames for every real
+one, which on a small machine is heat for nothing. Counting now redraws every
+250 ms; jobs and the tuning routines keep their 100 ms tick, because they
+step forward on every frame.
+
+**The job dialog stopped reading the disk once per frame (2026-08-13).** Open,
+it re-listed the job directory and re-read the entire `.JOB` file every frame
+- and it is open exactly while a running job holds the frame rate up, so an
+SD-card machine re-read its card ten times a second for text that had not
+changed. Both now come from disk at most once a second, and immediately when
+the directory or the chosen file changes.
+
+**A served instrument answered in two writes with Nagle on (2026-08-13).**
+The reply went out, then its newline went out separately - and the client
+reads to the newline, so the terminator of a spectrum-sized reply sat behind
+a delayed acknowledgement for up to 40 ms of every poll's half-second budget.
+One write now carries the line, the server side turns Nagle off as the client
+always did, and a write timeout means a client that stops reading can no
+longer wedge the single serving slot forever.
+
+**Preset checks run when the numbers can have moved (2026-08-13).** The
+acquisition loop evaluated presets on every poll, and the interface polls
+every frame - but a remote mirror's clocks and counts change only when a
+fetch is integrated, twice a second. An ROI preset walks every marked
+channel and an MDA preset runs a whole fit, so those walks re-derived the
+same answer from the same numbers sixty times a second. They now run when a
+poll actually brought numbers back, and the answer is unchanged - it was
+always unchanged, that was the fault.
+
+**Loading a CSV library was quadratic (2026-08-13).** Each row scanned every
+nuclide read so far to find its group - tens of millions of name comparisons
+over a full evaluated export. A name-to-index map makes the load linear. From
+the same pass: the NNDC converter's field splitter reallocated every field of
+every row under a comment claiming it did not, and a `.lib` that turns out
+to be CSV was decoded from disk twice.
+
+Also caught on the way: the DATA line a served instrument builds twice a
+second allocated a String per channel and was then copied twice more to be
+"reduced" to the one line it already was; USB spectrum reads zeroed and
+copied a scratch buffer per 4 KB chunk; the simulator sorted its events by
+timestamp in every mode when only list mode reads timestamps, and cloned its
+source list per tick; the peak search allocated a spectrum-sized buffer per
+scale, nine per search; Analyse cloned the whole library and the whole
+spectrum per click to satisfy a borrow it releases on return; the keyboard
+handler cloned the entire input state per frame to read a few dozen
+booleans; marking peaks rebuilt and re-sorted the region set per peak; and
+an idle session with nothing open deleted an already-deleted snapshot file
+every twenty seconds, forever. ARM Linux - the Raspberry Pi, where a bench
+in a corner wants this to run - joins the cross-checks CI keeps compiling,
+the same road macOS took before it shipped.
+
 **A scan stands the hub down first, and the slow parts of connecting are on
 the record (2026-08-13).** Probe and configure are their own processes, and
 running one against a live hub is two processes in transaction with one

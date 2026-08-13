@@ -451,6 +451,32 @@ impl NuclideLibrary {
         best
     }
 
+    /// A cheap digest of everything the [`EnergyIndex`] depends on.
+    ///
+    /// Folded from the line count and every energy's bits, so any edit that
+    /// could move a line - adding, cutting, retyping an energy - changes it,
+    /// and edits that cannot (names, intensities, half-lives) do not. Walking
+    /// every line costs tens of microseconds on a full evaluated library,
+    /// which is what lets the index be verified every frame instead of
+    /// trusted.
+    fn energy_digest(&self) -> u64 {
+        // FNV-1a, over the raw bits: equal energies fold equally, and NaN
+        // cannot arise from a parsed library.
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fold = |value: u64| {
+            digest ^= value;
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        fold(self.nuclides.len() as u64);
+        for nuclide in &self.nuclides {
+            fold(nuclide.peaks.len() as u64);
+            for peak in &nuclide.peaks {
+                fold(peak.energy.to_bits());
+            }
+        }
+        digest
+    }
+
     /// A handful of nuclides for the test suite to work against.
     ///
     /// **Not a library, and never presented as one.** The numbers here were
@@ -681,6 +707,112 @@ impl<'a> IntoIterator for &'a NuclideLibrary {
 
     fn into_iter(self) -> Self::IntoIter {
         self.nuclides.iter()
+    }
+}
+
+/// An energy-sorted index over a library's lines.
+///
+/// [`NuclideLibrary::peaks_in`] and [`NuclideLibrary::best_match`] walk every
+/// line of every nuclide, which is the right shape for a lookup that happens
+/// on a click and the wrong one for a lookup that happens per marked region,
+/// per frame - on a full evaluated library that is tens of thousands of lines
+/// streamed from memory for every label the plot draws. The index is those
+/// same lines sorted by energy once, so a window is a binary search and a
+/// walk, and a nearest-line match is a binary search and two neighbours.
+///
+/// The library stays what it was: the index lives beside it, not inside it,
+/// because the library is open data - `nuclides` is a public field the editor
+/// writes through - and an index hidden inside could go quietly stale. This
+/// one cannot: [`EnergyIndex::ensure`] digests the line energies (tens of
+/// microseconds) and rebuilds when they have moved, so it is verified on
+/// every use rather than trusted.
+#[derive(Debug, Default)]
+pub struct EnergyIndex {
+    /// `(energy, nuclide index, peak index)`, sorted by energy.
+    entries: Vec<(f64, u32, u32)>,
+    /// The digest of the library the entries were built from.
+    digest: u64,
+}
+
+impl EnergyIndex {
+    /// Rebuilds if `library`'s line energies have changed since the last
+    /// build. Cheap when they have not - one pass folding the energies.
+    pub fn ensure(&mut self, library: &NuclideLibrary) {
+        let digest = library.energy_digest();
+        if digest == self.digest && !self.entries.is_empty() == !library.is_empty() {
+            return;
+        }
+        self.entries.clear();
+        for (n, nuclide) in library.nuclides.iter().enumerate() {
+            for (p, peak) in nuclide.peaks.iter().enumerate() {
+                self.entries.push((peak.energy, n as u32, p as u32));
+            }
+        }
+        self.entries
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        self.digest = digest;
+    }
+
+    /// Every line in an energy window, sorted by energy - the indexed
+    /// [`NuclideLibrary::peaks_in`], without the scan or the allocation.
+    ///
+    /// The index must have been [`ensure`](Self::ensure)d against this
+    /// library; entries are resolved by position, so a stale index would
+    /// label lines with the wrong owners.
+    pub fn peaks_in<'a>(
+        &'a self,
+        library: &'a NuclideLibrary,
+        low: f64,
+        high: f64,
+    ) -> impl Iterator<Item = LibraryHit<'a>> + 'a {
+        let start = self.entries.partition_point(|entry| entry.0 < low);
+        self.entries[start..]
+            .iter()
+            .take_while(move |entry| entry.0 <= high)
+            .map(|&(_, n, p)| {
+                let nuclide = &library.nuclides[n as usize];
+                LibraryHit {
+                    nuclide,
+                    peak: &nuclide.peaks[p as usize],
+                }
+            })
+    }
+
+    /// Nearest line to `energy` within `tolerance` keV - the indexed
+    /// [`NuclideLibrary::best_match`].
+    pub fn best_match<'a>(
+        &self,
+        library: &'a NuclideLibrary,
+        energy: f64,
+        tolerance: f64,
+    ) -> Option<LibraryMatch<'a>> {
+        let at = self.entries.partition_point(|entry| entry.0 < energy);
+        // The nearest line is one of the immediate neighbours of the
+        // insertion point; ties fall to the lower line, as the linear scan's
+        // strict `<` kept the first of equals in library order... which the
+        // index cannot reproduce exactly, so ties fall to energy order
+        // instead - the same line whenever energies differ at all.
+        let below = at.checked_sub(1).and_then(|i| self.entries.get(i));
+        let above = self.entries.get(at);
+        let best = match (below, above) {
+            (Some(b), Some(a)) => {
+                if (energy - b.0).abs() <= (energy - a.0).abs() {
+                    Some(b)
+                } else {
+                    Some(a)
+                }
+            }
+            (one, another) => one.or(another),
+        }?;
+        let delta = energy - best.0;
+        (delta.abs() <= tolerance).then(|| {
+            let nuclide = &library.nuclides[best.1 as usize];
+            LibraryMatch {
+                nuclide,
+                peak: &nuclide.peaks[best.2 as usize],
+                delta,
+            }
+        })
     }
 }
 

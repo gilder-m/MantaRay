@@ -64,6 +64,14 @@ pub fn advance(mcb: &mut dyn Mcb, elapsed_seconds: f64) -> Result<Option<PresetK
     if !mcb.is_active() {
         return Ok(None);
     }
+    // Presets read the clocks and the spectrum, which a remote mirror moves
+    // only when a poll integrates a fetch - every half second. The interface
+    // calls this every frame, and an ROI or MDA preset walks the marked
+    // channels (or runs a whole fit) per evaluation; between fetches those
+    // walks re-derived the same answer from the same numbers.
+    if !mcb.poll_freshened() {
+        return Ok(None);
+    }
     match mcb.preset_reached() {
         Some(kind) => {
             mcb.stop()?;

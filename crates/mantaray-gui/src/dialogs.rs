@@ -184,6 +184,12 @@ pub struct Dialogs {
     pub job_directory: String,
     /// Selected job file.
     pub job_file: Option<PathBuf>,
+    /// The job directory's `.JOB` files, as last read from disk.
+    pub job_listing: Vec<PathBuf>,
+    /// The selected job file's text, tagged with the path it came from.
+    pub job_text: Option<(PathBuf, String)>,
+    /// When the listing and text were last read. `None` forces a re-read.
+    pub job_refreshed: Option<std::time::Instant>,
     /// Password for the lock dialog.
     pub lock_password: String,
     /// Owner for the lock dialog.
@@ -263,6 +269,9 @@ impl Default for Dialogs {
             list_speed: 5.0,
             job_directory: ".".into(),
             job_file: None,
+            job_listing: Vec::new(),
+            job_text: None,
+            job_refreshed: None,
             lock_password: String::new(),
             lock_owner: "operator".into(),
             // Only the simulator build has a form that reads this; a shipped
@@ -1606,7 +1615,11 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         Option<u64>,
     ) = {
         let settings = app.settings;
-        let library = &app.library;
+        let library = crate::view::LibraryView {
+            library: &app.library,
+            // Ensured at the top of the frame, before the sidebar draws.
+            index: &app.library_index,
+        };
         match app.active_spectrum() {
             Some(spectrum) => {
                 // A fingerprint of everything the rows depend on: recompute the
@@ -1633,8 +1646,8 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                         }
                         calibration.units.hash(&mut hasher);
                     }
-                    library.len().hash(&mut hasher);
-                    library.name.hash(&mut hasher);
+                    library.library.len().hash(&mut hasher);
+                    library.library.name.hash(&mut hasher);
                     settings.fw_x.hash(&mut hasher);
                     settings.sensitivity.hash(&mut hasher);
                     settings.background_points.hash(&mut hasher);
@@ -3468,7 +3481,14 @@ fn job_control(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(app, ctx, Dialog::JobControl, "Run JOB File", |app, ui| {
         ui.horizontal(|ui| {
             ui.label("Directory");
-            ui.add(egui::TextEdit::singleline(&mut app.dialogs.job_directory).desired_width(220.0));
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut app.dialogs.job_directory).desired_width(220.0),
+                )
+                .changed()
+            {
+                app.dialogs.job_refreshed = None;
+            }
             if ui.button("Browse...").clicked()
                 && let Some(path) = pick_open_file(&[("Job file", &["job"])])
             {
@@ -3476,24 +3496,44 @@ fn job_control(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
                 if let Some(parent) = path.parent() {
                     app.dialogs.job_directory = parent.display().to_string();
                 }
+                app.dialogs.job_refreshed = None;
             }
         });
-        let files: Vec<PathBuf> = std::fs::read_dir(&app.dialogs.job_directory)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| {
-                        path.extension()
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("job"))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // The listing and the file come from disk at most once a second, not
+        // once a frame. This dialog is open exactly while a running job pumps
+        // frames ten a second, and every one of those frames re-listed the
+        // directory and re-read the whole .JOB file on the interface thread -
+        // which on an SD card is the interface stuttering in time with the
+        // job it is running.
+        if app
+            .dialogs
+            .job_refreshed
+            .is_none_or(|then| then.elapsed().as_secs() >= 1)
+        {
+            app.dialogs.job_refreshed = Some(std::time::Instant::now());
+            app.dialogs.job_listing = std::fs::read_dir(&app.dialogs.job_directory)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("job"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            app.dialogs.job_text = app.dialogs.job_file.as_ref().and_then(|path| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .map(|text| (path.clone(), text))
+            });
+        }
+        let mut chosen = None;
         egui::ScrollArea::vertical()
             .max_height(140.0)
             .show(ui, |ui| {
-                for path in &files {
+                for path in &app.dialogs.job_listing {
                     let name = path
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -3502,15 +3542,19 @@ fn job_control(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
                         .selectable_label(app.dialogs.job_file.as_ref() == Some(path), name)
                         .clicked()
                     {
-                        app.dialogs.job_file = Some(path.clone());
+                        chosen = Some(path.clone());
                     }
                 }
-                if files.is_empty() {
+                if app.dialogs.job_listing.is_empty() {
                     ui.label("no .JOB files in that directory");
                 }
             });
-        if let Some(path) = app.dialogs.job_file.clone()
-            && let Ok(text) = std::fs::read_to_string(&path)
+        if let Some(path) = chosen {
+            app.dialogs.job_file = Some(path);
+            app.dialogs.job_refreshed = None;
+        }
+        if let Some((text_of, text)) = &app.dialogs.job_text
+            && app.dialogs.job_file.as_ref() == Some(text_of)
         {
             ui.separator();
             ui.label("Contents:");

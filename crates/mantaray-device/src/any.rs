@@ -130,6 +130,10 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.poll(elapsed_seconds))
     }
 
+    fn poll_freshened(&self) -> bool {
+        delegate!(self, mcb => mcb.poll_freshened())
+    }
+
     fn set_mode(&mut self, mode: AcquisitionMode) -> Result<(), DeviceError> {
         delegate!(self, mcb => mcb.set_mode(mode))
     }

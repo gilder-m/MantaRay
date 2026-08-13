@@ -193,13 +193,22 @@ fn parse_hub_line(line: &str) -> Option<(i32, &str)> {
 /// Control characters become spaces rather than disappearing, so that a reply
 /// that arrives mangled still reads as mangled instead of silently closing up
 /// into something plausible.
-fn one_line(reply: &str) -> String {
-    reply
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect::<String>()
-        .trim()
-        .to_string()
+fn one_line(reply: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = reply.trim();
+    if !trimmed.chars().any(char::is_control) {
+        // The ordinary case - and the DATA line is the largest string in the
+        // program, so rebuilding it twice here to change nothing was the
+        // most expensive way to leave it alone.
+        return std::borrow::Cow::Borrowed(trimmed);
+    }
+    std::borrow::Cow::Owned(
+        trimmed
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .trim()
+            .to_string(),
+    )
 }
 
 /// What the bridge remembers between commands.
@@ -394,6 +403,7 @@ impl Session<'_> {
     }
 
     fn data(&mut self) -> Result<String, String> {
+        use std::fmt::Write as _;
         let channels = self.instrument.channels();
         let counts = self.instrument.read(0, channels)?;
         self.total = counts.iter().sum();
@@ -404,12 +414,17 @@ impl Session<'_> {
                 self.total
             ));
         }
-        let mut reply = String::with_capacity(counts.len() * 4 + 16);
+        // Eight bytes a channel holds any count to seven digits with its
+        // space; the old four under-sized the moment counts passed 999 and
+        // paid a mid-build reallocation of the largest string in the program.
+        let mut reply = String::with_capacity(counts.len() * 8 + 16);
         reply.push_str("DATA ");
-        reply.push_str(&counts.len().to_string());
+        // Formatted in place: `to_string` per channel was a heap allocation
+        // and free for every one of sixteen thousand channels, twice a
+        // second. Writing to a String cannot fail.
+        let _ = write!(reply, "{}", counts.len());
         for count in &counts {
-            reply.push(' ');
-            reply.push_str(&count.to_string());
+            let _ = write!(reply, " {count}");
         }
         Ok(reply)
     }

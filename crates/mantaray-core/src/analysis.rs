@@ -387,13 +387,19 @@ pub fn peak_search(spectrum: &Spectrum, settings: &CalculationSettings) -> Vec<F
     let shape = spectrum.shape_calibration.filter(|shape| shape.is_usable());
 
     let mut candidates: Vec<FoundPeak> = Vec::new();
+    // One response buffer and one squared-kernel scratch for all nine scales;
+    // this used to allocate a spectrum-sized buffer per scale.
+    let mut significance = Vec::new();
+    let mut squares = Vec::new();
     for sigma in SEARCH_SCALES {
         let kernel = second_difference_kernel(sigma);
         let half = kernel.len() / 2;
         if data.len() <= 2 * half + 2 {
             continue;
         }
-        let significance = response(&data, &kernel, half);
+        squares.clear();
+        squares.extend(kernel.iter().map(|k| k * k));
+        response(&data, &kernel, &squares, half, &mut significance);
 
         let mut index = half;
         while index < data.len() - half {
@@ -476,15 +482,21 @@ fn second_difference_kernel(sigma: f64) -> Vec<f64> {
 }
 
 /// Response of the kernel divided by its weighted (Poisson) error.
-fn response(data: &[f64], kernel: &[f64], half: usize) -> Vec<f64> {
-    let mut out = vec![0.0; data.len()];
+///
+/// `squares` is the kernel's coefficients squared, computed once per scale
+/// rather than once per tap - the variance sum is the same taps again, and
+/// squaring inside the inner loop doubled its multiplies. Written into `out`
+/// so the caller can keep one buffer across scales.
+fn response(data: &[f64], kernel: &[f64], squares: &[f64], half: usize, out: &mut Vec<f64>) {
+    out.clear();
+    out.resize(data.len(), 0.0);
     for index in half..data.len().saturating_sub(half) {
+        let window = &data[index - half..=index + half];
         let mut sum = 0.0;
         let mut variance = 0.0;
-        for (offset, k) in kernel.iter().enumerate() {
-            let value = data[index + offset - half];
+        for ((value, k), k2) in window.iter().zip(kernel).zip(squares) {
             sum += k * value;
-            variance += k * k * value.max(1.0);
+            variance += k2 * value.max(1.0);
         }
         out[index] = if variance > 0.0 {
             sum / variance.sqrt()
@@ -492,7 +504,6 @@ fn response(data: &[f64], kernel: &[f64], half: usize) -> Vec<f64> {
             0.0
         };
     }
-    out
 }
 
 /// Measures centroid, width and rough area around a detected apex.
@@ -728,12 +739,18 @@ mod tests {
         }
     }
 
+    /// The squared coefficients `response` expects beside a kernel.
+    fn squared(kernel: &[f64]) -> Vec<f64> {
+        kernel.iter().map(|k| k * k).collect()
+    }
+
     #[test]
     fn a_flat_background_gives_no_response() {
         let data = vec![250.0; 64];
         let kernel = second_difference_kernel(2.0);
         let half = kernel.len() / 2;
-        let z = response(&data, &kernel, half);
+        let mut z = Vec::new();
+        response(&data, &kernel, &squared(&kernel), half, &mut z);
         assert!(z[32].abs() < 1e-9, "got {}", z[32]);
     }
 
@@ -742,7 +759,8 @@ mod tests {
         let data: Vec<f64> = (0..64).map(|c| 500.0 - 3.0 * c as f64).collect();
         let kernel = second_difference_kernel(2.0);
         let half = kernel.len() / 2;
-        let z = response(&data, &kernel, half);
+        let mut z = Vec::new();
+        response(&data, &kernel, &squared(&kernel), half, &mut z);
         assert!(z[32].abs() < 1e-6, "got {}", z[32]);
     }
 }
