@@ -4,7 +4,9 @@
 use egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
 };
-use mantaray_core::{Nuclide, NuclideLibrary, PeakInfo, Spectrum};
+use mantaray_core::{
+    EnergyIndex, LibraryHit, LibraryMatch, Nuclide, NuclideLibrary, PeakInfo, Spectrum,
+};
 
 use crate::theme::SpectrumColors;
 use crate::viewmodel::{DisplayState, FillMode, VerticalScale};
@@ -111,6 +113,31 @@ pub struct ViewHeader<'a> {
     pub maximized: bool,
 }
 
+/// A library beside its energy index, as the draw path wants it.
+///
+/// Drawing asks the library for names per marked region, per frame; the index
+/// makes each of those a binary search instead of a scan of every line. The
+/// two travel together so no call site can use one without the other.
+#[derive(Clone, Copy)]
+pub struct LibraryView<'a> {
+    /// The library itself.
+    pub library: &'a NuclideLibrary,
+    /// Its energy-sorted index, already [`ensure`](EnergyIndex::ensure)d.
+    pub index: &'a EnergyIndex,
+}
+
+impl<'a> LibraryView<'a> {
+    /// Every line in an energy window, sorted by energy.
+    fn peaks_in(&self, low: f64, high: f64) -> impl Iterator<Item = LibraryHit<'a>> {
+        self.index.peaks_in(self.library, low, high)
+    }
+
+    /// Nearest line to `energy` within `tolerance` keV.
+    fn best_match(&self, energy: f64, tolerance: f64) -> Option<LibraryMatch<'a>> {
+        self.index.best_match(self.library, energy, tolerance)
+    }
+}
+
 /// Everything the display needs to draw one spectrum window.
 pub struct ViewInput<'a> {
     /// The spectrum shown.
@@ -128,7 +155,7 @@ pub struct ViewInput<'a> {
     /// Region-marking mode.
     pub mark_mode: MarkMode,
     /// Library whose lines are drawn when isotope markers are on.
-    pub library: Option<&'a NuclideLibrary>,
+    pub library: Option<LibraryView<'a>>,
     /// One nuclide being checked against the spectrum, drawn on its own.
     pub isotope: Option<&'a Nuclide>,
     /// Lines fainter than this are not drawn for that nuclide.
@@ -170,7 +197,19 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     } = input;
 
     display.set_length(spectrum.len());
-    header_bar(ui, spectrum, &header, display, colors, &mut events);
+    // Summed once for the frame: the header, the empty-spectrum nudge, the
+    // overview inset and its hit-test all want the same number, and each was
+    // walking all sixteen thousand channels for it.
+    let total_counts = spectrum.total_counts();
+    header_bar(
+        ui,
+        spectrum,
+        total_counts,
+        &header,
+        display,
+        colors,
+        &mut events,
+    );
 
     let available = ui.available_size();
     // The selection bar wraps to two rows in a narrow window.
@@ -264,7 +303,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     }
     // A spectrum of zeroes that nothing is counting into gets a gentle nudge
     // in the middle of the plot; a blank grid on its own explains nothing.
-    if spectrum.total_counts() == 0 && !header.counting {
+    if total_counts == 0 && !header.counting {
         painter.text(
             plot.center(),
             Align2::CENTER_CENTER,
@@ -274,7 +313,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
         );
     }
     draw_marker(&painter, plot, spectrum, display, colors);
-    draw_full_view(&painter, plot, spectrum, display, colors);
+    draw_full_view(&painter, plot, spectrum, total_counts, display, colors);
     let peak_box = peak_info.and_then(|info| {
         draw_peak_info(
             &painter, plot, spectrum, display, colors, info, library, peak_font,
@@ -291,7 +330,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
         |position: Pos2| -> usize { view.channel_at_x(position.x, plot.left(), plot.width()) };
     // The overview inset is hidden on an empty spectrum, so it must not soak
     // up clicks either; an empty rect keeps every `inset.contains` false.
-    let inset = if spectrum.total_counts() == 0 {
+    let inset = if total_counts == 0 {
         Rect::NOTHING
     } else {
         full_view_rect(plot)
@@ -595,6 +634,7 @@ fn wheel_zoom_factor(scroll: f32, percent: u16) -> f64 {
 fn header_bar(
     ui: &mut Ui,
     spectrum: &Spectrum,
+    total_counts: u64,
     header: &ViewHeader<'_>,
     display: &DisplayState,
     colors: &SpectrumColors,
@@ -640,10 +680,7 @@ fn header_bar(
             };
             ui.label(egui::RichText::new(format!("dead {dead:.1} %")).color(colour));
         }
-        ui.monospace(format!(
-            "{} cnts",
-            crate::view::format_counts(spectrum.total_counts())
-        ));
+        ui.monospace(format!("{} cnts", crate::view::format_counts(total_counts)));
         if roomy {
             ui.separator();
             ui.label(
@@ -834,11 +871,12 @@ fn draw_full_view(
     painter: &egui::Painter,
     plot: Rect,
     spectrum: &Spectrum,
+    total_counts: u64,
     display: &DisplayState,
     colors: &SpectrumColors,
 ) {
     // An overview of nothing is just clutter; it appears with the first count.
-    if spectrum.total_counts() == 0 {
+    if total_counts == 0 {
         return;
     }
     let inset = full_view_rect(plot);
@@ -858,20 +896,33 @@ fn draw_full_view(
     if length == 0 {
         return;
     }
-    let peak = spectrum.max_count().max(1) as f64;
     let columns = (inset.width() - 2.0).floor().max(1.0) as usize;
     let inner_height = inset.height() - 4.0;
+    // The columns visit every channel between them, so the tallest column is
+    // also the spectrum's peak - reading it from the columns spares the
+    // separate full pass `max_count` would make.
+    let heights: Vec<(usize, usize, u64)> = (0..columns)
+        .map(|column| {
+            let start = column * length / columns;
+            let end = (((column + 1) * length) / columns)
+                .max(start + 1)
+                .min(length);
+            let value = spectrum.channels[start..end]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            (start, end, value)
+        })
+        .collect();
+    let peak = heights
+        .iter()
+        .map(|(_, _, value)| *value)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f64;
     let mut fill = Vec::with_capacity(columns);
-    for column in 0..columns {
-        let start = column * length / columns;
-        let end = (((column + 1) * length) / columns)
-            .max(start + 1)
-            .min(length);
-        let value = spectrum.channels[start..end]
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0);
+    for (column, (start, end, value)) in heights.into_iter().enumerate() {
         if value == 0 {
             continue;
         }
@@ -1449,7 +1500,7 @@ fn draw_peak_info(
     display: &DisplayState,
     colors: &SpectrumColors,
     info: &PeakInfo,
-    library: Option<&NuclideLibrary>,
+    library: Option<LibraryView<'_>>,
     peak_font: f32,
 ) -> Option<Rect> {
     let full_scale = display.full_scale(spectrum);
@@ -1651,7 +1702,7 @@ fn draw_peak_info(
 pub(crate) fn peak_info_lines(
     spectrum: &Spectrum,
     info: &PeakInfo,
-    library: Option<&NuclideLibrary>,
+    library: Option<LibraryView<'_>>,
 ) -> Vec<String> {
     let calibration = spectrum.energy_calibration.as_ref();
     let live_time = spectrum.live_time;
@@ -1790,7 +1841,7 @@ fn draw_peak_markers(
     spectrum: &Spectrum,
     display: &DisplayState,
     colors: &SpectrumColors,
-    library: Option<&NuclideLibrary>,
+    library: Option<LibraryView<'_>>,
     full_scale: u64,
 ) {
     let (start, end) = display.visible();
@@ -1853,7 +1904,7 @@ fn draw_peak_markers(
 /// no calibration to name it by.
 pub(crate) fn peak_label(
     spectrum: &Spectrum,
-    library: Option<&NuclideLibrary>,
+    library: Option<LibraryView<'_>>,
     channel: usize,
 ) -> Option<String> {
     let cal = spectrum.energy_calibration.as_ref()?;
@@ -1864,7 +1915,7 @@ pub(crate) fn peak_label(
 /// The nuclide the library puts at a channel's energy, if it names one.
 pub(crate) fn nuclide_at(
     spectrum: &Spectrum,
-    library: Option<&NuclideLibrary>,
+    library: Option<LibraryView<'_>>,
     channel: usize,
 ) -> Option<String> {
     let cal = spectrum.energy_calibration.as_ref()?;
@@ -1875,7 +1926,6 @@ pub(crate) fn nuclide_at(
     let span = (cal.energy((channel + 2) as f64) - energy).abs().max(0.5);
     library
         .peaks_in(energy - span, energy + span)
-        .into_iter()
         .min_by(|a, b| {
             (a.peak.energy - energy)
                 .abs()
@@ -1892,7 +1942,7 @@ fn draw_library_lines(
     spectrum: &Spectrum,
     display: &DisplayState,
     colors: &SpectrumColors,
-    library: Option<&NuclideLibrary>,
+    library: Option<LibraryView<'_>>,
 ) {
     let (Some(library), Some(cal)) = (library, spectrum.energy_calibration.as_ref()) else {
         return;

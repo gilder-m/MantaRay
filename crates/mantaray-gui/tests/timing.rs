@@ -38,6 +38,32 @@ fn realistic(channels: usize) -> Spectrum {
     spectrum
 }
 
+/// A library the size of a full evaluated export: three thousand nuclides,
+/// nine lines each. The draw path asks the library for a name per marked
+/// region per frame, so a frame over an empty library - which is what
+/// `App::headless` carries - measures everything except the most expensive
+/// thing in it.
+fn evaluated_library() -> mantaray_core::NuclideLibrary {
+    let mut library = mantaray_core::NuclideLibrary::new("timing");
+    for n in 0..3000 {
+        let mut nuclide = mantaray_core::Nuclide {
+            name: format!("Nu-{n}"),
+            half_life_seconds: 3600.0 * (n + 1) as f64,
+            uncertainty_percent: 1.0,
+            flags: Default::default(),
+            peaks: Vec::new(),
+        };
+        for p in 0..9 {
+            let energy = 20.0 + ((n * 9 + p) % 27_000) as f64 * 0.1;
+            nuclide
+                .peaks
+                .push(mantaray_core::LibraryPeak::new(energy, 10.0));
+        }
+        library.push(nuclide);
+    }
+    library
+}
+
 fn frame(app: &mut App, ctx: &egui::Context, size: [f32; 2]) -> usize {
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -100,6 +126,16 @@ fn how_long_a_frame_takes() {
             &mut app,
             &ctx,
             &format!("{channels} channels, {regions} regions, log"),
+        );
+
+        // The same frame with a real library's worth of lines behind the
+        // peak labels - the case an operator with an evaluated library and a
+        // marked-up background spectrum is actually in.
+        app.library = evaluated_library();
+        measure(
+            &mut app,
+            &ctx,
+            &format!("{channels} channels, {regions} regions, library"),
         );
     }
     println!();

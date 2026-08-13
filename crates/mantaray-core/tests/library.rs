@@ -314,3 +314,76 @@ fn a_number_is_shown_at_four_figures_wherever_it_falls() {
     assert_eq!(significant(f64::NAN), "NaN");
     assert_eq!(significant(f64::INFINITY), "inf");
 }
+
+/// The energy index answers exactly as the linear scans do.
+///
+/// The index exists because the scans run per marked region, per frame; it is
+/// only allowed to be faster, never different. Every window and every nearest-
+/// line query over the sample library must come back identical.
+#[test]
+fn the_energy_index_agrees_with_the_linear_scans() {
+    use mantaray_core::EnergyIndex;
+    let library = NuclideLibrary::sample_for_tests();
+    let mut index = EnergyIndex::default();
+    index.ensure(&library);
+
+    for (low, high) in [(0.0, 3000.0), (600.0, 700.0), (661.0, 662.0), (5.0, 5.5)] {
+        let linear: Vec<(String, f64)> = library
+            .peaks_in(low, high)
+            .iter()
+            .map(|hit| (hit.nuclide.name.clone(), hit.peak.energy))
+            .collect();
+        let indexed: Vec<(String, f64)> = index
+            .peaks_in(&library, low, high)
+            .map(|hit| (hit.nuclide.name.clone(), hit.peak.energy))
+            .collect();
+        assert_eq!(indexed, linear, "window {low}-{high} keV");
+    }
+
+    for energy in [661.66, 1173.0, 1332.5, 20.0, 2614.5, 0.0] {
+        let linear = library.best_match(energy, 2.5);
+        let indexed = index.best_match(&library, energy, 2.5);
+        match (linear, indexed) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                assert_eq!(a.nuclide.name, b.nuclide.name, "at {energy} keV");
+                assert_eq!(a.peak.energy, b.peak.energy, "at {energy} keV");
+                assert!((a.delta - b.delta).abs() < 1e-12);
+            }
+            (a, b) => panic!(
+                "at {energy} keV: linear {:?}, indexed {:?}",
+                a.map(|m| m.peak.energy),
+                b.map(|m| m.peak.energy)
+            ),
+        }
+    }
+}
+
+/// An edit through the public field is seen, and the index heals itself.
+///
+/// `nuclides` is open data - the editor writes straight through it - so the
+/// index verifies its digest on `ensure` rather than trusting anyone to have
+/// told it. Moving a line's energy must be enough to trigger a rebuild.
+#[test]
+fn the_energy_index_notices_an_edit_and_rebuilds() {
+    use mantaray_core::EnergyIndex;
+    let mut library = NuclideLibrary::sample_for_tests();
+    let mut index = EnergyIndex::default();
+    index.ensure(&library);
+    assert!(index.best_match(&library, 661.657, 0.5).is_some());
+
+    // Retype the cesium line to a different energy, as the editor would.
+    for nuclide in &mut library.nuclides {
+        for peak in &mut nuclide.peaks {
+            if (peak.energy - 661.657).abs() < 1e-9 {
+                peak.energy = 700.0;
+            }
+        }
+    }
+    index.ensure(&library);
+    assert!(
+        index.best_match(&library, 661.657, 0.5).is_none(),
+        "the moved line still answers at its old energy"
+    );
+    assert!(index.best_match(&library, 700.0, 0.5).is_some());
+}

@@ -5,7 +5,7 @@
 //! lab book matches what was on the instrument. Kept deliberately simpler than
 //! the live view: no overview inset, no hover work, no selection chrome.
 
-use mantaray_core::{NuclideLibrary, Spectrum};
+use mantaray_core::Spectrum;
 
 use crate::theme::SpectrumColors;
 use crate::viewmodel::{DisplayState, VerticalScale};
@@ -21,7 +21,7 @@ pub fn plot_svg(
     spectrum: &Spectrum,
     display: &DisplayState,
     colors: &SpectrumColors,
-    library: Option<&NuclideLibrary>,
+    library: Option<crate::view::LibraryView<'_>>,
     width: f32,
     height: f32,
 ) -> String {

@@ -45,8 +45,8 @@ pub use efficiency::{
 };
 pub use error::{AnalysisError, CalibrationError};
 pub use library::{
-    LibraryHit, LibraryMatch, LibraryPeak, Nuclide, NuclideFlags, NuclideLibrary, PhotonKind,
-    parse_nuclide_name, significant,
+    EnergyIndex, LibraryHit, LibraryMatch, LibraryPeak, Nuclide, NuclideFlags, NuclideLibrary,
+    PhotonKind, parse_nuclide_name, significant,
 };
 pub use qa::{ControlLimits, QaChart, QaMetric, QaRecord, QaStatistics, QaStatus};
 pub use quant::{
