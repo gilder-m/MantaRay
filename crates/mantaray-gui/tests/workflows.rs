@@ -83,8 +83,13 @@ fn calibrating_from_two_known_lines_and_saving_keeps_the_calibration() {
     );
 
     let path = scratch("calibrated.Spe");
-    app.apply_action(Action::RecallFile(path.clone()));
+    // Deleted before the recall, not after: a calibrated.Spe left by an
+    // earlier run would open in a new window, make itself active, and be
+    // saved back out - so the test would then compare that old file's
+    // calibration against this run's, and fail forever after any change
+    // that moves a centroid.
     let _ = std::fs::remove_file(&path);
+    app.apply_action(Action::RecallFile(path.clone()));
     app.save_active_to(&path).expect("it should save");
 
     let reopened = mantaray_formats::load_spectrum(&path).expect("the file reads back");

@@ -311,15 +311,31 @@ fn fit_gaussian(net: &[f64], offset: usize) -> Option<GaussianFit> {
     if max <= 0.0 {
         return None;
     }
-    let level = 0.3 * max;
+    // Down to a twentieth of the peak, not the thirty percent this used to
+    // keep: a Gaussian is told from its neighbours by its wings, and a fit
+    // that never sees them reads a real peak's width off its cap alone -
+    // which on bench spectra sat visibly narrower than the data. The wings
+    // are safe to admit because of the weighting below; without it they were
+    // the channels that hurt most.
+    let level = 0.05 * max;
     // Fit in coordinates local to the tallest channel for conditioning.
+    //
+    // Each row is scaled by its own count, which turns the plain least
+    // squares below into the count-squared-weighted fit of the logarithm.
+    // Taking logarithms makes a parabola of a Gaussian, but it also inflates
+    // the noise of the small channels: a wing channel of a few counts swings
+    // its logarithm by whole units where the cap's channels move by parts in
+    // a thousand, so an unweighted fit is steered by exactly the channels
+    // that know the least. Weighting by the count undoes the inflation -
+    // the variance of ln(y) is about 1/y for counting data - and the wings
+    // then inform the width without deciding it.
     let rows: Vec<([f64; 3], f64)> = net
         .iter()
         .enumerate()
         .filter(|(_, value)| **value >= level && **value > 0.0)
         .map(|(index, value)| {
             let x = index as f64 - peak_index as f64;
-            ([1.0, x, x * x], value.ln())
+            ([*value, value * x, value * x * x], value * value.ln())
         })
         .collect();
     if rows.len() < 3 {
@@ -737,6 +753,57 @@ mod tests {
             assert!(sum.abs() < 1e-12, "sigma {sigma}: sum {sum}");
             assert!(kernel.len() % 2 == 1, "kernel must be centred");
         }
+    }
+
+    /// A Gaussian on a small pedestal, as a net-counts slice.
+    fn gaussian_net(amplitude: f64, centre: f64, sigma: f64, length: usize) -> Vec<f64> {
+        (0..length)
+            .map(|channel| {
+                let x = (channel as f64 - centre) / sigma;
+                amplitude * (-0.5 * x * x).exp()
+            })
+            .collect()
+    }
+
+    /// A clean Gaussian fits back to its own parameters.
+    #[test]
+    fn the_gaussian_fit_recovers_a_clean_peak() {
+        let net = gaussian_net(1_000.0, 40.0, 4.0, 81);
+        let fit = fit_gaussian(&net, 100).expect("a clear peak fits");
+        assert!((fit.centroid - 140.0).abs() < 0.01, "{}", fit.centroid);
+        assert!((fit.sigma - 4.0).abs() < 0.02, "{}", fit.sigma);
+        assert!((fit.amplitude - 1_000.0).abs() < 5.0, "{}", fit.amplitude);
+    }
+
+    /// Noisy wings inform the fit without deciding it.
+    ///
+    /// The fit reaches down to a twentieth of the peak so a real peak's width
+    /// is read from its wings and not its cap alone - and the wing channels
+    /// are the noisiest ones there are, which is why each row is weighted by
+    /// its own count. This doubles and halves alternate far-wing channels, a
+    /// caricature of counting noise, and the fit must hold to the truth.
+    #[test]
+    fn noisy_wings_do_not_steer_the_gaussian_fit() {
+        let mut net = gaussian_net(1_000.0, 40.0, 4.0, 81);
+        let cap = 1_000.0;
+        let mut flip = false;
+        for value in net.iter_mut() {
+            if *value < 0.1 * cap && *value > 0.0 {
+                *value *= if flip { 2.0 } else { 0.5 };
+                flip = !flip;
+            }
+        }
+        let fit = fit_gaussian(&net, 0).expect("still a peak");
+        assert!(
+            (fit.centroid - 40.0).abs() < 0.2,
+            "the centroid moved to the noise: {}",
+            fit.centroid
+        );
+        assert!(
+            (fit.sigma - 4.0).abs() < 0.2,
+            "the width was read off the noise: {}",
+            fit.sigma
+        );
     }
 
     /// The squared coefficients `response` expects beside a kernel.
