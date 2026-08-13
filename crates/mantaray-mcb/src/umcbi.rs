@@ -353,6 +353,17 @@ impl Umcbi {
         // A mask of zero means the instrument did not report one; take the word.
         let mask = if data_mask == 0 { u32::MAX } else { data_mask };
         buffer.truncate(returned as usize);
+        if crate::journal::on() {
+            // The driver's own truth, before any interpretation: this is the
+            // one line that can tell a short read from a masked-out one from
+            // an instrument that really answered zeros.
+            let raw: u64 = buffer.iter().map(|word| u64::from(*word)).sum();
+            let masked: u64 = buffer.iter().map(|word| u64::from(word & mask)).sum();
+            crate::journal::line(&format!(
+                "MIOGetData: asked={count} returned={returned} data_mask={data_mask:#010x} \
+                 roi_mask={roi_mask:#010x} raw_sum={raw} masked_sum={masked}"
+            ));
+        }
         Ok(buffer.iter().map(|word| (word & mask) as u64).collect())
     }
 

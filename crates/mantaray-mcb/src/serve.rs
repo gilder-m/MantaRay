@@ -140,10 +140,18 @@ impl Session<'_> {
             other if other.starts_with('$') || other.contains('_') => self.pass(command),
             other => Err(format!("{other} is not a command this bridge knows")),
         };
-        match outcome {
+        let reply = match outcome {
             Ok(reply) => reply,
             Err(error) => format!("ERR {error}"),
+        };
+        if crate::journal::on() {
+            // Digested: a DATA reply is a whole spectrum, and its journal
+            // line is its shape - data() writes the sum separately.
+            let shown: String = reply.chars().take(48).collect();
+            let more = if reply.len() > shown.len() { "…" } else { "" };
+            crate::journal::line(&format!("{command} -> {shown}{more}"));
         }
+        reply
     }
 
     /// Sends a command through untouched and relays what came back.
@@ -289,6 +297,13 @@ impl Session<'_> {
         let channels = self.instrument.channels();
         let counts = self.instrument.read(0, channels)?;
         self.total = counts.iter().sum();
+        if crate::journal::on() {
+            crate::journal::line(&format!(
+                "read: asked={channels} returned={} sum={}",
+                counts.len(),
+                self.total
+            ));
+        }
         let mut reply = String::with_capacity(counts.len() * 4 + 16);
         reply.push_str("DATA ");
         reply.push_str(&counts.len().to_string());

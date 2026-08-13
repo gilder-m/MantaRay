@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**`MANTARAY_DEBUG` keeps a written record as well as the overlay
+(2026-08-13).** The application journals every fetch (declared count, sum,
+clocks, and what the mirror did about it) and every command with its answer to
+`mantaray-debug.log`; the bridge writes what the driver actually returned -
+asked, returned, masks, sums - to `mantaray-mcb-debug.log`. Both land in the
+directory the program was started from, and nothing is opened or written
+without the variable set. The overlay can say a frame is late; only the
+machine that misbehaves can say what its instrument answered, and now it
+writes it down.
+
 **A flapping channel count no longer clears the spectrum from the screen
 (2026-08-13).** Reported from the Windows bench the moment acquisition
 started: the window flashed empty and full, over and over, as though the

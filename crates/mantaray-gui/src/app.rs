@@ -1716,7 +1716,15 @@ impl App {
                 Ok(None) => {}
                 // A network instrument that stops answering must be named,
                 // not silently frozen on screen.
-                Err(error) => troubled.push((detector.identity().number, error.to_string())),
+                Err(error) => {
+                    if mantaray_device::journal::on() {
+                        mantaray_device::journal::line(&format!(
+                            "advance: detector {} errored: {error}",
+                            detector.identity().number
+                        ));
+                    }
+                    troubled.push((detector.identity().number, error.to_string()));
+                }
             }
         }
         // What the count has been doing, sampled as it goes. Recorded for

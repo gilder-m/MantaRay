@@ -23,6 +23,7 @@ pub mod changer;
 mod courier;
 pub mod detector;
 pub mod error;
+pub mod journal;
 pub mod mcb;
 pub mod presets;
 pub mod remote;

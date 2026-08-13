@@ -236,10 +236,24 @@ impl RemoteMcb {
 
     /// One command out, one line back, however the line is held.
     fn raw(&mut self, command: &str) -> Result<String, DeviceError> {
-        match &mut self.line {
+        let answer = match &mut self.line {
             Line::Direct(transport) => transport.exchange(command),
             Line::Carried(courier) => courier.exchange(command),
+        };
+        if crate::journal::on() {
+            // Digested: a SHOW_DATA answer is a whole spectrum, and the
+            // journal wants its shape, not its channels - integrate writes
+            // those as a sum.
+            match &answer {
+                Ok(reply) => {
+                    let shown: String = reply.chars().take(48).collect();
+                    let more = if reply.len() > shown.len() { "…" } else { "" };
+                    crate::journal::line(&format!("{command} -> {shown}{more}"));
+                }
+                Err(error) => crate::journal::line(&format!("{command} -> ERROR {error}")),
+            }
         }
+        answer
     }
 
     /// One command out, one checked line back.
@@ -346,14 +360,24 @@ impl RemoteMcb {
                 ),
             });
         }
+        // What the mirror did with this fetch, for the journal: the bench
+        // that misbehaves is the only machine that can say what its fetches
+        // actually carried, and this line is how it says it.
+        let mut verdict = "no channels";
         if count > 0 {
-            if self.spectrum.len() != count && self.believes(count) {
-                // The instrument's conversion gain changed underneath us. The
-                // counts are new, but whose spectrum this is - detector,
-                // calibration, start date - is not.
-                let mut resized = Spectrum::new(count);
-                resized.copy_descriptors_from(&self.spectrum);
-                self.spectrum = resized;
+            verdict = "landed";
+            if self.spectrum.len() != count {
+                if self.believes(count) {
+                    // The instrument's conversion gain changed underneath us.
+                    // The counts are new, but whose spectrum this is -
+                    // detector, calibration, start date - is not.
+                    let mut resized = Spectrum::new(count);
+                    resized.copy_descriptors_from(&self.spectrum);
+                    self.spectrum = resized;
+                    verdict = "adopted a new length";
+                } else {
+                    verdict = "held: one fetch of a new length";
+                }
             }
             // Only a fetch the mirror's length agrees with lands; a flap's
             // channels are dropped, and its clocks and status still count.
@@ -361,6 +385,19 @@ impl RemoteMcb {
                 self.spectrum.channels.copy_from_slice(&self.scratch);
                 self.pending_length = None;
             }
+        }
+        if crate::journal::on() {
+            let sum: u64 = self.scratch.iter().sum();
+            crate::journal::line(&format!(
+                "fetch: count={count} sum={sum} rt={:.2} lt={:.2} active={} total={} | \
+                 mirror len={} sum={} | {verdict}",
+                self.status.real_time,
+                self.status.live_time,
+                self.status.active,
+                self.status.total_counts,
+                self.spectrum.len(),
+                self.spectrum.total_counts(),
+            ));
         }
         self.spectrum.real_time = self.status.real_time;
         self.spectrum.live_time = self.status.live_time;
@@ -381,6 +418,12 @@ impl RemoteMcb {
         // stood paused, which is the residual error and is the reason this is
         // a reconstruction rather than a reading.
         if self.spectrum.start_time.is_none() && self.status.active && self.status.real_time > 0.0 {
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "mirror: start reconstructed {:.2}s back",
+                    self.status.real_time
+                ));
+            }
             let counted = chrono::Duration::milliseconds((self.status.real_time * 1000.0) as i64);
             self.spectrum.start_time = chrono::Local::now()
                 .naive_local()
