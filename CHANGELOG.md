@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+**A flapping channel count no longer clears the spectrum from the screen
+(2026-08-13).** Reported from the Windows bench the moment acquisition
+started: the window flashed empty and full, over and over, as though the
+program kept clearing the count. On that road ORTEC's library is asked the
+detector's length on every read and truncates the data to what it actually
+returned - and a busy instrument mid-acquisition answers short - while the
+mirror rebuilt itself from zeros for every length it had not seen before.
+A mirror holding counts now believes a new length only when two fetches in a
+row agree on it: a one-fetch flap keeps the spectrum on screen and costs that
+fetch's channels alone, its clocks still landing, while a genuine
+conversion-gain change - which repeats on every fetch - is adopted on the
+second. An empty mirror (connection, the fetch after CLEAR) still adopts at
+once, because rebuilding zeros as zeros loses nothing. The libusb road never
+showed the fault: there the size is asked once and every read is a whole
+frame.
+
 **The interface can say what it is waiting for (2026-08-12).** With
 `MANTARAY_DEBUG` set in the environment, an overlay reports the adapter,
 backend and driver the renderer actually chose, frames drawn in the last

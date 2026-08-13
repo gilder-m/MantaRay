@@ -67,6 +67,9 @@ pub struct RemoteMcb {
     /// Where a fetch's channel counts are parsed before they reach the
     /// mirror - see [`Self::integrate`] for why they do not go straight in.
     scratch: Vec<u64>,
+    /// A channel count one fetch declared that the mirror has not believed
+    /// yet - see [`Self::believes`].
+    pending_length: Option<usize>,
 }
 
 impl RemoteMcb {
@@ -167,6 +170,7 @@ impl RemoteMcb {
             locked_by: None,
             since_poll: f64::MAX,
             scratch: Vec::new(),
+            pending_length: None,
         };
         remote.refresh()?;
         remote.read_presets();
@@ -255,6 +259,29 @@ impl RemoteMcb {
         self.integrate(Fetched { status, data })
     }
 
+    /// Whether a fetch's channel count is believed enough to rebuild for.
+    ///
+    /// Rebuilding the mirror for a new length starts it from zeros, so a
+    /// count that flaps clears the operator's spectrum from the screen with
+    /// every flip. And flap it does: on the Windows road, ORTEC's library is
+    /// asked the detector's length on every read and truncates the data to
+    /// however many channels it felt like returning, and a busy instrument
+    /// mid-acquisition answered short often enough that the window flashed
+    /// empty and full, over and over - read from the bench as the program
+    /// clearing the count. The libusb road never showed it, because there
+    /// the size is asked once and every read is a whole frame.
+    ///
+    /// So belief is earned, at the only price a real gain change can always
+    /// pay: an *empty* mirror adopts a new length at once, because rebuilding
+    /// zeros as zeros loses nothing - which is what lets connection and the
+    /// fetch after CLEAR size themselves immediately. A mirror holding counts
+    /// adopts a new length only when two fetches in a row agree on it; a
+    /// one-fetch flap keeps the spectrum on screen and costs that fetch's
+    /// channels alone.
+    fn believes(&mut self, count: usize) -> bool {
+        self.spectrum.total_counts() == 0 || self.pending_length.replace(count) == Some(count)
+    }
+
     /// Works a fetch's lines into the mirror.
     ///
     /// Parsing lives here rather than with the fetch so that a courier can
@@ -320,7 +347,7 @@ impl RemoteMcb {
             });
         }
         if count > 0 {
-            if self.spectrum.len() != count {
+            if self.spectrum.len() != count && self.believes(count) {
                 // The instrument's conversion gain changed underneath us. The
                 // counts are new, but whose spectrum this is - detector,
                 // calibration, start date - is not.
@@ -328,7 +355,12 @@ impl RemoteMcb {
                 resized.copy_descriptors_from(&self.spectrum);
                 self.spectrum = resized;
             }
-            self.spectrum.channels.copy_from_slice(&self.scratch);
+            // Only a fetch the mirror's length agrees with lands; a flap's
+            // channels are dropped, and its clocks and status still count.
+            if self.spectrum.len() == count {
+                self.spectrum.channels.copy_from_slice(&self.scratch);
+                self.pending_length = None;
+            }
         }
         self.spectrum.real_time = self.status.real_time;
         self.spectrum.live_time = self.status.live_time;
