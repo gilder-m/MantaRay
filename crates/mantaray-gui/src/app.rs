@@ -3347,6 +3347,13 @@ impl App {
                 self.dialogs.open(Dialog::Library);
                 return;
             }
+            // Theme & Colours, for looking at the scheme picker, the style
+            // editor and the palette checks - the parts of the look that are
+            // not the plot.
+            "look" => {
+                self.dialogs.open(Dialog::Preferences);
+                return;
+            }
             "charts" => {
                 // Filled QA and efficiency charts, for the screenshots.
                 let mut chart = QaChart::new(

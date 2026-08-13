@@ -536,7 +536,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
                     step()
                 }));
             } else {
-                events.push(zoom_event(wheel_zoom_factor(scroll)));
+                events.push(zoom_event(wheel_zoom_factor(scroll, style.wheel_zoom)));
             }
         } else if sideways.abs() > 0.5 {
             // A sideways wheel or a two-finger swipe pans along the spectrum.
@@ -578,8 +578,13 @@ const NOTCH_POINTS: f32 = 150.0;
 /// one step per notch, however the platform slices the points up. Clamped so
 /// that no single frame can move more than a factor of two even under a
 /// flung free-spinning wheel.
-fn wheel_zoom_factor(scroll: f32) -> f64 {
-    let exponent = f64::from(scroll / NOTCH_POINTS);
+///
+/// `percent` is the scheme's [`crate::theme::SchemeStyle::wheel_zoom`]: how
+/// much of the keyboard's step one notch is worth. A hundred is parity; a
+/// scheme - or a mouse - that wants a gentler or a brisker wheel scales the
+/// exponent, so the curve keeps its shape and only its pace changes.
+fn wheel_zoom_factor(scroll: f32, percent: u16) -> f64 {
+    let exponent = f64::from(scroll / NOTCH_POINTS) * f64::from(percent) / 100.0;
     crate::viewmodel::ZOOM_STEP.powf(-exponent).clamp(0.5, 2.0)
 }
 
@@ -2117,15 +2122,34 @@ mod tests {
     fn a_wheel_notch_is_worth_one_zoom_step() {
         use crate::viewmodel::ZOOM_STEP;
         // A whole notch at once: exactly the keyboard's step, inward.
-        assert!((wheel_zoom_factor(NOTCH_POINTS) - 1.0 / ZOOM_STEP).abs() < 1e-9);
-        assert!((wheel_zoom_factor(-NOTCH_POINTS) - ZOOM_STEP).abs() < 1e-9);
+        assert!((wheel_zoom_factor(NOTCH_POINTS, 100) - 1.0 / ZOOM_STEP).abs() < 1e-9);
+        assert!((wheel_zoom_factor(-NOTCH_POINTS, 100) - ZOOM_STEP).abs() < 1e-9);
         // Split into thirds, the pieces multiply back to the same step. The
         // tolerance is the f32 the scroll arrives as, not the f64 arithmetic.
-        let third = wheel_zoom_factor(NOTCH_POINTS / 3.0);
+        let third = wheel_zoom_factor(NOTCH_POINTS / 3.0, 100);
         assert!((third.powi(3) - 1.0 / ZOOM_STEP).abs() < 1e-6);
         // A flung free-spinning wheel is bounded per frame, not unbounded.
-        assert!(wheel_zoom_factor(5000.0) >= 0.5);
-        assert!(wheel_zoom_factor(-5000.0) <= 2.0);
+        assert!(wheel_zoom_factor(5000.0, 100) >= 0.5);
+        assert!(wheel_zoom_factor(-5000.0, 100) <= 2.0);
+    }
+
+    /// The scheme's wheel-zoom percentage paces the wheel without bending it.
+    ///
+    /// Fifty percent takes two notches to a step, two hundred takes half a
+    /// notch - the curve is the same one, walked slower or faster, so a
+    /// scheme can calm a twitchy wheel or hurry a stiff one.
+    #[test]
+    fn the_scheme_paces_the_wheel() {
+        use crate::viewmodel::ZOOM_STEP;
+        // Half pace: a whole notch is half a step, so two notches are one.
+        let half = wheel_zoom_factor(NOTCH_POINTS, 50);
+        assert!((half * half - 1.0 / ZOOM_STEP).abs() < 1e-9);
+        // Double pace: one notch lands two steps in.
+        let double = wheel_zoom_factor(NOTCH_POINTS, 200);
+        assert!((double - (1.0 / ZOOM_STEP).powi(2)).abs() < 1e-9);
+        // And whatever the pace, the per-frame bound holds.
+        assert!(wheel_zoom_factor(5000.0, 400) >= 0.5);
+        assert!(wheel_zoom_factor(-5000.0, 400) <= 2.0);
     }
 
     #[test]

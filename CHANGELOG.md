@@ -11,6 +11,14 @@ trackpad glides through the same curve, and a pinch passes its own scale
 through instead of being rounded to whole steps. No single frame can move the
 view by more than a factor of two, however hard a free-spinning wheel is flung.
 
+**And how far a notch goes is the scheme's to set (2026-08-12).** The style a
+scheme carries - tabs or windows, the fill, the glow - now carries the wheel's
+pace too: `wheel_zoom`, the share of a keyboard step one notch is worth, from
+25% to 400% around a default of parity. Theme & Colours has the slider, the
+scheme file has the field, and the curve is the same at every setting - only
+its pace changes, so a twitchy wheel can be calmed and a stiff one hurried
+without either losing the shape of the zoom.
+
 ## 0.2.2-alpha (2026-08-12)
 
 **A count already running when the window opens keeps its start date
