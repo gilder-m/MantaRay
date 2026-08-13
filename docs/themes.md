@@ -51,7 +51,9 @@ The style carries feel as well as looks. `wheel_zoom` is how much one notch of
 the scroll wheel zooms, as a percentage of the keyboard's step: 100 means a
 notch and Display/Zoom In move the same amount, 50 calms a twitchy wheel to
 half that, 200 hurries a stiff one to double. The range is 25 to 400, and the
-curve is the same at every setting - only its pace changes.
+curve is the same at every setting - only its pace changes. A hand-edited
+value outside the range is pulled to the nearer end rather than obeyed or
+refused, so no file can quietly disable the wheel.
 
 ## Conductor, and where its colours came from
 

@@ -82,7 +82,6 @@ pub enum ViewEvent {
     PeakInfo(usize),
     /// The view should zoom to a channel range.
     ZoomTo(usize, usize),
-    /// The wheel asked to zoom in or out.
     /// The wheel or a pinch asked to scale the view's width by a factor -
     /// below one narrows, which is zooming in.
     Zoom(f64),
@@ -559,7 +558,6 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     events
 }
 
-/// The window's own header: source, times, counts, mode and a maximise button.
 /// One wheel notch of scroll, in egui points.
 ///
 /// Windows reports a notch as three lines and egui counts a line as fifty
@@ -584,10 +582,16 @@ const NOTCH_POINTS: f32 = 150.0;
 /// scheme - or a mouse - that wants a gentler or a brisker wheel scales the
 /// exponent, so the curve keeps its shape and only its pace changes.
 fn wheel_zoom_factor(scroll: f32, percent: u16) -> f64 {
+    // The slider offers 25 to 400, but a hand-edited scheme file may say
+    // anything a u16 can hold; held to the same range here, so a zero cannot
+    // silently disable the wheel and a huge value cannot turn every touch
+    // into a lunge.
+    let percent = percent.clamp(25, 400);
     let exponent = f64::from(scroll / NOTCH_POINTS) * f64::from(percent) / 100.0;
     crate::viewmodel::ZOOM_STEP.powf(-exponent).clamp(0.5, 2.0)
 }
 
+/// The window's own header: source, times, counts, mode and a maximise button.
 fn header_bar(
     ui: &mut Ui,
     spectrum: &Spectrum,
@@ -2150,6 +2154,16 @@ mod tests {
         // And whatever the pace, the per-frame bound holds.
         assert!(wheel_zoom_factor(5000.0, 400) >= 0.5);
         assert!(wheel_zoom_factor(-5000.0, 400) <= 2.0);
+        // A hand-edited scheme may say anything a u16 holds; the pace is held
+        // to the slider's 25-400, so zero cannot silently disable the wheel.
+        assert_eq!(
+            wheel_zoom_factor(NOTCH_POINTS, 0),
+            wheel_zoom_factor(NOTCH_POINTS, 25)
+        );
+        assert_eq!(
+            wheel_zoom_factor(NOTCH_POINTS, u16::MAX),
+            wheel_zoom_factor(NOTCH_POINTS, 400)
+        );
     }
 
     #[test]
