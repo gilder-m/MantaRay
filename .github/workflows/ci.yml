@@ -79,6 +79,15 @@ jobs:
           rustup target add aarch64-apple-darwin
           cargo check --target aarch64-apple-darwin --workspace
 
+      # ARM Linux is where the small bench machines live - a Raspberry Pi
+      # driving an instrument headless. Same rule as macOS was under before
+      # 2026-08-07: a type check keeps the road open, and the release archive
+      # waits until the program has actually run on one.
+      - name: Check that everything still compiles for ARM Linux
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check --target aarch64-unknown-linux-gnu --workspace
+
   lint:
     name: format and clippy
     runs-on: ubuntu-latest
