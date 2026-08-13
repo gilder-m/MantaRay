@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+**A slow instrument no longer freezes the interface (2026-08-12).** The
+application refreshed each connected instrument - status and a whole spectrum -
+on the thread that draws the frames, so an instrument that took 325 ms to
+answer froze the interface for 325 ms, twice a second, for as long as its
+window was open. Measured on a bench machine whose ordinary frame costs one
+millisecond, and read there as a broken program. Each instrument's transport
+now lives with a courier on a thread of its own: the frame asks for a fetch
+and collects the finished one later, never waiting on the wire, and commands
+still go straight through in order. The command line keeps the old synchronous
+road - a script has no frames to hold, and a `WAIT` wants the clocks fresh the
+moment it polls.
+
+Also from the same pass: the sidebar's region list no longer clones its rows
+(a Vec of Strings) on every frame it is shown, the library dialog no longer
+clones every nuclide's name per frame to paint the list, stepping through
+library lines finds the next line in one pass instead of cloning and sorting
+the whole library, and a fetch's channel counts are parsed into a buffer that
+is kept rather than one allocated fresh twice a second.
+
 ## 0.2.2-alpha (2026-08-12)
 
 **A count already running when the window opens keeps its start date
