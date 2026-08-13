@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3-alpha (2026-08-13)
 
 **Naming a peak no longer walks the whole library (2026-08-13).** Every
 frame, for every marked region on screen, the display asked the library which
