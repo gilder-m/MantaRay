@@ -317,6 +317,18 @@ pub trait Mcb: Send {
     /// Advances the instrument by `elapsed_seconds` of real time.
     fn poll(&mut self, elapsed_seconds: f64) -> Result<(), DeviceError>;
 
+    /// Whether the last [`poll`](Self::poll) changed what [`status`](Self::status)
+    /// and [`spectrum`](Self::spectrum) answer.
+    ///
+    /// The default says yes, which is right for an instrument that counts on
+    /// every poll - the simulator does. A mirror over a wire says yes only for
+    /// the poll that integrated a fetch, so work keyed to the data - preset
+    /// walks over marked channels, an MDA fit - runs when the numbers can
+    /// have moved and not sixty times a second because frames were drawn.
+    fn poll_freshened(&self) -> bool {
+        true
+    }
+
     /// Switches collection mode.
     fn set_mode(&mut self, mode: AcquisitionMode) -> Result<(), DeviceError>;
 

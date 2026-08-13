@@ -20,8 +20,16 @@ use crate::mcb::Mcb;
 pub fn serve_connection(stream: TcpStream, mcb: Arc<Mutex<dyn Mcb>>) -> std::io::Result<()> {
     // One silent client must not hold the single serving slot forever: the
     // other end polls every half second when it is alive at all, so a minute
-    // of nothing is a vanished client, not a quiet one.
+    // of nothing is a vanished client, not a quiet one. The same on the way
+    // out - a client that stops *reading* would park `write_all` on a
+    // spectrum-sized reply for good, and with one serving slot that is the
+    // listener wedged for every client after.
     stream.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(60)))?;
+    // The client turns Nagle off and this end must too: the reply is one
+    // write and the client reads to its newline, so a delayed ACK was worth
+    // up to 40 ms of the poll's half-second budget for nothing.
+    stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     let mut line = String::new();
@@ -34,7 +42,7 @@ pub fn serve_connection(stream: TcpStream, mcb: Arc<Mutex<dyn Mcb>>) -> std::io:
         if command.is_empty() {
             continue;
         }
-        let response = {
+        let mut response = {
             // A poisoned lock means the clock thread panicked mid-advance;
             // the simulator's state is still the best answer there is, and
             // killing the serve loop over it would refuse every later client.
@@ -42,8 +50,11 @@ pub fn serve_connection(stream: TcpStream, mcb: Arc<Mutex<dyn Mcb>>) -> std::io:
             mcb.send_message(command)
                 .unwrap_or_else(|error| format!("ERR {error}"))
         };
+        // One write, terminator included. Written separately, the newline sat
+        // behind Nagle waiting on the ACK for the reply it terminates, while
+        // the client sat in read_line waiting for exactly that newline.
+        response.push('\n');
         writer.write_all(response.as_bytes())?;
-        writer.write_all(b"\n")?;
     }
 }
 
