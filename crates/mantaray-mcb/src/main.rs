@@ -19,6 +19,7 @@ mod bridge;
 #[cfg(not(windows))]
 mod direct;
 mod dpm;
+mod journal;
 mod serve;
 #[cfg(windows)]
 mod umcbi;

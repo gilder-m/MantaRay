@@ -105,3 +105,31 @@ fn a_helper_that_dies_is_reported_rather_than_waited_on_forever() {
     let outcome = bridge.exchange("SHOW_STATUS");
     assert!(outcome.is_err(), "a dead helper cannot answer: {outcome:?}");
 }
+
+/// Parking sees the helper out, not just off.
+///
+/// The hub is parked so a scan's probe and configure processes have the
+/// driver to themselves - so parking must not return while the helper is
+/// still closing its instruments, or the scan overlaps with it anyway, once
+/// per scan, in exactly the window the standdown exists to close. A healthy
+/// helper leaves the moment its input closes; park waits for that, and a
+/// wedged one is killed at a deadline rather than waited on forever.
+#[test]
+fn parking_waits_for_the_helper_to_leave() {
+    let mut bridge = BridgeTransport::start(&helper("echoes"), 1, None).expect("the helper starts");
+    assert!(bridge.alive(), "the helper is running before the park");
+
+    bridge.park();
+    assert!(
+        !bridge.alive(),
+        "park returned while the helper still ran - the scan it stands \
+         aside for would overlap with it at the driver"
+    );
+
+    // A parked line says what it is, on every later exchange.
+    let outcome = bridge.exchange("SHOW_STATUS");
+    assert!(
+        outcome.is_err(),
+        "a parked bridge cannot answer: {outcome:?}"
+    );
+}

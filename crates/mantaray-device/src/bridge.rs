@@ -132,6 +132,75 @@ impl BridgeTransport {
         Self::start_pinned(executable, detector, None, umcbi_dir)
     }
 
+    /// Starts the hub: one bridge process that serves every local detector,
+    /// one command at a time.
+    ///
+    /// One process is the fix for a fault a process per detector cannot
+    /// avoid: entries that resolve to the same physical instrument - which
+    /// ORTEC's own configuration is happy to hold - had their transactions
+    /// interleave at the mailbox, crossing their replies until the spectrum
+    /// on screen flashed between snapshots and the adapter wedged. The hub's
+    /// single loop answers one detector before reading the next, so there is
+    /// nothing to interleave. Individual lanes are [`HubTransport`]s.
+    pub fn start_hub(executable: &Path, umcbi_dir: Option<&Path>) -> Result<Self, DeviceError> {
+        let mut command = Command::new(executable);
+        command.arg("serve").arg("--hub");
+        no_console(&mut command);
+        if let Some(directory) = umcbi_dir {
+            command.arg("--umcbi-dir").arg(directory);
+        }
+        Self::launch(command, executable, "the local hub".to_string())
+    }
+
+    /// Whether the helper is still running.
+    ///
+    /// The hub outlives any one detector window, so the application asks
+    /// before handing out another lane: a lane onto a dead hub would fail
+    /// every exchange, and the honest move is a fresh hub instead.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Closes the helper's input and sees it out, which is how it is told to
+    /// finish now.
+    ///
+    /// For standing the hub down while another bridge process runs: a probe
+    /// against a live hub is two processes in transaction with one driver,
+    /// which is the exact contention the hub exists to prevent. That is also
+    /// why this *waits* for the helper to leave rather than only waving it
+    /// off - a scan launched while the hub was still closing its instruments
+    /// would overlap with it at the driver, once per scan, exactly the window
+    /// the standdown is for. Lanes still holding this line keep their
+    /// handles; their exchanges answer "the bridge is closed" from here on,
+    /// which is the truth.
+    pub fn park(&mut self) {
+        self.finish();
+    }
+
+    /// Closes the helper's input and waits, briefly, for it to exit.
+    ///
+    /// A healthy helper leaves the moment its input closes; a wedged one must
+    /// not hang the caller, so at the deadline it is killed, and the final
+    /// wait reaps what kill leaves. The writer is taken out of the struct so
+    /// the close happens before the wait, which would otherwise never return.
+    fn finish(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            drop(writer);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
     /// The same, naming the adapter to open rather than trusting its position.
     ///
     /// Away from ORTEC's configured detector numbers, `serve N` means the Nth
@@ -153,6 +222,15 @@ impl BridgeTransport {
         if let Some(directory) = umcbi_dir {
             command.arg("--umcbi-dir").arg(directory);
         }
+        Self::launch(
+            command,
+            executable,
+            format!("detector {detector} through the bridge"),
+        )
+    }
+
+    /// Spawns a configured helper and wires up its three pipes.
+    fn launch(mut command: Command, executable: &Path, peer: String) -> Result<Self, DeviceError> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -189,7 +267,7 @@ impl BridgeTransport {
             lines,
             owed: 0,
             complaint,
-            peer: format!("detector {detector} through the bridge"),
+            peer,
         })
     }
 
@@ -287,26 +365,74 @@ impl Transport for BridgeTransport {
 
 impl Drop for BridgeTransport {
     fn drop(&mut self) {
-        // Closing the pipe ends the helper's read loop, which is how it is meant
-        // to stop. It is taken out of the struct so that the close happens here
-        // rather than after the wait below, which would never return.
-        if let Some(writer) = self.writer.take() {
-            drop(writer);
+        // Closing the pipe ends the helper's read loop, which is how it is
+        // meant to stop; the bounded wait and the kill at its deadline are
+        // [`Self::finish`]'s.
+        self.finish();
+    }
+}
+
+/// One detector's lane through a shared bridge - the hub's client half.
+///
+/// Every lane holds the same [`BridgeTransport`] behind one mutex, and an
+/// exchange holds the lock for its whole round trip: the command goes out
+/// with the lane's routing mark (`@<n> `), and the reply read back under the
+/// same lock belongs to it and nobody else. Lanes can be handed to couriers
+/// on their own threads; the mutex is where their transactions take turns,
+/// which on the far side is the hub answering one detector at a time.
+///
+/// Generic over the transport so the routing can be proven against a
+/// scripted one; the application uses `HubTransport<BridgeTransport>`.
+pub struct HubTransport<T: Transport> {
+    line: std::sync::Arc<std::sync::Mutex<T>>,
+    detector: i32,
+    peer: String,
+}
+
+impl<T: Transport> HubTransport<T> {
+    /// A lane to `detector` through the shared line.
+    pub fn new(line: std::sync::Arc<std::sync::Mutex<T>>, detector: i32) -> Self {
+        Self {
+            line,
+            detector,
+            peer: format!("detector {detector} through the hub"),
         }
-        // A bounded wait: a healthy helper exits the moment its input closes,
-        // and a wedged one must not hang the drop - it is killed instead, and
-        // the final wait reaps what kill leaves.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    return;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        }
+    }
+}
+
+impl<T: Transport> Transport for HubTransport<T> {
+    fn exchange(&mut self, command: &str) -> Result<String, DeviceError> {
+        let mut line = self
+            .line
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        line.exchange(&format!("@{} {command}", self.detector))
+    }
+
+    fn peer(&self) -> String {
+        self.peer.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::MockTransport;
+    use std::sync::{Arc, Mutex};
+
+    /// A lane marks every command with its own detector and no other's.
+    #[test]
+    fn a_hub_lane_routes_its_own_commands() {
+        let shared = Arc::new(Mutex::new(MockTransport::scripted(&[
+            ("@3 SHOW_STATUS", "RT=1.00 LT=1.00"),
+            ("@7 SHOW_STATUS", "RT=2.00 LT=2.00"),
+            ("@3 START", "OK"),
+        ])));
+        let mut third = HubTransport::new(Arc::clone(&shared), 3);
+        let mut seventh = HubTransport::new(Arc::clone(&shared), 7);
+        assert_eq!(third.exchange("SHOW_STATUS").unwrap(), "RT=1.00 LT=1.00");
+        assert_eq!(seventh.exchange("SHOW_STATUS").unwrap(), "RT=2.00 LT=2.00");
+        assert_eq!(third.exchange("START").unwrap(), "OK");
+        assert_eq!(third.peer(), "detector 3 through the hub");
     }
 }

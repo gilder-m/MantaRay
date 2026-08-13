@@ -71,6 +71,9 @@ pub struct RemoteMcb {
     /// Where a fetch's channel counts are parsed before they reach the
     /// mirror - see [`Self::integrate`] for why they do not go straight in.
     scratch: Vec<u64>,
+    /// A channel count one fetch declared that the mirror has not believed
+    /// yet - see [`Self::believes`].
+    pending_length: Option<usize>,
 }
 
 impl RemoteMcb {
@@ -102,7 +105,17 @@ impl RemoteMcb {
         name: &str,
         expected_serial: Option<&str>,
     ) -> Result<Self, DeviceError> {
+        // Timed into the journal, because connecting is the slow thing a
+        // journal of the connected life cannot see: everything here runs
+        // before the mirror exists to write fetch lines.
+        let started = std::time::Instant::now();
         let configuration = checked(transport.exchange("SHOW_CONFIGURATION")?)?;
+        if crate::journal::on() {
+            crate::journal::line(&format!(
+                "connect d{number}: SHOW_CONFIGURATION answered in {:.2}s",
+                started.elapsed().as_secs_f64()
+            ));
+        }
         let field = |key: &str| -> Option<String> {
             configuration.split_whitespace().find_map(|word| {
                 word.strip_prefix(key)
@@ -121,6 +134,14 @@ impl RemoteMcb {
             && !reported.trim().is_empty()
             && !expected.trim().eq_ignore_ascii_case(reported.trim())
         {
+            // Refusals go in the journal by their reason: a connect that
+            // silently fails and is clicked again reads, in a journal without
+            // this line, as nine unexplained seconds between two handshakes.
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "connect d{number}: refused - reports {reported:?}, expected {expected:?}"
+                ));
+            }
             return Err(DeviceError::Connection {
                 address: transport.peer(),
                 detail: format!(
@@ -172,9 +193,19 @@ impl RemoteMcb {
             since_poll: f64::MAX,
             freshened: true,
             scratch: Vec::new(),
+            pending_length: None,
         };
         remote.refresh()?;
         remote.read_presets();
+        if crate::journal::on() {
+            crate::journal::line(&format!(
+                "connect d{number}: {} serial={:?} {} channels, ready in {:.2}s",
+                remote.identity.model,
+                remote.identity.serial,
+                remote.identity.channels,
+                started.elapsed().as_secs_f64()
+            ));
+        }
         Ok(remote)
     }
 
@@ -237,10 +268,30 @@ impl RemoteMcb {
 
     /// One command out, one line back, however the line is held.
     fn raw(&mut self, command: &str) -> Result<String, DeviceError> {
-        match &mut self.line {
+        let answer = match &mut self.line {
             Line::Direct(transport) => transport.exchange(command),
             Line::Carried(courier) => courier.exchange(command),
+        };
+        if crate::journal::on() {
+            // Digested: a SHOW_DATA answer is a whole spectrum, and the
+            // journal wants its shape, not its channels - integrate writes
+            // those as a sum. Each line names its detector: the first bench
+            // journal interleaved three instruments' fetches with no way to
+            // tell whose was whose, and attribution was the reading's whole
+            // point.
+            let number = self.identity.number;
+            match &answer {
+                Ok(reply) => {
+                    let shown: String = reply.chars().take(64).collect();
+                    let more = if reply.len() > shown.len() { "…" } else { "" };
+                    crate::journal::line(&format!("d{number}: {command} -> {shown}{more}"));
+                }
+                Err(error) => {
+                    crate::journal::line(&format!("d{number}: {command} -> ERROR {error}"));
+                }
+            }
         }
+        answer
     }
 
     /// One command out, one checked line back.
@@ -258,6 +309,29 @@ impl RemoteMcb {
         let status = self.raw("SHOW_STATUS")?;
         let data = self.raw("SHOW_DATA")?;
         self.integrate(Fetched { status, data })
+    }
+
+    /// Whether a fetch's channel count is believed enough to rebuild for.
+    ///
+    /// Rebuilding the mirror for a new length starts it from zeros, so a
+    /// count that flaps clears the operator's spectrum from the screen with
+    /// every flip. And flap it does: on the Windows road, ORTEC's library is
+    /// asked the detector's length on every read and truncates the data to
+    /// however many channels it felt like returning, and a busy instrument
+    /// mid-acquisition answered short often enough that the window flashed
+    /// empty and full, over and over - read from the bench as the program
+    /// clearing the count. The libusb road never showed it, because there
+    /// the size is asked once and every read is a whole frame.
+    ///
+    /// So belief is earned, at the only price a real gain change can always
+    /// pay: an *empty* mirror adopts a new length at once, because rebuilding
+    /// zeros as zeros loses nothing - which is what lets connection and the
+    /// fetch after CLEAR size themselves immediately. A mirror holding counts
+    /// adopts a new length only when two fetches in a row agree on it; a
+    /// one-fetch flap keeps the spectrum on screen and costs that fetch's
+    /// channels alone.
+    fn believes(&mut self, count: usize) -> bool {
+        self.spectrum.total_counts() == 0 || self.pending_length.replace(count) == Some(count)
     }
 
     /// Works a fetch's lines into the mirror.
@@ -324,16 +398,45 @@ impl RemoteMcb {
                 ),
             });
         }
+        // What the mirror did with this fetch, for the journal: the bench
+        // that misbehaves is the only machine that can say what its fetches
+        // actually carried, and this line is how it says it.
+        let mut verdict = "no channels";
         if count > 0 {
+            verdict = "landed";
             if self.spectrum.len() != count {
-                // The instrument's conversion gain changed underneath us. The
-                // counts are new, but whose spectrum this is - detector,
-                // calibration, start date - is not.
-                let mut resized = Spectrum::new(count);
-                resized.copy_descriptors_from(&self.spectrum);
-                self.spectrum = resized;
+                if self.believes(count) {
+                    // The instrument's conversion gain changed underneath us.
+                    // The counts are new, but whose spectrum this is -
+                    // detector, calibration, start date - is not.
+                    let mut resized = Spectrum::new(count);
+                    resized.copy_descriptors_from(&self.spectrum);
+                    self.spectrum = resized;
+                    verdict = "adopted a new length";
+                } else {
+                    verdict = "held: one fetch of a new length";
+                }
             }
-            self.spectrum.channels.copy_from_slice(&self.scratch);
+            // Only a fetch the mirror's length agrees with lands; a flap's
+            // channels are dropped, and its clocks and status still count.
+            if self.spectrum.len() == count {
+                self.spectrum.channels.copy_from_slice(&self.scratch);
+                self.pending_length = None;
+            }
+        }
+        if crate::journal::on() {
+            let sum: u64 = self.scratch.iter().sum();
+            crate::journal::line(&format!(
+                "d{}: fetch: count={count} sum={sum} rt={:.2} lt={:.2} active={} total={} | \
+                 mirror len={} sum={} | {verdict}",
+                self.identity.number,
+                self.status.real_time,
+                self.status.live_time,
+                self.status.active,
+                self.status.total_counts,
+                self.spectrum.len(),
+                self.spectrum.total_counts(),
+            ));
         }
         self.spectrum.real_time = self.status.real_time;
         self.spectrum.live_time = self.status.live_time;
@@ -354,6 +457,12 @@ impl RemoteMcb {
         // stood paused, which is the residual error and is the reason this is
         // a reconstruction rather than a reading.
         if self.spectrum.start_time.is_none() && self.status.active && self.status.real_time > 0.0 {
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "d{}: mirror: start reconstructed {:.2}s back",
+                    self.identity.number, self.status.real_time
+                ));
+            }
             let counted = chrono::Duration::milliseconds((self.status.real_time * 1000.0) as i64);
             self.spectrum.start_time = chrono::Local::now()
                 .naive_local()

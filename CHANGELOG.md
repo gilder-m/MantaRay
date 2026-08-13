@@ -68,6 +68,62 @@ every twenty seconds, forever. ARM Linux - the Raspberry Pi, where a bench
 in a corner wants this to run - joins the cross-checks CI keeps compiling,
 the same road macOS took before it shipped.
 
+**A scan stands the hub down first, and the slow parts of connecting are on
+the record (2026-08-13).** Probe and configure are their own processes, and
+running one against a live hub is two processes in transaction with one
+driver - the contention the hub exists to prevent, felt as scans crawling
+through driver timeouts. The hub is parked before any of them runs; open
+lanes say the bridge closed, which is the truth, and the next connect starts
+a fresh hub. And because the first bench journals could not see where a slow
+scan or a slow connect spent its time - all of it ran before anything that
+writes fetch lines existed - the journal now times the scan itself, every
+phase of connecting including a refusal and its reason, and each step of the
+hub opening a detector, road by road.
+
+**Every local detector on Windows shares one bridge process - the hub
+(2026-08-13).** The application ran a bridge process per detector entry, and
+`serve N` took a lone adapter as the one meant whatever N said - so ORTEC's
+configuration, which happily holds several entries for one instrument,
+had three processes transacting with one mailbox at once. Their replies
+crossed: the spectrum on screen flashed between three interleaved snapshots
+twice a second, and the adapter then wedged outright, which is exactly what
+the first debug journals from the bench recorded. One process answering one
+command before reading the next cannot interleave anything. The dialect
+grows a routing mark (`@<n> <command>`); detectors open as they are first
+asked for, each through the same USB-then-ORTEC ladder as before, except
+that the hub's USB road routes by strict adapter position - no lone-adapter
+forgiveness, because the entries must not quietly converge on one instrument
+again. An entry that opens nowhere answers `ERR` with the reason, every
+time, without poisoning the ones that opened. The libusb road keeps a
+process per adapter: adapters there are claimed exclusively, so the
+convergence cannot happen.
+
+**`MANTARAY_DEBUG` keeps a written record as well as the overlay
+(2026-08-13).** The application journals every fetch (declared count, sum,
+clocks, and what the mirror did about it) and every command with its answer to
+`mantaray-debug.log`; the bridge writes what the driver actually returned -
+asked, returned, masks, sums - to `mantaray-mcb-debug.log`. Both land in the
+directory the program was started from, and nothing is opened or written
+without the variable set. The overlay can say a frame is late; only the
+machine that misbehaves can say what its instrument answered, and now it
+writes it down.
+
+**A flapping channel count no longer clears the spectrum from the screen
+(2026-08-13).** Reported from the Windows bench the moment acquisition
+started: the window flashed empty and full, over and over, as though the
+program kept clearing the count. On that road ORTEC's library is asked the
+detector's length on every read and truncates the data to what it actually
+returned - and a busy instrument mid-acquisition answers short - while the
+mirror rebuilt itself from zeros for every length it had not seen before.
+A mirror holding counts now believes a new length only when two fetches in a
+row agree on it: a one-fetch flap keeps the spectrum on screen and costs that
+fetch's channels alone, its clocks still landing, while a genuine
+conversion-gain change - which repeats on every fetch - is adopted on the
+second. An empty mirror (connection, the fetch after CLEAR) still adopts at
+once, because rebuilding zeros as zeros loses nothing. The libusb road never
+showed the fault: there the size is asked once and every read is a whole
+frame.
+
 **The interface can say what it is waiting for (2026-08-12).** With
 `MANTARAY_DEBUG` set in the environment, an overlay reports the adapter,
 backend and driver the renderer actually chose, frames drawn in the last

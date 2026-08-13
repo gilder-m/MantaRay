@@ -278,6 +278,9 @@ fn serve_bridge(directory: Option<&str>, arguments: &[String]) -> Result<(), Str
     if only_usb && only_umcbi {
         return Err("--usb and --umcbi ask for different things".into());
     }
+    if take(&mut arguments, "--hub") {
+        return serve_hub(directory);
+    }
 
     #[cfg(windows)]
     if !only_umcbi {
@@ -321,6 +324,139 @@ fn serve_bridge(directory: Option<&str>, arguments: &[String]) -> Result<(), Str
 #[cfg(windows)]
 fn open_usb_instrument(arguments: &mut Vec<String>) -> Result<serve::ViaUsb, String> {
     let device = pick_usb_device(arguments)?;
+    serve::ViaUsb::open(device)
+}
+
+/// Serves every local detector through this one process - the hub.
+///
+/// The bench that forced this ran one bridge process per detector entry, and
+/// the entries resolved to the same physical instrument: `serve N` takes a
+/// lone adapter as the one meant whatever N says, so three processes
+/// transacted with one mailbox at once, their replies crossed, the spectrum
+/// on screen flashed between interleaved snapshots, and the adapter wedged.
+/// One process answering one command at a time cannot interleave anything.
+///
+/// Detectors open as they are first asked for. The USB road routes by
+/// *position among the adapters actually bound* - strict, no lone-adapter
+/// forgiveness, because the hub's entries must not quietly converge on one
+/// instrument again - and ORTEC's library, loaded once and shared, routes by
+/// its own detector number for everything the USB road does not reach.
+fn serve_hub(directory: Option<&str>) -> Result<(), String> {
+    let loading = std::time::Instant::now();
+    let library = match Umcbi::load(directory) {
+        Ok(library) => match library.open() {
+            Ok(()) => Some(library),
+            Err(error) => {
+                eprintln!("hub: ORTEC's library did not open ({error}); serving USB only");
+                None
+            }
+        },
+        Err(error) => {
+            eprintln!("hub: no ORTEC library ({error}); serving USB only");
+            None
+        }
+    };
+    if crate::journal::on() {
+        crate::journal::line(&format!(
+            "hub: ORTEC's library {} in {:.2}s",
+            if library.is_some() {
+                "loaded"
+            } else {
+                "not loaded"
+            },
+            loading.elapsed().as_secs_f64()
+        ));
+    }
+    // The handles the opener takes out, so they can be closed when the pipe
+    // does; the sessions holding them are gone by then.
+    let opened = std::cell::RefCell::new(Vec::new());
+    let library_ref = library.as_ref();
+    let outcome = serve::run_hub(&mut |number| open_hub_detector(number, library_ref, &opened));
+    if let Some(library) = &library {
+        for handle in opened.borrow().iter() {
+            // SAFETY: each handle came from open_detector and is still open.
+            unsafe { (library.close_detector)(*handle) };
+        }
+        library.close();
+    }
+    outcome
+}
+
+/// Opens one detector for the hub, by the same ladder `serve <n>` climbs.
+///
+/// A named function rather than the closure it began as, so the lifetime the
+/// boxes share - the borrow of ORTEC's library - is written down instead of
+/// inferred.
+fn open_hub_detector<'a>(
+    number: i32,
+    library: Option<&'a Umcbi>,
+    opened: &std::cell::RefCell<Vec<umcbi::Hdet>>,
+) -> Result<Box<dyn serve::Instrument + 'a>, String> {
+    // Each step timed into the journal: opening is where a slow bench spends
+    // its time, and it is invisible from the application's side - the mirror
+    // that would write fetch lines does not exist yet.
+    let started = std::time::Instant::now();
+    match usb_by_position(number) {
+        Ok(instrument) => {
+            let road = serve::Instrument::route(&instrument);
+            eprintln!("hub: detector {number} over USB: {road}");
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "hub: detector {number} over USB in {:.2}s: {road}",
+                    started.elapsed().as_secs_f64()
+                ));
+            }
+            return Ok(Box::new(instrument));
+        }
+        Err(error) => {
+            eprintln!("hub: detector {number} not over USB ({error}); trying ORTEC's library");
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "hub: detector {number} not over USB after {:.2}s ({error})",
+                    started.elapsed().as_secs_f64()
+                ));
+            }
+        }
+    }
+    let library = library
+        .ok_or_else(|| "not reachable over USB, and ORTEC's library is not loaded".to_string())?;
+    let fallback = std::time::Instant::now();
+    let handle = library.open_detector(number)?;
+    opened.borrow_mut().push(handle);
+    eprintln!(
+        "hub: detector {number} through ORTEC's library: {}, {} channels",
+        library.model(handle),
+        library.length(handle)
+    );
+    if crate::journal::on() {
+        crate::journal::line(&format!(
+            "hub: detector {number} through ORTEC's library in {:.2}s ({:.2}s all told)",
+            fallback.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64()
+        ));
+    }
+    Ok(Box::new(serve::ViaUmcbi {
+        library,
+        detector: handle,
+        number,
+    }))
+}
+
+/// The USB road by strict position: adapter `number` of those bound, or a
+/// plain refusal. No lone-adapter forgiveness here - see [`serve_hub`].
+#[cfg(windows)]
+fn usb_by_position(number: i32) -> Result<serve::ViaUsb, String> {
+    let paths = usb::devices();
+    let index = usize::try_from(number)
+        .ok()
+        .filter(|index| *index >= 1 && *index <= paths.len())
+        .ok_or_else(|| {
+            format!(
+                "no adapter in position {number} of the {} bound to the driver",
+                paths.len()
+            )
+        })?;
+    let device = usb::Device::open(&paths[index - 1])?;
     serve::ViaUsb::open(device)
 }
 

@@ -14,6 +14,13 @@
 //! MANTARAY_DEBUG=1 mantaray-gui            (elsewhere)
 //! ```
 //!
+//! The same switch keeps the written record: the mirror journals every fetch
+//! and command to `mantaray-debug.log`, and the bridge writes its own half to
+//! `mantaray-mcb-debug.log`, both in the directory the program was started
+//! from - see [`mantaray_device::journal`]. The overlay answers "what is the
+//! frame doing"; the journals answer "what did the instrument actually say",
+//! which is the question a misbehaving bench gets asked.
+//!
 //! How to read it: drag the marker back and forth and watch the frame count.
 //! Continuous input asks for a frame per event, so during a drag the count
 //! should sit near the display's refresh rate. If it is far below that while
@@ -64,6 +71,9 @@ impl Diagnostics {
             // worth knowing on a machine being diagnosed.
             None => "no wgpu render state".to_string(),
         };
+        // Into the journal too, so a log file sent from a bench says what
+        // was drawing it without needing the photograph as well.
+        mantaray_device::journal::line(&format!("renderer: {}", adapter.replace('\n', " · ")));
         Some(Self {
             adapter,
             frames: VecDeque::new(),

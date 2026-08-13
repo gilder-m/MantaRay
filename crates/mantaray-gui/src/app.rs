@@ -937,6 +937,11 @@ pub struct App {
     /// Render diagnostics, held only when `MANTARAY_DEBUG` is set - see
     /// [`crate::debug`] for what it shows and how to read it.
     diagnostics: Option<crate::debug::Diagnostics>,
+    /// The one bridge process every local detector shares on Windows - the
+    /// hub - started the first time a local detector connects. `None` until
+    /// then, and always `None` on the other platforms, where each adapter
+    /// keeps a process of its own.
+    local_bridge: Option<std::sync::Arc<std::sync::Mutex<mantaray_device::BridgeTransport>>>,
 }
 
 impl App {
@@ -1138,6 +1143,7 @@ impl App {
             maximized: None,
             last_tick: Instant::now(),
             diagnostics: None,
+            local_bridge: None,
         };
         if !app.detectors.is_empty() {
             app.open_detector(0);
@@ -1732,7 +1738,15 @@ impl App {
                 Ok(None) => {}
                 // A network instrument that stops answering must be named,
                 // not silently frozen on screen.
-                Err(error) => troubled.push((detector.identity().number, error.to_string())),
+                Err(error) => {
+                    if mantaray_device::journal::on() {
+                        mantaray_device::journal::line(&format!(
+                            "advance: detector {} errored: {error}",
+                            detector.identity().number
+                        ));
+                    }
+                    troubled.push((detector.identity().number, error.to_string()));
+                }
             }
         }
         // What the count has been doing, sampled as it goes. Recorded for
@@ -3637,6 +3651,37 @@ impl App {
         }
     }
 
+    /// The shared line to the local hub, started on first use.
+    ///
+    /// A hub that has died - killed, crashed, or its machine put to sleep
+    /// hard enough - is replaced rather than reused: a lane onto a dead hub
+    /// would fail every exchange for as long as anybody held it. The old
+    /// lanes' detectors report their loss and reconnect through the new hub
+    /// when they are reopened.
+    fn local_hub(
+        &mut self,
+        executable: &std::path::Path,
+        umcbi_dir: Option<&std::path::Path>,
+    ) -> Result<
+        std::sync::Arc<std::sync::Mutex<mantaray_device::BridgeTransport>>,
+        mantaray_device::DeviceError,
+    > {
+        if let Some(line) = &self.local_bridge {
+            let running = line
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .alive();
+            if running {
+                return Ok(std::sync::Arc::clone(line));
+            }
+        }
+        let line = std::sync::Arc::new(std::sync::Mutex::new(
+            mantaray_device::BridgeTransport::start_hub(executable, umcbi_dir)?,
+        ));
+        self.local_bridge = Some(std::sync::Arc::clone(&line));
+        Ok(line)
+    }
+
     /// Opens the files named on the command line.
     ///
     /// Spectra open in buffer windows, a nuclide library becomes the working
@@ -3716,6 +3761,22 @@ impl App {
 
     /// Runs the bridge and returns what it printed.
     fn run_bridge(&mut self, arguments: &[&str]) -> Result<String, String> {
+        // The hub is stood down first. Probe and configure are their own
+        // processes, and running one against a live hub is two processes in
+        // transaction with one driver - the exact contention the hub exists
+        // to prevent, felt on the bench as scans crawling through driver
+        // timeouts. Open lanes die with it and say so, which is honest: a
+        // scan is rebuilding the world those lanes lived in. The next local
+        // connect starts a fresh hub.
+        if let Some(line) = self.local_bridge.take() {
+            line.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .park();
+            if mantaray_device::journal::on() {
+                mantaray_device::journal::line("scan: the hub stood down while other bridges run");
+            }
+        }
+        let started = Instant::now();
         let executable = mantaray_device::BridgeTransport::find_executable().ok_or_else(|| {
             format!(
                 "{} is not beside mantaray - the bridge to instruments is missing",
@@ -3732,6 +3793,16 @@ impl App {
         let output = command
             .output()
             .map_err(|error| format!("could not run the bridge: {error}"))?;
+        // The scan was the one slow thing the first bench journals could not
+        // see - it happened in processes that wrote nothing. Its duration is
+        // the measurement a "scanning is slow here" report needs.
+        if mantaray_device::journal::on() {
+            mantaray_device::journal::line(&format!(
+                "scan: `{}` finished in {:.2}s",
+                arguments.join(" "),
+                started.elapsed().as_secs_f64()
+            ));
+        }
         Ok(format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -3957,15 +4028,36 @@ impl App {
                 // one - and the check after connecting catches it even when
                 // the helper cannot select by serial at all.
                 let remembered = entry.serial.trim().to_string();
-                let connected = mantaray_device::BridgeTransport::start_pinned(
-                    &executable,
-                    detector,
-                    pin_by_serial(&remembered, detector),
-                    umcbi.map(std::path::Path::new),
-                )
-                .and_then(|transport| {
+                // On Windows, every local detector shares one bridge process
+                // - the hub - and gets a routed lane through it. Separate
+                // processes interleaved their transactions when ORTEC's
+                // configuration resolved several entries to one instrument,
+                // which crossed their replies on the bench: the spectrum
+                // flashed between snapshots, then the adapter wedged. The
+                // libusb road keeps a process per adapter, because there an
+                // adapter is claimed exclusively and no such convergence can
+                // happen.
+                let transport: Result<
+                    Box<dyn mantaray_device::Transport>,
+                    mantaray_device::DeviceError,
+                > = if cfg!(windows) {
+                    self.local_hub(&executable, umcbi.map(std::path::Path::new))
+                        .map(|line| {
+                            Box::new(mantaray_device::HubTransport::new(line, detector))
+                                as Box<dyn mantaray_device::Transport>
+                        })
+                } else {
+                    mantaray_device::BridgeTransport::start_pinned(
+                        &executable,
+                        detector,
+                        pin_by_serial(&remembered, detector),
+                        umcbi.map(std::path::Path::new),
+                    )
+                    .map(|transport| Box::new(transport) as Box<dyn mantaray_device::Transport>)
+                };
+                let connected = transport.and_then(|transport| {
                     mantaray_device::RemoteMcb::connect_expecting(
-                        Box::new(transport),
+                        transport,
                         entry.number,
                         &entry.name,
                         Some(remembered.as_str()),
