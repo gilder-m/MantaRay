@@ -78,12 +78,28 @@ impl Courier {
     /// If a fetch is mid-flight the wait includes finishing it, which is
     /// bounded by one instrument round trip - no worse than the calling
     /// thread doing the fetch itself, which is what this replaced.
-    pub fn exchange(&self, command: &str) -> Result<String, DeviceError> {
+    ///
+    /// Whatever that fetch brought is then thrown away. The courier runs
+    /// errands in order, so when the answer arrives here, a fetch requested
+    /// earlier has already come and gone into the slot - and it describes the
+    /// instrument from *before* this command. Collected after a CLEAR, it
+    /// would put the thrown-away spectrum straight back, and hand the
+    /// start-of-run reconstruction an old clock to plant a date from. A
+    /// command is the only thing that makes the slot stale, so this is the
+    /// one place that empties it; the next fetch is asked for afresh.
+    pub fn exchange(&mut self, command: &str) -> Result<String, DeviceError> {
         let (reply, answer) = mpsc::channel();
-        self.errands
+        let outcome = self
+            .errands
             .send(Errand::Exchange(command.to_string(), reply))
-            .map_err(|_| self.gone())?;
-        answer.recv().map_err(|_| self.gone())?
+            .map_err(|_| self.gone())
+            .and_then(|()| answer.recv().map_err(|_| self.gone()))?;
+        self.slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.fetching = false;
+        outcome
     }
 
     /// Asks for a fetch, unless one is already on its way. Never waits.
@@ -94,6 +110,14 @@ impl Courier {
     }
 
     /// The finished fetch, if the courier has come back with one.
+    ///
+    /// A courier whose thread has died - a panic in the transport is the only
+    /// way, short of dropping this handle - is reported here as a lost
+    /// connection, on every collect. Without that, a death mid-fetch would
+    /// leave `fetching` raised forever: no error, no data, a mirror frozen on
+    /// numbers that will never change, which reads as a healthy idle
+    /// instrument. The thread holds the only other handle to the slot, so its
+    /// death is legible from here.
     pub fn collect(&mut self) -> Option<Result<Fetched, DeviceError>> {
         let brought = self
             .slot
@@ -102,8 +126,9 @@ impl Courier {
             .take();
         if brought.is_some() {
             self.fetching = false;
+            return brought;
         }
-        brought
+        (Arc::strong_count(&self.slot) == 1).then(|| Err(self.gone()))
     }
 
     /// The error for a courier whose thread has ended: the transport it held

@@ -14,6 +14,17 @@ still go straight through in order. The command line keeps the old synchronous
 road - a script has no frames to hold, and a `WAIT` wants the clocks fresh the
 moment it polls.
 
+Caught in review before any of this shipped: a command that raced a fetch
+could resurrect what it had just destroyed. The courier runs errands in order,
+so a fetch requested before a CLEAR had always arrived by the time CLEAR
+answered - carrying the thrown-away spectrum, which the next poll put straight
+back, along with a start date reconstructed from the discarded run's clock,
+wrong by that whole run and permanent. A command now empties the courier's
+slot as it answers, so a poll only ever collects what the instrument said
+after the last command. And a courier whose thread has died is reported as
+the lost connection it is, rather than a mirror quietly frozen on numbers
+that will never change.
+
 Also from the same pass: the sidebar's region list no longer clones its rows
 (a Vec of Strings) on every frame it is shown, the library dialog no longer
 clones every nuclide's name per frame to paint the list, stepping through
