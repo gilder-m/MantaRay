@@ -131,7 +131,12 @@ pub fn run_hub<'a>(
         if line.trim().is_empty() {
             continue;
         }
-        let reply = one_line(&hub_line(line.trim(), &mut entries, open));
+        // Bound before `one_line` sees it, not passed as a temporary: the
+        // sibling branch teaches `one_line` to borrow its input when there is
+        // nothing to change, and a borrow of a temporary is the build break
+        // git's auto-merge would hand whoever merged second.
+        let reply = hub_line(line.trim(), &mut entries, open);
+        let reply = one_line(&reply);
         writeln!(output, "{reply}").map_err(|error| format!("writing a reply: {error}"))?;
         output
             .flush()

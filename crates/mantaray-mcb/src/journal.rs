@@ -26,7 +26,7 @@ fn journal() -> Option<&'static Mutex<std::fs::File>> {
         .get_or_init(|| {
             std::env::var_os("MANTARAY_DEBUG")?;
             let name = format!("mantaray-mcb-debug-{}.log", std::process::id());
-            let mut file = std::fs::File::create(name).ok()?;
+            let mut file = open_journal_file(&name)?;
             let _ = writeln!(
                 file,
                 "mantaray-mcb {} · journal opened {}",
@@ -36,6 +36,32 @@ fn journal() -> Option<&'static Mutex<std::fs::File>> {
             Some(Mutex::new(file))
         })
         .as_ref()
+}
+
+/// The journal file, in the working directory or the temporary one.
+///
+/// The bridge inherits its working directory from whoever launched it, and a
+/// desktop-launched application starts somewhere unwritable - so the same
+/// fall-back as the application's journal: the temporary directory, said on
+/// stderr, which the application relays as the bridge's complaint line.
+fn open_journal_file(name: &str) -> Option<std::fs::File> {
+    if let Ok(file) = std::fs::File::create(name) {
+        return Some(file);
+    }
+    let fallback = std::env::temp_dir().join(name);
+    match std::fs::File::create(&fallback) {
+        Ok(file) => {
+            eprintln!(
+                "journal: the working directory is not writable; writing {}",
+                fallback.display()
+            );
+            Some(file)
+        }
+        Err(error) => {
+            eprintln!("journal: could not open {name} anywhere: {error}");
+            None
+        }
+    }
 }
 
 /// Whether the journal is being kept - the guard a call site formats behind.

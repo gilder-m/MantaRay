@@ -161,16 +161,43 @@ impl BridgeTransport {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Closes the helper's input, which is how it is told to finish now.
+    /// Closes the helper's input and sees it out, which is how it is told to
+    /// finish now.
     ///
     /// For standing the hub down while another bridge process runs: a probe
     /// against a live hub is two processes in transaction with one driver,
-    /// which is the exact contention the hub exists to prevent. Lanes still
-    /// holding this line keep their handles; their exchanges answer "the
-    /// bridge is closed" from here on, which is the truth.
+    /// which is the exact contention the hub exists to prevent. That is also
+    /// why this *waits* for the helper to leave rather than only waving it
+    /// off - a scan launched while the hub was still closing its instruments
+    /// would overlap with it at the driver, once per scan, exactly the window
+    /// the standdown is for. Lanes still holding this line keep their
+    /// handles; their exchanges answer "the bridge is closed" from here on,
+    /// which is the truth.
     pub fn park(&mut self) {
+        self.finish();
+    }
+
+    /// Closes the helper's input and waits, briefly, for it to exit.
+    ///
+    /// A healthy helper leaves the moment its input closes; a wedged one must
+    /// not hang the caller, so at the deadline it is killed, and the final
+    /// wait reaps what kill leaves. The writer is taken out of the struct so
+    /// the close happens before the wait, which would otherwise never return.
+    fn finish(&mut self) {
         if let Some(writer) = self.writer.take() {
             drop(writer);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
         }
     }
 
@@ -338,27 +365,10 @@ impl Transport for BridgeTransport {
 
 impl Drop for BridgeTransport {
     fn drop(&mut self) {
-        // Closing the pipe ends the helper's read loop, which is how it is meant
-        // to stop. It is taken out of the struct so that the close happens here
-        // rather than after the wait below, which would never return.
-        if let Some(writer) = self.writer.take() {
-            drop(writer);
-        }
-        // A bounded wait: a healthy helper exits the moment its input closes,
-        // and a wedged one must not hang the drop - it is killed instead, and
-        // the final wait reaps what kill leaves.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    return;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        }
+        // Closing the pipe ends the helper's read loop, which is how it is
+        // meant to stop; the bounded wait and the kill at its deadline are
+        // [`Self::finish`]'s.
+        self.finish();
     }
 }
 
