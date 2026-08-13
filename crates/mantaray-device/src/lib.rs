@@ -34,7 +34,7 @@ pub mod transport;
 
 pub use alarm::{AlarmKind, AlarmLimits, AlarmMonitor};
 pub use any::AnyMcb;
-pub use bridge::{BRIDGE_EXECUTABLE, BridgeTransport, no_console};
+pub use bridge::{BRIDGE_EXECUTABLE, BridgeTransport, HubTransport, no_console};
 pub use changer::{JobState, SampleChanger, SampleJob, SampleQueue};
 pub use detector::{
     DetectorEntry, DetectorKind, DetectorList, MAX_DETECTOR_NUMBER, MIN_DETECTOR_NUMBER,

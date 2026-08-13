@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+**Every local detector on Windows shares one bridge process - the hub
+(2026-08-13).** The application ran a bridge process per detector entry, and
+`serve N` took a lone adapter as the one meant whatever N said - so ORTEC's
+configuration, which happily holds several entries for one instrument,
+had three processes transacting with one mailbox at once. Their replies
+crossed: the spectrum on screen flashed between three interleaved snapshots
+twice a second, and the adapter then wedged outright, which is exactly what
+the first debug journals from the bench recorded. One process answering one
+command before reading the next cannot interleave anything. The dialect
+grows a routing mark (`@<n> <command>`); detectors open as they are first
+asked for, each through the same USB-then-ORTEC ladder as before, except
+that the hub's USB road routes by strict adapter position - no lone-adapter
+forgiveness, because the entries must not quietly converge on one instrument
+again. An entry that opens nowhere answers `ERR` with the reason, every
+time, without poisoning the ones that opened. The libusb road keeps a
+process per adapter: adapters there are claimed exclusively, so the
+convergence cannot happen.
+
 **`MANTARAY_DEBUG` keeps a written record as well as the overlay
 (2026-08-13).** The application journals every fetch (declared count, sum,
 clocks, and what the mirror did about it) and every command with its answer to

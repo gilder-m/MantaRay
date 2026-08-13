@@ -243,14 +243,20 @@ impl RemoteMcb {
         if crate::journal::on() {
             // Digested: a SHOW_DATA answer is a whole spectrum, and the
             // journal wants its shape, not its channels - integrate writes
-            // those as a sum.
+            // those as a sum. Each line names its detector: the first bench
+            // journal interleaved three instruments' fetches with no way to
+            // tell whose was whose, and attribution was the reading's whole
+            // point.
+            let number = self.identity.number;
             match &answer {
                 Ok(reply) => {
-                    let shown: String = reply.chars().take(48).collect();
+                    let shown: String = reply.chars().take(64).collect();
                     let more = if reply.len() > shown.len() { "…" } else { "" };
-                    crate::journal::line(&format!("{command} -> {shown}{more}"));
+                    crate::journal::line(&format!("d{number}: {command} -> {shown}{more}"));
                 }
-                Err(error) => crate::journal::line(&format!("{command} -> ERROR {error}")),
+                Err(error) => {
+                    crate::journal::line(&format!("d{number}: {command} -> ERROR {error}"));
+                }
             }
         }
         answer
@@ -389,8 +395,9 @@ impl RemoteMcb {
         if crate::journal::on() {
             let sum: u64 = self.scratch.iter().sum();
             crate::journal::line(&format!(
-                "fetch: count={count} sum={sum} rt={:.2} lt={:.2} active={} total={} | \
+                "d{}: fetch: count={count} sum={sum} rt={:.2} lt={:.2} active={} total={} | \
                  mirror len={} sum={} | {verdict}",
+                self.identity.number,
                 self.status.real_time,
                 self.status.live_time,
                 self.status.active,
@@ -420,8 +427,8 @@ impl RemoteMcb {
         if self.spectrum.start_time.is_none() && self.status.active && self.status.real_time > 0.0 {
             if crate::journal::on() {
                 crate::journal::line(&format!(
-                    "mirror: start reconstructed {:.2}s back",
-                    self.status.real_time
+                    "d{}: mirror: start reconstructed {:.2}s back",
+                    self.identity.number, self.status.real_time
                 ));
             }
             let counted = chrono::Duration::milliseconds((self.status.real_time * 1000.0) as i64);

@@ -928,6 +928,11 @@ pub struct App {
     /// Render diagnostics, held only when `MANTARAY_DEBUG` is set - see
     /// [`crate::debug`] for what it shows and how to read it.
     diagnostics: Option<crate::debug::Diagnostics>,
+    /// The one bridge process every local detector shares on Windows - the
+    /// hub - started the first time a local detector connects. `None` until
+    /// then, and always `None` on the other platforms, where each adapter
+    /// keeps a process of its own.
+    local_bridge: Option<std::sync::Arc<std::sync::Mutex<mantaray_device::BridgeTransport>>>,
 }
 
 impl App {
@@ -1127,6 +1132,7 @@ impl App {
             maximized: None,
             last_tick: Instant::now(),
             diagnostics: None,
+            local_bridge: None,
         };
         if !app.detectors.is_empty() {
             app.open_detector(0);
@@ -3617,6 +3623,37 @@ impl App {
         }
     }
 
+    /// The shared line to the local hub, started on first use.
+    ///
+    /// A hub that has died - killed, crashed, or its machine put to sleep
+    /// hard enough - is replaced rather than reused: a lane onto a dead hub
+    /// would fail every exchange for as long as anybody held it. The old
+    /// lanes' detectors report their loss and reconnect through the new hub
+    /// when they are reopened.
+    fn local_hub(
+        &mut self,
+        executable: &std::path::Path,
+        umcbi_dir: Option<&std::path::Path>,
+    ) -> Result<
+        std::sync::Arc<std::sync::Mutex<mantaray_device::BridgeTransport>>,
+        mantaray_device::DeviceError,
+    > {
+        if let Some(line) = &self.local_bridge {
+            let running = line
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .alive();
+            if running {
+                return Ok(std::sync::Arc::clone(line));
+            }
+        }
+        let line = std::sync::Arc::new(std::sync::Mutex::new(
+            mantaray_device::BridgeTransport::start_hub(executable, umcbi_dir)?,
+        ));
+        self.local_bridge = Some(std::sync::Arc::clone(&line));
+        Ok(line)
+    }
+
     /// Opens the files named on the command line.
     ///
     /// Spectra open in buffer windows, a nuclide library becomes the working
@@ -3937,15 +3974,36 @@ impl App {
                 // one - and the check after connecting catches it even when
                 // the helper cannot select by serial at all.
                 let remembered = entry.serial.trim().to_string();
-                let connected = mantaray_device::BridgeTransport::start_pinned(
-                    &executable,
-                    detector,
-                    pin_by_serial(&remembered, detector),
-                    umcbi.map(std::path::Path::new),
-                )
-                .and_then(|transport| {
+                // On Windows, every local detector shares one bridge process
+                // - the hub - and gets a routed lane through it. Separate
+                // processes interleaved their transactions when ORTEC's
+                // configuration resolved several entries to one instrument,
+                // which crossed their replies on the bench: the spectrum
+                // flashed between snapshots, then the adapter wedged. The
+                // libusb road keeps a process per adapter, because there an
+                // adapter is claimed exclusively and no such convergence can
+                // happen.
+                let transport: Result<
+                    Box<dyn mantaray_device::Transport>,
+                    mantaray_device::DeviceError,
+                > = if cfg!(windows) {
+                    self.local_hub(&executable, umcbi.map(std::path::Path::new))
+                        .map(|line| {
+                            Box::new(mantaray_device::HubTransport::new(line, detector))
+                                as Box<dyn mantaray_device::Transport>
+                        })
+                } else {
+                    mantaray_device::BridgeTransport::start_pinned(
+                        &executable,
+                        detector,
+                        pin_by_serial(&remembered, detector),
+                        umcbi.map(std::path::Path::new),
+                    )
+                    .map(|transport| Box::new(transport) as Box<dyn mantaray_device::Transport>)
+                };
+                let connected = transport.and_then(|transport| {
                     mantaray_device::RemoteMcb::connect_expecting(
-                        Box::new(transport),
+                        transport,
                         entry.number,
                         &entry.name,
                         Some(remembered.as_str()),
