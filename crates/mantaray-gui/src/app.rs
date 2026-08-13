@@ -925,6 +925,9 @@ pub struct App {
     /// The window filling the spectrum area, if any (MAESTRO's one-window mode).
     maximized: Option<usize>,
     last_tick: Instant,
+    /// Render diagnostics, held only when `MANTARAY_DEBUG` is set - see
+    /// [`crate::debug`] for what it shows and how to read it.
+    diagnostics: Option<crate::debug::Diagnostics>,
 }
 
 impl App {
@@ -945,6 +948,9 @@ impl App {
             app.restore(persisted);
         }
         theme::apply(&cc.egui_ctx, &app.colors, &app.style);
+        // Asked for here rather than in `headless` because the adapter is the
+        // point: only a real window has one to report.
+        app.diagnostics = crate::debug::Diagnostics::from_environment(cc);
         app
     }
 
@@ -1120,6 +1126,7 @@ impl App {
             quit_confirmed: false,
             maximized: None,
             last_tick: Instant::now(),
+            diagnostics: None,
         };
         if !app.detectors.is_empty() {
             app.open_detector(0);
@@ -3879,7 +3886,9 @@ impl App {
                             address,
                             remote.identity().channels
                         );
-                        remote.into()
+                        // On a courier, so a slow instrument slows nothing
+                        // but its own numbers - never the frame.
+                        remote.with_courier().into()
                     }
                     Err(error) => {
                         self.status = format!("{error}");
@@ -3947,7 +3956,9 @@ impl App {
                         if remembered.is_empty() && !reported.is_empty() {
                             self.remember_serial(entry.number, &reported);
                         }
-                        instrument.into()
+                        // On a courier, so a slow instrument slows nothing
+                        // but its own numbers - never the frame.
+                        instrument.with_courier().into()
                     }
                     Err(error) => {
                         self.status = format!("{error}");
@@ -3984,9 +3995,16 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.tick();
         self.draw(ui);
+        // Painted after everything else so the overlay sits on top of what it
+        // is measuring, and recorded here so every frame counts - including
+        // the ones a dialog or a drag asked for.
+        if let Some(diagnostics) = &mut self.diagnostics {
+            diagnostics.frame(frame.info().cpu_usage);
+            diagnostics.window(ui.ctx());
+        }
         self.autosave();
         // The window is created hidden so that start-up does not flash an empty
         // frame; now that one has been drawn, there is something worth showing.

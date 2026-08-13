@@ -31,6 +31,7 @@
 
 use mantaray_core::{AcquisitionMode, Spectrum};
 
+use crate::courier::{Courier, Fetched};
 use crate::error::DeviceError;
 use crate::mcb::{Mcb, McbIdentity, McbProperties, McbStatus};
 use crate::presets::Presets;
@@ -40,9 +41,22 @@ use crate::transport::Transport;
 /// Commands (start, stop, presets) always go straight through.
 const POLL_INTERVAL: f64 = 0.5;
 
+/// The road to the instrument.
+///
+/// Held directly, every exchange happens on the calling thread - which is
+/// what a script and a test want: ask, get, assert, in one line of control.
+/// Carried by a [`Courier`], the regular fetch of status and data happens on
+/// the courier's thread instead, and `poll` only collects what has already
+/// come back - which is what an application with frames to draw wants,
+/// because a slow instrument then slows nothing but its own numbers.
+enum Line {
+    Direct(Box<dyn Transport>),
+    Carried(Courier),
+}
+
 /// An instrument reached over a transport, presented as an [`Mcb`].
 pub struct RemoteMcb {
-    transport: Box<dyn Transport>,
+    line: Line,
     identity: McbIdentity,
     properties: McbProperties,
     spectrum: Spectrum,
@@ -50,6 +64,9 @@ pub struct RemoteMcb {
     mode: AcquisitionMode,
     locked_by: Option<(String, String)>,
     since_poll: f64,
+    /// Where a fetch's channel counts are parsed before they reach the
+    /// mirror - see [`Self::integrate`] for why they do not go straight in.
+    scratch: Vec<u64>,
 }
 
 impl RemoteMcb {
@@ -141,7 +158,7 @@ impl RemoteMcb {
         spectrum.detector_name = name.to_string();
         spectrum.detector_description = name.to_string();
         let mut remote = Self {
-            transport,
+            line: Line::Direct(transport),
             identity,
             properties: McbProperties::default(),
             spectrum,
@@ -149,10 +166,31 @@ impl RemoteMcb {
             mode: AcquisitionMode::Pha,
             locked_by: None,
             since_poll: f64::MAX,
+            scratch: Vec::new(),
         };
         remote.refresh()?;
         remote.read_presets();
         Ok(remote)
+    }
+
+    /// Puts the line in a courier's hands, for callers with frames to draw.
+    ///
+    /// From here `poll` never touches the wire: it collects whatever fetch
+    /// the courier has finished and asks for the next one, both the work of
+    /// microseconds however slow the instrument is. On the bench that
+    /// prompted this, the fetch took 325 ms and ran on the interface's own
+    /// thread twice a second - a frozen frame per fetch, read by an operator
+    /// as a broken program. Commands still wait for their answers.
+    ///
+    /// The command line and the tests stay on the direct line instead: a
+    /// script has no frames to hold, and a `WAIT` that reads the clocks right
+    /// after polling wants them already fresh.
+    pub fn with_courier(mut self) -> Self {
+        self.line = match self.line {
+            Line::Direct(transport) => Line::Carried(Courier::carry(transport)),
+            carried => carried,
+        };
+        self
     }
 
     /// Asks the instrument what presets it is already holding.
@@ -192,15 +230,38 @@ impl RemoteMcb {
         self.properties.presets.roi_integral = counts(field("INTEG"));
     }
 
-    /// One command out, one checked line back.
-    fn command(&mut self, command: &str) -> Result<String, DeviceError> {
-        checked(self.transport.exchange(command)?)
+    /// One command out, one line back, however the line is held.
+    fn raw(&mut self, command: &str) -> Result<String, DeviceError> {
+        match &mut self.line {
+            Line::Direct(transport) => transport.exchange(command),
+            Line::Carried(courier) => courier.exchange(command),
+        }
     }
 
-    /// Pulls fresh status and data from the instrument.
+    /// One command out, one checked line back.
+    fn command(&mut self, command: &str) -> Result<String, DeviceError> {
+        checked(self.raw(command)?)
+    }
+
+    /// Pulls fresh status and data from the instrument, on this thread.
+    ///
+    /// The direct line's whole poll; over a courier this runs only at
+    /// connection time, before the courier exists, and [`Self::integrate`]
+    /// alone runs afterwards.
     fn refresh(&mut self) -> Result<(), DeviceError> {
         self.since_poll = 0.0;
-        let status = self.command("SHOW_STATUS")?;
+        let status = self.raw("SHOW_STATUS")?;
+        let data = self.raw("SHOW_DATA")?;
+        self.integrate(Fetched { status, data })
+    }
+
+    /// Works a fetch's lines into the mirror.
+    ///
+    /// Parsing lives here rather than with the fetch so that a courier can
+    /// stay a courier: it moves bytes, and what the bytes mean - including
+    /// an `ERR` where an answer should be - is decided on the caller's side.
+    fn integrate(&mut self, fetched: Fetched) -> Result<(), DeviceError> {
+        let status = checked(fetched.status)?;
         let number = |key: &str| -> Option<f64> {
             status.split_whitespace().find_map(|word| {
                 word.strip_prefix(key)
@@ -216,7 +277,7 @@ impl RemoteMcb {
         self.status.active = number("ACTIVE").unwrap_or(0.0) != 0.0;
         self.status.total_counts = number("TOTAL").unwrap_or(0.0) as u64;
 
-        let data = self.command("SHOW_DATA")?;
+        let data = checked(fetched.data)?;
         let mut words = data.split_whitespace();
         if words.next() != Some("DATA") {
             return Err(DeviceError::Communication {
@@ -236,20 +297,25 @@ impl RemoteMcb {
             .ok_or_else(|| DeviceError::Communication {
                 detail: format!("DATA does not declare a believable channel count: {data:.60?}"),
             })?;
-        let mut channels = Vec::with_capacity(count);
+        // Parsed into the scratch first, not straight into the mirror: the
+        // parse must be all-or-nothing, because a garbled word halfway along
+        // must leave the spectrum as it was, not half old and half new. The
+        // scratch is a field so that two fetches a second do not allocate a
+        // sixteen-thousand-channel buffer each, forever.
+        self.scratch.clear();
         for word in words.take(count) {
-            channels.push(
+            self.scratch.push(
                 word.parse::<u64>()
                     .map_err(|_| DeviceError::Communication {
                         detail: format!("a channel in DATA is not a count: {word:.40?}"),
                     })?,
             );
         }
-        if channels.len() != count {
+        if self.scratch.len() != count {
             return Err(DeviceError::Communication {
                 detail: format!(
                     "DATA declares {count} channels but carries {}",
-                    channels.len()
+                    self.scratch.len()
                 ),
             });
         }
@@ -262,7 +328,7 @@ impl RemoteMcb {
                 resized.copy_descriptors_from(&self.spectrum);
                 self.spectrum = resized;
             }
-            self.spectrum.channels.copy_from_slice(&channels);
+            self.spectrum.channels.copy_from_slice(&self.scratch);
         }
         self.spectrum.real_time = self.status.real_time;
         self.spectrum.live_time = self.status.live_time;
@@ -451,10 +517,32 @@ impl Mcb for RemoteMcb {
 
     fn poll(&mut self, elapsed_seconds: f64) -> Result<(), DeviceError> {
         self.since_poll += elapsed_seconds;
-        if self.since_poll >= POLL_INTERVAL {
-            self.refresh()?;
+        match &mut self.line {
+            // The direct line fetches here and now, on the calling thread -
+            // the command line's WAIT reads the clocks straight after
+            // polling, and a test asserts on the very next line.
+            Line::Direct(_) => {
+                if self.since_poll >= POLL_INTERVAL {
+                    self.refresh()?;
+                }
+                Ok(())
+            }
+            // Over a courier, a poll only collects and asks: whatever fetch
+            // has come back is worked into the mirror, and the next one is
+            // requested when it is due. Neither step touches the wire, so
+            // the frame this runs inside is never the instrument's hostage.
+            Line::Carried(courier) => {
+                let brought = courier.collect();
+                if self.since_poll >= POLL_INTERVAL {
+                    courier.request_fetch();
+                    self.since_poll = 0.0;
+                }
+                match brought {
+                    Some(fetched) => self.integrate(fetched?),
+                    None => Ok(()),
+                }
+            }
         }
-        Ok(())
     }
 
     fn set_mode(&mut self, mode: AcquisitionMode) -> Result<(), DeviceError> {

@@ -1595,8 +1595,12 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         .active
         .and_then(|index| app.windows.get(index))
         .map(|window| window.display.marker);
+    // Taken out before the spectrum is borrowed, so a cache hit can hand its
+    // rows over rather than cloning them - a Vec of Strings cloned on every
+    // frame the panel was open. The rows go back at the end either way.
+    let cache = app.dialogs.region_cache.take();
     #[allow(clippy::type_complexity)]
-    let (regions, at_marker, refreshed): (
+    let (regions, at_marker, fingerprint): (
         Vec<(usize, usize, usize, String)>,
         Option<usize>,
         Option<u64>,
@@ -1636,8 +1640,8 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     settings.background_points.hash(&mut hasher);
                     hasher.finish()
                 };
-                let (rows, refreshed) = match &app.dialogs.region_cache {
-                    Some((cached, rows)) if *cached == fingerprint => (rows.clone(), None),
+                let (rows, fingerprint) = match cache {
+                    Some((cached, rows)) if cached == fingerprint => (rows, Some(fingerprint)),
                     _ => {
                         let rows: Vec<(usize, usize, usize, String)> = spectrum
                             .rois
@@ -1680,16 +1684,11 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                 };
                 let current = marker
                     .and_then(|marker| spectrum.rois.iter().position(|roi| roi.contains(marker)));
-                (rows, current, refreshed)
+                (rows, current, fingerprint)
             }
             None => (Vec::new(), None, None),
         }
     };
-    // Written outside the block: the cache cannot be updated while the
-    // spectrum it fingerprints is still borrowed.
-    if let Some(fingerprint) = refreshed {
-        app.dialogs.region_cache = Some((fingerprint, regions.clone()));
-    }
     if regions.is_empty() {
         ui.label(egui::RichText::new("none marked").weak());
     } else {
@@ -1749,6 +1748,13 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     }
                 }
             });
+    }
+    // The rows go back into the cache moved, not cloned - the reason the
+    // cache was taken out before the spectrum borrow. Only after the render,
+    // which is their last reader; a frame with no spectrum drops the old rows
+    // instead, which costs one recompute when the window comes back.
+    if let Some(fingerprint) = fingerprint {
+        app.dialogs.region_cache = Some((fingerprint, regions));
     }
     ui.horizontal(|ui| {
         if ui.button("◀").on_hover_text("previous region").clicked() {
@@ -1856,24 +1862,27 @@ fn step_library(app: &App, forward: bool) -> Vec<Action> {
         .map(|window| window.display.marker)
         .unwrap_or(0);
     let here = cal.energy(marker as f64);
-    let mut hits: Vec<(f64, String)> = app
-        .library
-        .iter()
-        .flat_map(|nuclide| {
-            nuclide
-                .peaks
-                .iter()
-                .map(move |peak| (peak.energy, nuclide.name.clone()))
-        })
-        .collect();
-    hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let found = if forward {
-        hits.into_iter().find(|(energy, _)| *energy > here + 0.01)
-    } else {
-        hits.into_iter()
-            .rev()
-            .find(|(energy, _)| *energy < here - 0.01)
-    };
+    // One pass for the nearest line in the asked-for direction. This used to
+    // clone every name in the library and sort every line to pick out one.
+    let mut found: Option<(f64, &str)> = None;
+    for nuclide in app.library.iter() {
+        for peak in &nuclide.peaks {
+            let energy = peak.energy;
+            let onward = if forward {
+                energy > here + 0.01
+            } else {
+                energy < here - 0.01
+            };
+            let nearer = match found {
+                None => true,
+                Some((best, _)) if forward => energy < best,
+                Some((best, _)) => energy > best,
+            };
+            if onward && nearer {
+                found = Some((energy, nuclide.name.as_str()));
+            }
+        }
+    }
     match found {
         Some((energy, name)) => match cal.channel(energy) {
             Some(channel) => vec![
@@ -3364,17 +3373,25 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     // off the right-hand edge in a single line instead of
                     // stacking, and a library of any size is mostly unreachable.
                     ui.vertical(|ui| {
-                        for index in 0..app.library.len() {
-                            let name = app.library.nuclides[index].name.clone();
+                        // The names are borrowed, not cloned: the click is
+                        // applied after the loop, so painting the list does
+                        // not need the library free for writing - a real
+                        // library is a hundred nuclides, and a String each
+                        // per frame is an allocation storm for nothing.
+                        let mut clicked = None;
+                        for (index, nuclide) in app.library.nuclides.iter().enumerate() {
                             if ui
                                 .selectable_label(
                                     app.dialogs.library_selection == Some(index),
-                                    name,
+                                    &nuclide.name,
                                 )
                                 .clicked()
                             {
-                                app.dialogs.library_selection = Some(index);
+                                clicked = Some(index);
                             }
+                        }
+                        if clicked.is_some() {
+                            app.dialogs.library_selection = clicked;
                         }
                         if ui.button("+ nuclide").clicked() {
                             app.library.push(Nuclide::new(
