@@ -388,8 +388,11 @@ pub enum Action {
     // Display
     ZoomIn,
     ZoomOut,
-    /// Zoom one step about a channel, keeping it in place on screen.
-    ZoomAbout(usize, i32),
+    /// Scale the view's width by a factor about the marker - the wheel with
+    /// no channel under the pointer. Below one narrows, which is zooming in.
+    ZoomBy(f64),
+    /// The same scaling about a channel, keeping it in place on screen.
+    ZoomAbout(usize, f64),
     /// Put the marker at an energy (or a channel, uncalibrated) and centre it.
     GotoEnergy(f64),
     /// Make the next (or previous) visible window active.
@@ -1981,14 +1984,10 @@ impl App {
             }
             Action::ZoomIn => self.with_display(|display| display.zoom_in()),
             Action::ZoomOut => self.with_display(|display| display.zoom_out()),
-            Action::ZoomAbout(channel, direction) => self.with_display(|display| {
-                let factor = if direction > 0 {
-                    1.0 / crate::viewmodel::ZOOM_STEP
-                } else {
-                    crate::viewmodel::ZOOM_STEP
-                };
-                display.zoom_about(channel, factor);
-            }),
+            Action::ZoomBy(factor) => self.with_display(|display| display.zoom_by(factor)),
+            Action::ZoomAbout(channel, factor) => {
+                self.with_display(|display| display.zoom_about(channel, factor))
+            }
             Action::GotoEnergy(value) => self.goto_energy(value),
             Action::CycleWindow(direction) => self.cycle_window(direction),
             Action::Center => self.with_display(|display| display.center_on_marker()),
@@ -3355,6 +3354,13 @@ impl App {
                 self.dialogs.open(Dialog::Library);
                 return;
             }
+            // Theme & Colours, for looking at the scheme picker, the style
+            // editor and the palette checks - the parts of the look that are
+            // not the plot.
+            "look" => {
+                self.dialogs.open(Dialog::Preferences);
+                return;
+            }
             "charts" => {
                 // Filled QA and efficiency charts, for the screenshots.
                 let mut chart = QaChart::new(
@@ -4606,13 +4612,9 @@ impl App {
                             actions.push(Action::PeakInfoAtMarker);
                         }
                         ViewEvent::ZoomTo(low, high) => actions.push(Action::ZoomTo(low, high)),
-                        ViewEvent::Zoom(direction) => actions.push(if direction > 0 {
-                            Action::ZoomIn
-                        } else {
-                            Action::ZoomOut
-                        }),
-                        ViewEvent::ZoomAt(channel, direction) => {
-                            actions.push(Action::ZoomAbout(channel, direction))
+                        ViewEvent::Zoom(factor) => actions.push(Action::ZoomBy(factor)),
+                        ViewEvent::ZoomAt(channel, factor) => {
+                            actions.push(Action::ZoomAbout(channel, factor))
                         }
                         ViewEvent::Scroll(delta) => actions.push(Action::Scroll(delta)),
                         ViewEvent::Menu(command) => {

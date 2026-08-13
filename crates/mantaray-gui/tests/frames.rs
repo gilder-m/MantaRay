@@ -241,8 +241,26 @@ fn scroll_until(
             ..Default::default()
         };
         let output = ctx.run_ui(input, |ui| app.draw(ui));
-        if let Some(rect) = text_rect(&output, wanted) {
-            return Some(rect);
+        if text_rect(&output, wanted).is_some() {
+            // Found - but the wheel's smooth scrolling is still in flight,
+            // so the row is not yet where it will come to rest, and a click
+            // at the rect just seen would land where the row used to be.
+            // Let the animation die away and take the rect where it settles.
+            // Growing the dialog by one row is what showed this: the field
+            // was found, typed at, and unchanged.
+            let mut settled = None;
+            for _ in 0..12 {
+                let quiet = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(size[0], size[1]),
+                    )),
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(quiet, |ui| app.draw(ui));
+                settled = text_rect(&output, wanted);
+            }
+            return settled;
         }
     }
     None
@@ -816,7 +834,7 @@ fn monkey_round(seed: u64) {
         let action = match value % 43 {
             0 => Action::Marker(channel),
             1 => Action::ZoomTo(channel, (value % 12_000) as usize),
-            2 => Action::ZoomAbout(channel, if value & 1 == 0 { 1 } else { -1 }),
+            2 => Action::ZoomAbout(channel, if value & 1 == 0 { 0.8 } else { 1.25 }),
             3 => Action::ZoomIn,
             4 => Action::ZoomOut,
             5 => Action::GotoEnergy(match value % 5 {

@@ -82,10 +82,11 @@ pub enum ViewEvent {
     PeakInfo(usize),
     /// The view should zoom to a channel range.
     ZoomTo(usize, usize),
-    /// The wheel asked to zoom in or out.
-    Zoom(i32),
-    /// The wheel asked to zoom about the channel under the pointer.
-    ZoomAt(usize, i32),
+    /// The wheel or a pinch asked to scale the view's width by a factor -
+    /// below one narrows, which is zooming in.
+    Zoom(f64),
+    /// The same scaling, about the channel under the pointer.
+    ZoomAt(usize, f64),
     /// The wheel asked to scroll by channels.
     Scroll(i64),
     /// The window should fill the spectrum area, or go back to its own size.
@@ -518,12 +519,14 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
             .hover_pos()
             .filter(|position| plot.contains(*position) && !inset.contains(*position))
             .map(channel_at);
-        let zoom_event = |direction: i32| match at_pointer {
-            Some(channel) => ViewEvent::ZoomAt(channel, direction),
-            None => ViewEvent::Zoom(direction),
+        let zoom_event = |factor: f64| match at_pointer {
+            Some(channel) => ViewEvent::ZoomAt(channel, factor),
+            None => ViewEvent::Zoom(factor),
         };
         if (zoom - 1.0).abs() > 0.01 {
-            events.push(zoom_event(if zoom > 1.0 { 1 } else { -1 }));
+            // A pinch already arrives as a per-frame scale; the width moves by
+            // its inverse, so spreading fingers narrows the view.
+            events.push(zoom_event((1.0 / f64::from(zoom)).clamp(0.5, 2.0)));
         } else if scroll.abs() > 0.5 {
             if shift {
                 events.push(ViewEvent::Scroll(if scroll > 0.0 {
@@ -532,7 +535,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
                     step()
                 }));
             } else {
-                events.push(zoom_event(if scroll > 0.0 { 1 } else { -1 }));
+                events.push(zoom_event(wheel_zoom_factor(scroll, style.wheel_zoom)));
             }
         } else if sideways.abs() > 0.5 {
             // A sideways wheel or a two-finger swipe pans along the spectrum.
@@ -553,6 +556,39 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     }
 
     events
+}
+
+/// One wheel notch of scroll, in egui points.
+///
+/// Windows reports a notch as three lines and egui counts a line as fifty
+/// points; a notch is therefore worth one [`ZOOM_STEP`] - the same step the
+/// keyboard and the menu take - and everything shallower or steeper scales
+/// through the exponent, so a trackpad glides where a notched wheel clicks.
+const NOTCH_POINTS: f32 = 150.0;
+
+/// The width factor for `scroll` points of wheel.
+///
+/// Proportional to distance rather than one step per frame, which is the
+/// difference between a zoom and a lunge: egui smooths a single wheel click
+/// across several frames, and firing a full step on each of them stacked
+/// five to ten steps - one click of a notched wheel zoomed by 3.6× or more.
+/// Spent proportionally, the same smoothing lands the same click at exactly
+/// one step per notch, however the platform slices the points up. Clamped so
+/// that no single frame can move more than a factor of two even under a
+/// flung free-spinning wheel.
+///
+/// `percent` is the scheme's [`crate::theme::SchemeStyle::wheel_zoom`]: how
+/// much of the keyboard's step one notch is worth. A hundred is parity; a
+/// scheme - or a mouse - that wants a gentler or a brisker wheel scales the
+/// exponent, so the curve keeps its shape and only its pace changes.
+fn wheel_zoom_factor(scroll: f32, percent: u16) -> f64 {
+    // The slider offers 25 to 400, but a hand-edited scheme file may say
+    // anything a u16 can hold; held to the same range here, so a zero cannot
+    // silently disable the wheel and a huge value cannot turn every touch
+    // into a lunge.
+    let percent = percent.clamp(25, 400);
+    let exponent = f64::from(scroll / NOTCH_POINTS) * f64::from(percent) / 100.0;
+    crate::viewmodel::ZOOM_STEP.powf(-exponent).clamp(0.5, 2.0)
 }
 
 /// The window's own header: source, times, counts, mode and a maximise button.
@@ -2080,6 +2116,55 @@ pub(crate) fn format_axis_count(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One wheel notch zooms by one keyboard step, however egui slices it.
+    ///
+    /// The wheel used to take a full step per frame rather than per notch,
+    /// and egui's smoothing hands one click out over several frames - so a
+    /// single click stacked five to ten steps and landed as a lunge.
+    #[test]
+    fn a_wheel_notch_is_worth_one_zoom_step() {
+        use crate::viewmodel::ZOOM_STEP;
+        // A whole notch at once: exactly the keyboard's step, inward.
+        assert!((wheel_zoom_factor(NOTCH_POINTS, 100) - 1.0 / ZOOM_STEP).abs() < 1e-9);
+        assert!((wheel_zoom_factor(-NOTCH_POINTS, 100) - ZOOM_STEP).abs() < 1e-9);
+        // Split into thirds, the pieces multiply back to the same step. The
+        // tolerance is the f32 the scroll arrives as, not the f64 arithmetic.
+        let third = wheel_zoom_factor(NOTCH_POINTS / 3.0, 100);
+        assert!((third.powi(3) - 1.0 / ZOOM_STEP).abs() < 1e-6);
+        // A flung free-spinning wheel is bounded per frame, not unbounded.
+        assert!(wheel_zoom_factor(5000.0, 100) >= 0.5);
+        assert!(wheel_zoom_factor(-5000.0, 100) <= 2.0);
+    }
+
+    /// The scheme's wheel-zoom percentage paces the wheel without bending it.
+    ///
+    /// Fifty percent takes two notches to a step, two hundred takes half a
+    /// notch - the curve is the same one, walked slower or faster, so a
+    /// scheme can calm a twitchy wheel or hurry a stiff one.
+    #[test]
+    fn the_scheme_paces_the_wheel() {
+        use crate::viewmodel::ZOOM_STEP;
+        // Half pace: a whole notch is half a step, so two notches are one.
+        let half = wheel_zoom_factor(NOTCH_POINTS, 50);
+        assert!((half * half - 1.0 / ZOOM_STEP).abs() < 1e-9);
+        // Double pace: one notch lands two steps in.
+        let double = wheel_zoom_factor(NOTCH_POINTS, 200);
+        assert!((double - (1.0 / ZOOM_STEP).powi(2)).abs() < 1e-9);
+        // And whatever the pace, the per-frame bound holds.
+        assert!(wheel_zoom_factor(5000.0, 400) >= 0.5);
+        assert!(wheel_zoom_factor(-5000.0, 400) <= 2.0);
+        // A hand-edited scheme may say anything a u16 holds; the pace is held
+        // to the slider's 25-400, so zero cannot silently disable the wheel.
+        assert_eq!(
+            wheel_zoom_factor(NOTCH_POINTS, 0),
+            wheel_zoom_factor(NOTCH_POINTS, 25)
+        );
+        assert_eq!(
+            wheel_zoom_factor(NOTCH_POINTS, u16::MAX),
+            wheel_zoom_factor(NOTCH_POINTS, 400)
+        );
+    }
 
     #[test]
     fn a_rate_keeps_the_precision_its_size_deserves() {

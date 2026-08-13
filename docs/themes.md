@@ -36,7 +36,7 @@ hand-edited palette, and warns when two roles are too close to tell apart.
 {
   "name": "Bench",
   "colors": { "background": "#000040", "foreground": "#00ffff", "...": "..." },
-  "style": { "layout": "Windows", "fill": "Solid", "grid": false }
+  "style": { "layout": "Windows", "fill": "Solid", "grid": false, "wheel_zoom": 100 }
 }
 ```
 
@@ -46,6 +46,14 @@ reading, so a palette tuned by hand under an earlier version still loads.
 
 Every field has a default, and so does the whole `style` block, so a file need
 only say what it means to change.
+
+The style carries feel as well as looks. `wheel_zoom` is how much one notch of
+the scroll wheel zooms, as a percentage of the keyboard's step: 100 means a
+notch and Display/Zoom In move the same amount, 50 calms a twitchy wheel to
+half that, 200 hurries a stiff one to double. The range is 25 to 400, and the
+curve is the same at every setting - only its pace changes. A hand-edited
+value outside the range is pulled to the nearer end rather than obeyed or
+refused, so no file can quietly disable the wheel.
 
 ## Conductor, and where its colours came from
 

@@ -4571,6 +4571,29 @@ fn style_editor(app: &mut App, ui: &mut egui::Ui) {
         )
         .on_hover_text("windows, menus and buttons; zero is square");
     });
+    ui.horizontal(|ui| {
+        ui.label("Wheel zoom");
+        // Logarithmic, because pace is felt in ratios: 50% and 200% sit the
+        // same distance either side of parity, as they do under the finger.
+        ui.add(
+            egui::Slider::new(&mut app.style.wheel_zoom, 25..=400)
+                .logarithmic(true)
+                // The unit lives in the formatter, not in `suffix`: egui
+                // appends a suffix to whatever the formatter returns, and
+                // "1 step %" is not a reading, it is two readings colliding.
+                .custom_formatter(|value, _| {
+                    if (value - 100.0).abs() < 0.5 {
+                        "1 step".to_string()
+                    } else {
+                        format!("{value:.0} %")
+                    }
+                }),
+        )
+        .on_hover_text(
+            "how much one notch of the wheel zooms, as a share of the keyboard's step - \
+             100% means a notch and Display/Zoom In move the same amount",
+        );
+    });
 }
 
 /// Every colour in the palette, grouped by what it is for.

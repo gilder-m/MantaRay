@@ -333,12 +333,19 @@ fn the_wheel_zooms_about_the_channel_under_the_pointer() {
         },
     ]);
     let zoomed_at = display.events.iter().find_map(|event| match event {
-        ViewEvent::ZoomAt(channel, direction) => Some((*channel, *direction)),
+        ViewEvent::ZoomAt(channel, factor) => Some((*channel, *factor)),
         _ => None,
     });
-    let (channel, direction) =
+    let (channel, factor) =
         zoomed_at.unwrap_or_else(|| panic!("the wheel did nothing: {:?}", display.events));
-    assert_eq!(direction, 1, "wheel up should zoom in");
+    assert!(factor < 1.0, "wheel up should narrow the view: {factor}");
+    // One notch is worth one keyboard step in total, and egui hands it out
+    // over several frames - so a single frame must take less than the whole
+    // step, or the frames would stack into the lunge this replaced.
+    assert!(
+        factor > 1.0 / mantaray_gui::viewmodel::ZOOM_STEP,
+        "one frame of a smoothed notch must be less than a whole step: {factor}"
+    );
     let (start, end) = display.display.visible();
     let middle = (start + end) / 2;
     let quarter = (end - start) / 4;

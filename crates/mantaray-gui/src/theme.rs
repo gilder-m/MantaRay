@@ -725,6 +725,13 @@ pub struct SchemeStyle {
     /// Whether windows and menus cast a shadow.
     #[serde(default = "yes")]
     pub shadows: bool,
+    /// How much one notch of the wheel zooms, as a percentage of the
+    /// keyboard's step. A hundred means a notch and Display/Zoom In move the
+    /// same amount; fifty halves the wheel, two hundred doubles it. How the
+    /// wheel feels is as much of a scheme's character as how it draws, and
+    /// like the rest of the style it travels in the scheme file.
+    #[serde(default = "default_wheel_zoom")]
+    pub wheel_zoom: u16,
 }
 
 /// The default for a flag that is on unless a scheme says otherwise.
@@ -735,6 +742,11 @@ fn yes() -> bool {
 /// Rounded, unless a scheme asks for square.
 fn default_corners() -> u8 {
     7
+}
+
+/// One wheel notch is worth one keyboard step, unless a scheme says otherwise.
+fn default_wheel_zoom() -> u16 {
+    100
 }
 
 impl Default for SchemeStyle {
@@ -748,6 +760,7 @@ impl Default for SchemeStyle {
             glow: true,
             corners: 7,
             shadows: true,
+            wheel_zoom: 100,
         }
     }
 }
@@ -769,6 +782,9 @@ impl SchemeStyle {
             glow: false,
             corners: 0,
             shadows: false,
+            // The period look has no opinion about the wheel; the software it
+            // reproduces zoomed from the keyboard.
+            wheel_zoom: 100,
         }
     }
 }

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+**One click of the wheel zooms by one step (2026-08-12).** The wheel took a
+full zoom step per *frame* rather than per notch, and egui smooths a single
+click across several frames - so one flick of the finger stacked five to ten
+steps and the view lunged by 3.6× or more. Wheel zoom is now proportional to
+the scroll distance: a notch works out to exactly the keyboard's 1.2× step, a
+trackpad glides through the same curve, and a pinch passes its own scale
+through instead of being rounded to whole steps. No single frame can move the
+view by more than a factor of two, however hard a free-spinning wheel is flung.
+
+**And how far a notch goes is the scheme's to set (2026-08-12).** The style a
+scheme carries - tabs or windows, the fill, the glow - now carries the wheel's
+pace too: `wheel_zoom`, the share of a keyboard step one notch is worth, from
+25% to 400% around a default of parity. Theme & Colours has the slider, the
+scheme file has the field, and the curve is the same at every setting - only
+its pace changes, so a twitchy wheel can be calmed and a stiff one hurried
+without either losing the shape of the zoom.
+
 **A slow instrument no longer freezes the interface (2026-08-12).** The
 application refreshed each connected instrument - status and a whole spectrum -
 on the thread that draws the frames, so an instrument that took 325 ms to
