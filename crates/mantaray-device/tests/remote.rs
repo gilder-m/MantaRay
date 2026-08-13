@@ -905,3 +905,98 @@ fn a_courier_whose_thread_died_reports_a_lost_connection() {
         "a dead courier is a lost connection: {error}"
     );
 }
+
+/// A channel count that flaps does not clear the operator's spectrum.
+///
+/// On the Windows road, ORTEC's library is asked the detector's length on
+/// every read and truncates the data to what it actually returned - and a
+/// busy instrument mid-acquisition answers short. Rebuilding the mirror for
+/// each disagreement started it from zeros, so the window flashed empty and
+/// full, over and over: seen on the bench as the program clearing the count.
+/// A mirror holding counts now believes a new length only when two fetches
+/// in a row agree on it; the flap costs its own channels and nothing else -
+/// its clocks still land.
+#[test]
+fn a_flapping_channel_count_does_not_clear_the_mirror() {
+    let mut remote = connect_scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=MCS-1 SERIAL=7 FIRMWARE=v1 CHANNELS=4",
+        ),
+        (
+            "SHOW_STATUS",
+            "RT=1.00 LT=1.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=20",
+        ),
+        ("SHOW_DATA", "DATA 4 5 5 5 5"),
+        // A short read: two channels of a four-channel instrument.
+        (
+            "SHOW_STATUS",
+            "RT=2.00 LT=2.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=18",
+        ),
+        ("SHOW_DATA", "DATA 2 9 9"),
+        // The next read is whole again, and its counts must land.
+        (
+            "SHOW_STATUS",
+            "RT=3.00 LT=3.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=24",
+        ),
+        ("SHOW_DATA", "DATA 4 6 6 6 6"),
+    ]);
+    assert_eq!(remote.spectrum().channels, vec![5, 5, 5, 5]);
+
+    // The flap: the mirror keeps its shape and its counts...
+    remote.poll(1.0).expect("poll through the short read");
+    assert_eq!(
+        remote.spectrum().channels,
+        vec![5, 5, 5, 5],
+        "a one-fetch flap must not rebuild the mirror"
+    );
+    // ...while the flapped fetch's clocks still count.
+    assert!((remote.status().real_time - 2.0).abs() < 1e-9);
+
+    // The whole read after it lands as if nothing happened.
+    remote.poll(1.0).expect("poll through the whole read");
+    assert_eq!(remote.spectrum().channels, vec![6, 6, 6, 6]);
+}
+
+/// A length change that repeats is real, and is adopted - once.
+///
+/// A genuine conversion-gain change mid-run answers with the new length on
+/// every fetch from then on, so the second agreeing fetch is what rebuilds
+/// the mirror; an empty mirror (connection, the fetch after CLEAR) adopts at
+/// once, because rebuilding zeros as zeros loses nothing.
+#[test]
+fn a_persistent_length_change_is_adopted_on_the_second_fetch() {
+    let mut remote = connect_scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=MCS-1 SERIAL=7 FIRMWARE=v1 CHANNELS=4",
+        ),
+        (
+            "SHOW_STATUS",
+            "RT=1.00 LT=1.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=20",
+        ),
+        ("SHOW_DATA", "DATA 4 5 5 5 5"),
+        (
+            "SHOW_STATUS",
+            "RT=2.00 LT=2.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=18",
+        ),
+        ("SHOW_DATA", "DATA 2 9 9"),
+        (
+            "SHOW_STATUS",
+            "RT=3.00 LT=3.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=18",
+        ),
+        ("SHOW_DATA", "DATA 2 9 9"),
+    ]);
+
+    // First sighting: not yet believed.
+    remote.poll(1.0).expect("first fetch at the new length");
+    assert_eq!(remote.spectrum().channels, vec![5, 5, 5, 5]);
+
+    // Second in a row: the change is real, the mirror follows it.
+    remote.poll(1.0).expect("second fetch at the new length");
+    assert_eq!(
+        remote.spectrum().channels,
+        vec![9, 9],
+        "two agreeing fetches are a real gain change"
+    );
+}

@@ -94,10 +94,17 @@ impl Courier {
             .send(Errand::Exchange(command.to_string(), reply))
             .map_err(|_| self.gone())
             .and_then(|()| answer.recv().map_err(|_| self.gone()))?;
-        self.slot
+        let discarded = self
+            .slot
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+            .take()
+            .is_some();
+        if discarded && crate::journal::on() {
+            crate::journal::line(&format!(
+                "courier: a finished fetch from before {command:?} was discarded"
+            ));
+        }
         self.fetching = false;
         outcome
     }

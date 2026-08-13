@@ -88,6 +88,106 @@ pub fn run(instrument: &dyn Instrument) -> Result<(), String> {
     Ok(())
 }
 
+/// One opened instrument and what the hub remembers about it.
+struct HubEntry<'a> {
+    instrument: Box<dyn Instrument + 'a>,
+    /// [`Session::total`], carried between commands the way `run`'s single
+    /// session carries it for one instrument.
+    total: u64,
+}
+
+/// Runs the hub: every local detector through one process, one command at a
+/// time.
+///
+/// The bench that forced this ran one bridge process per detector entry, and
+/// ORTEC's configuration on that machine resolved three entries to the same
+/// physical instrument - so three processes transacted with one mailbox at
+/// once, their replies crossed, and the spectrum on screen flashed between
+/// three interleaved snapshots until the adapter wedged outright. A single
+/// process answering one command before reading the next cannot interleave
+/// anything: the serialisation is the loop.
+///
+/// The dialect grows one routing mark: `@<n> <command>`, where `n` is the
+/// detector number the entry names. An instrument is opened the first time
+/// its number is asked for - `open` decides how, trying the same roads
+/// `serve <n>` would - and an entry that cannot be opened answers `ERR`
+/// with the reason, each time, rather than poisoning the others.
+// Only the Windows bridge runs a hub today: the libusb road's adapters are
+// claimed exclusively, so its per-adapter processes cannot converge on one
+// instrument the way `serve N`'s lone-adapter forgiveness let ORTEC entries
+// do. The routing itself is road-agnostic and tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(clippy::type_complexity)]
+pub fn run_hub<'a>(
+    open: &mut dyn FnMut(i32) -> Result<Box<dyn Instrument + 'a>, String>,
+) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    eprintln!("hub: serving local detectors as they are asked for");
+    let input = std::io::stdin();
+    let mut output = std::io::stdout();
+    let mut entries: std::collections::BTreeMap<i32, HubEntry<'a>> = Default::default();
+    for line in input.lock().lines() {
+        let line = line.map_err(|error| format!("reading a command: {error}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Bound before `one_line` sees it, not passed as a temporary: the
+        // sibling branch teaches `one_line` to borrow its input when there is
+        // nothing to change, and a borrow of a temporary is the build break
+        // git's auto-merge would hand whoever merged second.
+        let reply = hub_line(line.trim(), &mut entries, open);
+        let reply = one_line(&reply);
+        writeln!(output, "{reply}").map_err(|error| format!("writing a reply: {error}"))?;
+        output
+            .flush()
+            .map_err(|error| format!("flushing a reply: {error}"))?;
+    }
+    Ok(())
+}
+
+/// One hub command handled: route, opening the detector if this is its first.
+///
+/// Split from [`run_hub`]'s pipe loop so the routing can be tested without a
+/// process around it.
+fn hub_line<'a>(
+    line: &str,
+    entries: &mut std::collections::BTreeMap<i32, HubEntry<'a>>,
+    open: &mut dyn FnMut(i32) -> Result<Box<dyn Instrument + 'a>, String>,
+) -> String {
+    let Some((number, command)) = parse_hub_line(line) else {
+        return format!("ERR the hub routes by detector: @<n> <command>, not {line:?}");
+    };
+    let entry = match entries.entry(number) {
+        std::collections::btree_map::Entry::Occupied(held) => held.into_mut(),
+        std::collections::btree_map::Entry::Vacant(empty) => match open(number) {
+            Ok(instrument) => empty.insert(HubEntry {
+                instrument,
+                total: 0,
+            }),
+            Err(error) => return format!("ERR opening detector {number}: {error}"),
+        },
+    };
+    // A session per command, around the entry's carried state: `Session`
+    // stays exactly what `run` uses, so the two roads cannot drift apart.
+    let mut session = Session {
+        instrument: entry.instrument.as_ref(),
+        total: entry.total,
+    };
+    let reply = session.handle(command);
+    entry.total = session.total;
+    reply
+}
+
+/// Reads `@<n> <command>` into its number and command.
+fn parse_hub_line(line: &str) -> Option<(i32, &str)> {
+    let (mark, command) = line.strip_prefix('@')?.split_once(' ')?;
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    Some((mark.parse().ok()?, command))
+}
+
 /// A reply reduced to the one line the protocol allows.
 ///
 /// Control characters become spaces rather than disappearing, so that a reply
@@ -140,10 +240,18 @@ impl Session<'_> {
             other if other.starts_with('$') || other.contains('_') => self.pass(command),
             other => Err(format!("{other} is not a command this bridge knows")),
         };
-        match outcome {
+        let reply = match outcome {
             Ok(reply) => reply,
             Err(error) => format!("ERR {error}"),
+        };
+        if crate::journal::on() {
+            // Digested: a DATA reply is a whole spectrum, and its journal
+            // line is its shape - data() writes the sum separately.
+            let shown: String = reply.chars().take(48).collect();
+            let more = if reply.len() > shown.len() { "…" } else { "" };
+            crate::journal::line(&format!("{command} -> {shown}{more}"));
         }
+        reply
     }
 
     /// Sends a command through untouched and relays what came back.
@@ -289,6 +397,13 @@ impl Session<'_> {
         let channels = self.instrument.channels();
         let counts = self.instrument.read(0, channels)?;
         self.total = counts.iter().sum();
+        if crate::journal::on() {
+            crate::journal::line(&format!(
+                "read: asked={channels} returned={} sum={}",
+                counts.len(),
+                self.total
+            ));
+        }
         let mut reply = String::with_capacity(counts.len() * 4 + 16);
         reply.push_str("DATA ");
         reply.push_str(&counts.len().to_string());
@@ -947,5 +1062,53 @@ mod tests {
         };
         assert!(session.handle("FROBNICATE").starts_with("ERR "));
         assert!(bench.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_hub_line_reads_its_number_and_command() {
+        assert_eq!(parse_hub_line("@3 SHOW_STATUS"), Some((3, "SHOW_STATUS")));
+        assert_eq!(
+            parse_hub_line("@12 SET_PRESET_LIVE 300"),
+            Some((12, "SET_PRESET_LIVE 300"))
+        );
+        // Unrouted, empty, and unnumbered lines are not hub lines.
+        assert_eq!(parse_hub_line("SHOW_STATUS"), None);
+        assert_eq!(parse_hub_line("@3 "), None);
+        assert_eq!(parse_hub_line("@x SHOW_STATUS"), None);
+    }
+
+    /// The hub opens each detector once, keeps their sessions apart, and an
+    /// entry that cannot open answers `ERR` without poisoning the rest.
+    #[test]
+    fn the_hub_routes_by_detector_and_opens_each_once() {
+        let opens = std::cell::RefCell::new(Vec::new());
+        let mut open = |number: i32| -> Result<Box<dyn Instrument>, String> {
+            opens.borrow_mut().push(number);
+            match number {
+                9 => Err("nothing at 9".into()),
+                _ => Ok(Box::new(Bench::new())),
+            }
+        };
+        let mut entries = std::collections::BTreeMap::new();
+
+        // Two detectors, each opened on first sight and only then.
+        assert!(hub_line("@1 SHOW_DATA", &mut entries, &mut open).starts_with("DATA 4 "));
+        assert!(hub_line("@2 SHOW_DATA", &mut entries, &mut open).starts_with("DATA 4 "));
+        assert!(hub_line("@1 SHOW_STATUS", &mut entries, &mut open).contains("TOTAL=60"));
+        assert_eq!(*opens.borrow(), vec![1, 2], "each detector opens once");
+
+        // A detector that opens nowhere reports so every time it is asked,
+        // and the ones that opened go on answering.
+        assert!(hub_line("@9 SHOW_STATUS", &mut entries, &mut open).starts_with("ERR "));
+        assert!(hub_line("@9 SHOW_STATUS", &mut entries, &mut open).starts_with("ERR "));
+        assert_eq!(
+            *opens.borrow(),
+            vec![1, 2, 9, 9],
+            "a failed open is retried"
+        );
+        assert!(hub_line("@2 SHOW_STATUS", &mut entries, &mut open).contains("TOTAL=60"));
+
+        // A line without a route is refused as such.
+        assert!(hub_line("SHOW_STATUS", &mut entries, &mut open).starts_with("ERR "));
     }
 }
