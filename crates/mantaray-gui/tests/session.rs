@@ -2134,3 +2134,84 @@ fn spectrum_with_counts() -> mantaray_core::Spectrum {
     spectrum.channels[100] = 500;
     spectrum
 }
+
+/// A detector's calibration survives the session, filed under its serial.
+///
+/// The mirror a detector window shows is rebuilt at every connect, so a
+/// calibration made on one used to die with the session - reported from the
+/// bench as "calibration is not being saved". It is now remembered against
+/// the serial the instrument reports and put back at the next connect,
+/// outranking whatever the connect road's configuration carries: the
+/// remembered one is what the operator did, on this screen, since.
+#[test]
+fn a_detector_calibration_comes_back_at_the_next_connect() {
+    use std::sync::{Arc, Mutex};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address").to_string();
+    let served: Arc<Mutex<mantaray_device::SimulatedMcb>> =
+        Arc::new(Mutex::new(mantaray_device::SimulatedMcb::new(7, "KEPT")));
+    let behind = Arc::clone(&served);
+    // Two sessions connect in turn, so the server keeps accepting.
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let shared: Arc<Mutex<dyn mantaray_device::Mcb>> = Arc::clone(&behind) as _;
+            let _ = mantaray_device::server::serve_connection(stream, shared);
+        }
+    });
+    let entry = || mantaray_device::DetectorEntry {
+        number: 7,
+        name: "KEPT".into(),
+        model: "remote".into(),
+        kind: mantaray_device::DetectorKind::Network,
+        channels: 0,
+        description: address.clone(),
+        serial: String::new(),
+    };
+
+    // First session: connect and calibrate through the ordinary road -
+    // marker on a channel, energy typed in, twice.
+    let mut app = App::headless();
+    let joined = app.detectors.len();
+    app.add_detector(entry());
+    assert!(app.status.contains("connected"), "{}", app.status);
+    app.apply_action(Action::OpenDetector(joined));
+    app.apply_action(Action::Marker(100));
+    app.apply_action(Action::AddCalibrationPoint(100.0));
+    app.apply_action(Action::Marker(200));
+    app.apply_action(Action::AddCalibrationPoint(200.0));
+    assert!(
+        app.active_spectrum()
+            .and_then(|spectrum| spectrum.energy_calibration.clone())
+            .is_some(),
+        "two points make a line: {}",
+        app.status
+    );
+    assert_eq!(
+        app.remembered_calibrations.len(),
+        1,
+        "the calibration is filed under the instrument's serial"
+    );
+    assert_eq!(app.remembered_calibrations[0].serial, "SIM-0007");
+
+    // Second session: built from what the first would persist, connecting to
+    // the same instrument. The first session ends first - the server accepts
+    // one client at a time, as the real one does.
+    let persisted = app.persisted();
+    drop(app);
+    let mut next = App::headless();
+    next.restore(persisted);
+    let joined = next.detectors.len();
+    next.add_detector(entry());
+    assert!(next.status.contains("connected"), "{}", next.status);
+    next.apply_action(Action::OpenDetector(joined));
+    let calibration = next
+        .active_spectrum()
+        .and_then(|spectrum| spectrum.energy_calibration.clone())
+        .expect("the remembered calibration is back on the mirror");
+    assert!(
+        (calibration.coefficients[1] - 1.0).abs() < 1e-9,
+        "the gain the operator fitted: {:?}",
+        calibration.coefficients
+    );
+    assert!((calibration.coefficients[0]).abs() < 1e-9);
+}

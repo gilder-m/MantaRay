@@ -38,6 +38,23 @@ pub(crate) fn save_action(shift: bool) -> Action {
     if shift { Action::Save } else { Action::SaveAs }
 }
 
+/// An extension as its format's own tools write it.
+///
+/// MAESTRO writes `.Spe`, `.Chn` and `.Spc` with their capitals, and a file
+/// that will sit in a directory beside MAESTRO's own should look like its
+/// neighbours. Reading has always been case-insensitive; this is about what a
+/// saved file is called. The stored preference stays lowercase - it is a
+/// token, not a filename - so this is applied at the moment a name is shown
+/// or suggested.
+pub(crate) fn dotted(extension: &str) -> &str {
+    match extension {
+        "spe" => "Spe",
+        "chn" => "Chn",
+        "spc" => "Spc",
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod save_tests {
     use super::{Action, save_action};
@@ -216,6 +233,31 @@ pub struct Persisted {
     /// Whether a logarithmic axis tops out at the next power of ten.
     #[serde(default)]
     pub log_decade_top: bool,
+    /// Calibrations remembered per instrument, by serial.
+    #[serde(default)]
+    pub calibrations: Vec<RememberedCalibration>,
+}
+
+/// A calibration kept for one instrument, keyed by the serial it reports.
+///
+/// An instrument's mirror lives only as long as the session, and connecting
+/// builds it afresh - so a calibration made on a detector window used to die
+/// with the window, quietly, and read from the bench as "calibration is not
+/// being saved". The instrument itself cannot hold it: nothing in the dialect
+/// writes a calibration back, and the 926 would not keep one. So the
+/// application remembers it here, against the serial - the one name that
+/// stays with the instrument through replugs, renumbering and other machines'
+/// configuration files - and puts it back on the mirror at every connect.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RememberedCalibration {
+    /// The serial the instrument reports.
+    pub serial: String,
+    /// Energy coefficients, channel to energy.
+    pub energy: [f64; 3],
+    /// Energy units, as entered.
+    pub units: String,
+    /// Shape coefficients, when a shape calibration was in force.
+    pub shape: Option<[f64; 3]>,
 }
 
 fn default_peak_font() -> f32 {
@@ -436,6 +478,8 @@ pub enum Action {
     /// Fit an energy calibration by matching found peaks to a nuclide's lines.
     AutoCalibrate(String),
     RecallCalibration,
+    /// Write the active spectrum's calibration to a file of its own.
+    SaveCalibration,
     DestroyCalibration,
     AddCalibrationPoint(f64),
     /// Replace a calibration point with a corrected channel and energy.
@@ -828,6 +872,9 @@ pub struct App {
     pub settings: CalculationSettings,
     /// Working nuclide library.
     pub library: NuclideLibrary,
+    /// Calibrations remembered per instrument serial - see
+    /// [`RememberedCalibration`].
+    pub remembered_calibrations: Vec<RememberedCalibration>,
     /// Energy-sorted index over the library's lines, for the lookups drawing
     /// does per marked region, per frame. Verified against the library at the
     /// top of every [`Self::draw`], so edits through the public field are
@@ -984,6 +1031,7 @@ impl App {
             peak_font: self.peak_font,
             default_format: self.default_format.clone(),
             reopen_last: self.reopen_last,
+            calibrations: self.remembered_calibrations.clone(),
         }
     }
 
@@ -1010,6 +1058,7 @@ impl App {
             self.time_scale = persisted.time_scale;
         }
         self.auto_clear_roi = persisted.auto_clear_roi;
+        self.remembered_calibrations = persisted.calibrations;
         self.log_decade_top = persisted.log_decade_top;
         self.peak_font = persisted.peak_font.clamp(9.0, 18.0);
         if !persisted.default_format.is_empty() {
@@ -1092,6 +1141,7 @@ impl App {
             next_id: 1,
             settings: CalculationSettings::default(),
             library: NuclideLibrary::new(""),
+            remembered_calibrations: Vec::new(),
             library_index: Default::default(),
             isotope: IsotopeCheck {
                 min_intensity: IsotopeCheck::DEFAULT_MIN_INTENSITY,
@@ -2171,6 +2221,7 @@ impl App {
             Action::Analyse => self.run_analysis(),
             Action::AutoCalibrate(nuclide) => self.auto_calibrate(&nuclide),
             Action::RecallCalibration => self.recall_calibration(),
+            Action::SaveCalibration => self.save_calibration_file(),
             Action::DestroyCalibration => {
                 if let Some(index) = self.active {
                     self.windows[index].calibration.destroy();
@@ -2178,6 +2229,7 @@ impl App {
                 if let Some(spectrum) = self.active_spectrum_mut() {
                     spectrum.energy_calibration = None;
                 }
+                self.remember_active_calibration();
                 self.status = "calibration destroyed".into();
             }
             Action::AddCalibrationPoint(energy) => self.add_calibration_point(energy),
@@ -2476,6 +2528,7 @@ impl App {
                 if let Some(spectrum) = self.active_spectrum_mut() {
                     spectrum.energy_calibration = Some(calibration);
                 }
+                self.remember_active_calibration();
                 self.status = format!(
                     "calibration point {points} entered at channel {channel:.2}; {} fit in force",
                     if order >= 2 { "quadratic" } else { "linear" }
@@ -2721,7 +2774,7 @@ impl App {
                     .unwrap_or_else(|| "spectrum".into());
                 crate::dialogs::pick_save_file_named(
                     &self.spectrum_filters(),
-                    Some(&format!("{stem}.{}", self.default_format)),
+                    Some(&format!("{stem}.{}", dotted(&self.default_format))),
                 )
             }
         };
@@ -3109,6 +3162,7 @@ impl App {
                 if let Some(spectrum) = self.active_spectrum_mut() {
                     spectrum.energy_calibration = Some(result.calibration);
                 }
+                self.remember_active_calibration();
                 self.status = format!(
                     "calibrated from {matched} {} lines: {gain:.4} keV/ch",
                     nuclide.name
@@ -3154,6 +3208,47 @@ impl App {
             return;
         };
         self.apply_calibration_from(&path);
+    }
+
+    /// Writes the active spectrum's calibration to a `.Clb` of its own.
+    ///
+    /// The counterpart of recalling one, and the road a calibration takes to
+    /// another machine without dragging a spectrum along: MAESTRO keeps its
+    /// calibrations in exactly such files. There was no way to write one -
+    /// a calibration lived and died with the spectrum it was made on.
+    fn save_calibration_file(&mut self) {
+        let Some(spectrum) = self.active_spectrum() else {
+            self.status = "no spectrum is active".into();
+            return;
+        };
+        let Some(energy) = spectrum.energy_calibration.clone() else {
+            self.status = "the active spectrum has no calibration to save".into();
+            return;
+        };
+        let shape = spectrum.shape_calibration;
+        let stem = self
+            .active
+            .and_then(|index| self.windows.get(index))
+            .map(|window| {
+                std::path::Path::new(&window.title)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| window.title.clone())
+            })
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or_else(|| "calibration".into());
+        let Some(path) = crate::dialogs::pick_save_file_named(
+            &[("ORTEC .Clb", &["clb"])],
+            Some(&format!("{stem}.Clb")),
+        ) else {
+            return;
+        };
+        let bytes =
+            mantaray_formats::clb::write(&mantaray_formats::clb::Calibration { energy, shape });
+        match std::fs::write(&path, bytes) {
+            Ok(()) => self.status = format!("calibration saved to {}", path.display()),
+            Err(error) => self.status = format!("could not save the calibration: {error}"),
+        }
     }
 
     /// Puts a calibration from another file onto the active spectrum.
@@ -3203,6 +3298,7 @@ impl App {
                     ""
                 };
                 self.status = format!("calibration from {}: {described}{note}", path.display());
+                self.remember_active_calibration();
             }
             Err(error) => self.status = format!("could not read the file: {error}"),
         }
@@ -3922,6 +4018,77 @@ impl App {
         if let Some(spectrum) = self.active_spectrum_mut() {
             spectrum.energy_calibration = fit;
         }
+        self.remember_active_calibration();
+    }
+
+    /// Files the active detector window's calibration under its serial.
+    ///
+    /// Called wherever a calibration lands on or leaves a spectrum, so what
+    /// is remembered is always what is in force. Detector windows only: a
+    /// buffer's calibration is saved into its file, but a detector's mirror
+    /// is rebuilt at every connect, and this memory is what it is rebuilt
+    /// *from*. An instrument reporting no serial cannot be recognised at the
+    /// next connect, so nothing is filed for one.
+    fn remember_active_calibration(&mut self) {
+        let Some(index) = self.active else { return };
+        let Some(window) = self.windows.get(index) else {
+            return;
+        };
+        let Target::Detector(detector) = window.target else {
+            return;
+        };
+        let Some(mcb) = self.detectors.get(detector) else {
+            return;
+        };
+        let serial = mcb.identity().serial.trim().to_string();
+        if serial.is_empty() {
+            return;
+        }
+        let spectrum = mcb.spectrum();
+        let filed = spectrum
+            .energy_calibration
+            .as_ref()
+            .map(|calibration| RememberedCalibration {
+                serial: serial.clone(),
+                energy: calibration.coefficients,
+                units: calibration.units.clone(),
+                shape: spectrum.shape_calibration.map(|shape| shape.coefficients),
+            });
+        self.remembered_calibrations
+            .retain(|kept| kept.serial != serial);
+        // A destroyed calibration stays destroyed: the retain above has
+        // already forgotten it, and nothing new is filed.
+        self.remembered_calibrations.extend(filed);
+    }
+
+    /// Puts a remembered calibration back onto a freshly connected mirror.
+    ///
+    /// The operator's own calibration outranks whatever the connect road
+    /// reported: a `CAL` in a configuration file says what some tool wrote
+    /// once, and the remembered one says what the operator did since, on this
+    /// screen, to this instrument.
+    fn restore_remembered_calibration(&self, mcb: &mut dyn mantaray_device::Mcb) {
+        let serial = mcb.identity().serial.trim().to_string();
+        if serial.is_empty() {
+            return;
+        }
+        let Some(kept) = self
+            .remembered_calibrations
+            .iter()
+            .find(|kept| kept.serial == serial)
+        else {
+            return;
+        };
+        let spectrum = mcb.spectrum_mut();
+        spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::new(
+            kept.energy,
+            &kept.units,
+        ));
+        if let Some(shape) = kept.shape {
+            spectrum.shape_calibration = Some(mantaray_core::ShapeCalibration {
+                coefficients: shape,
+            });
+        }
     }
 
     /// Corrects a calibration point in place and applies the new fit.
@@ -3987,6 +4154,8 @@ impl App {
                         );
                         // On a courier, so a slow instrument slows nothing
                         // but its own numbers - never the frame.
+                        let mut remote = remote;
+                        self.restore_remembered_calibration(&mut remote);
                         remote.with_courier().into()
                     }
                     Err(error) => {
@@ -4078,6 +4247,8 @@ impl App {
                         }
                         // On a courier, so a slow instrument slows nothing
                         // but its own numbers - never the frame.
+                        let mut instrument = instrument;
+                        self.restore_remembered_calibration(&mut instrument);
                         instrument.with_courier().into()
                     }
                     Err(error) => {

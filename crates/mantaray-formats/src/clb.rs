@@ -121,6 +121,37 @@ pub fn read(bytes: &[u8]) -> Result<Calibration, FormatError> {
     })
 }
 
+/// Writes a `.Clb` file: the mirror of [`read`], carrying only what reading
+/// understands.
+///
+/// The samples are 1152 bytes and mostly zero, so that is what is written:
+/// zeros, the two 16-bit fields at `0x24` and `0x2c` that hold 3 in every
+/// sample read, and the six coefficients at `0x94`. The name, timestamp and
+/// path MAESTRO embeds near the end are not written - they were never read,
+/// and inventing Windows paths would be decoration pretending to be data.
+/// Whether MAESTRO itself accepts such a file has not been tried against a
+/// Windows installation; what is certain is that it round-trips through
+/// [`read`], which checks the same offsets against the same samples.
+///
+/// A calibration with no shape writes three zeros, which read back as no
+/// shape - the same rule reading applies, in the same direction.
+pub fn write(calibration: &Calibration) -> Vec<u8> {
+    let mut out = vec![0u8; EXPECTED_LENGTH];
+    for offset in [0x24usize, 0x2c] {
+        out[offset..offset + 2].copy_from_slice(&3u16.to_le_bytes());
+    }
+    let shape = calibration
+        .shape
+        .map(|shape| shape.coefficients)
+        .unwrap_or([0.0; 3]);
+    let terms = calibration.energy.coefficients.into_iter().chain(shape);
+    for (index, term) in terms.enumerate() {
+        let start = COEFFICIENTS + index * 4;
+        out[start..start + 4].copy_from_slice(&(term as f32).to_le_bytes());
+    }
+    out
+}
+
 /// Whether a file looks like a `.Clb`.
 ///
 /// Deliberately weak, because there is nothing strong to test: the format has
@@ -139,6 +170,39 @@ pub fn looks_like(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A written calibration reads back as itself, to the format's precision.
+    #[test]
+    fn a_written_calibration_round_trips() {
+        let out = write(&Calibration {
+            energy: EnergyCalibration {
+                coefficients: [19.1197, 0.420412, 3.060_48e-7],
+                units: "keV".into(),
+            },
+            shape: Some(ShapeCalibration {
+                coefficients: [4.5439, 0.001, 0.0],
+            }),
+        });
+        assert_eq!(out.len(), EXPECTED_LENGTH, "the samples' exact size");
+        assert!(looks_like(&out), "what was written must look like a .Clb");
+        let back = read(&out).expect("reads back");
+        assert!(same(back.energy.coefficients[0], 19.1197));
+        assert!(same(back.energy.coefficients[1], 0.420_412));
+        assert!(same(back.energy.coefficients[2], 3.060_48e-7));
+        let shape = back.shape.expect("the shape was written");
+        assert!(same(shape.coefficients[0], 4.5439));
+    }
+
+    /// No shape writes as zeros and reads back as no shape - not as a shape
+    /// that says every peak is infinitely narrow.
+    #[test]
+    fn no_shape_round_trips_as_no_shape() {
+        let out = write(&Calibration {
+            energy: EnergyCalibration::linear(0.5, 0.36),
+            shape: None,
+        });
+        assert_eq!(read(&out).expect("reads back").shape, None);
+    }
 
     /// A file of the shape the samples have, with chosen coefficients in it.
     fn sample(energy: [f32; 3], shape: [f32; 3]) -> Vec<u8> {
