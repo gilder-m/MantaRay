@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**The interface can say what it is waiting for (2026-08-12).** With
+`MANTARAY_DEBUG` set in the environment, an overlay reports the adapter,
+backend and driver the renderer actually chose, frames drawn in the last
+second, the gap before the newest frame, the CPU cost of building it and the
+worst such cost in the window, and the surface size - the facts a lag report
+needs and Task Manager cannot show. Numbers only, no verdict: only the person
+dragging the marker knows whether frames were being asked for. On the bench
+that prompted it, one photograph split "the machine is slow" into "the frame
+stood waiting on the instrument", which is what the courier below fixed.
+
 **One click of the wheel zooms by one step (2026-08-12).** The wheel took a
 full zoom step per *frame* rather than per notch, and egui smooths a single
 click across several frames - so one flick of the finger stacked five to ten
