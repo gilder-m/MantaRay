@@ -62,6 +62,11 @@ pub fn write_csv(library: &NuclideLibrary) -> String {
 /// Parses a CSV library.
 pub fn read_csv(text: &str) -> Result<NuclideLibrary, FormatError> {
     let mut library = NuclideLibrary::new("csv");
+    // Which nuclide each name landed at, so grouping a row with its nuclide
+    // is a lookup rather than a scan of every nuclide read so far - which
+    // made loading quadratic, tens of millions of name comparisons over a
+    // full evaluated export. Keyed lowercased, as `nuclide_mut` compares.
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut rows = 0usize;
     for (number, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -108,15 +113,18 @@ pub fn read_csv(text: &str) -> Result<NuclideLibrary, FormatError> {
         peak.key_line = truthy(fields.get(energy_index + 3));
         peak.not_in_average = truthy(fields.get(energy_index + 4));
 
-        match library.nuclide_mut(&name) {
-            Some(existing) => existing.peaks.push(peak),
-            None => library.push(Nuclide {
-                name,
-                half_life_seconds: half_life,
-                uncertainty_percent: uncertainty,
-                flags,
-                peaks: vec![peak],
-            }),
+        match at.get(&name.to_ascii_lowercase()) {
+            Some(&index) => library.nuclides[index].peaks.push(peak),
+            None => {
+                at.insert(name.to_ascii_lowercase(), library.len());
+                library.push(Nuclide {
+                    name,
+                    half_life_seconds: half_life,
+                    uncertainty_percent: uncertainty,
+                    flags,
+                    peaks: vec![peak],
+                });
+            }
         }
         rows += 1;
     }
@@ -367,12 +375,17 @@ pub fn save(library: &NuclideLibrary, path: impl AsRef<Path>) -> Result<(), Form
 pub fn load(path: impl AsRef<Path>) -> Result<NuclideLibrary, FormatError> {
     let path = path.as_ref();
     let bytes = std::fs::read(path)?;
-    let text = || String::from_utf8_lossy(&bytes).into_owned();
+    let text = || String::from_utf8_lossy(&bytes);
     let mut library = match extension(path).as_str() {
         "csv" | "txt" => read_csv(&text())?,
         "json" => read_json(&text())?,
         "lib" if is_ortec_binary(&bytes) => read_ortec(&bytes)?,
-        "lib" => read_json(&text()).or_else(|_| read_csv(&text()))?,
+        "lib" => {
+            // Decoded once for both attempts - the fallback used to copy the
+            // whole file a second time just to try it as CSV.
+            let text = text();
+            read_json(&text).or_else(|_| read_csv(&text))?
+        }
         other => {
             return Err(FormatError::Unsupported {
                 detail: format!("library format .{other} (use .json or .csv)"),
