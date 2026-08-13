@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**One click of the wheel zooms by one step (2026-08-12).** The wheel took a
+full zoom step per *frame* rather than per notch, and egui smooths a single
+click across several frames - so one flick of the finger stacked five to ten
+steps and the view lunged by 3.6× or more. Wheel zoom is now proportional to
+the scroll distance: a notch works out to exactly the keyboard's 1.2× step, a
+trackpad glides through the same curve, and a pinch passes its own scale
+through instead of being rounded to whole steps. No single frame can move the
+view by more than a factor of two, however hard a free-spinning wheel is flung.
+
 ## 0.2.2-alpha (2026-08-12)
 
 **A count already running when the window opens keeps its start date

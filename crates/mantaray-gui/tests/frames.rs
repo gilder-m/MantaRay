@@ -816,7 +816,7 @@ fn monkey_round(seed: u64) {
         let action = match value % 43 {
             0 => Action::Marker(channel),
             1 => Action::ZoomTo(channel, (value % 12_000) as usize),
-            2 => Action::ZoomAbout(channel, if value & 1 == 0 { 1 } else { -1 }),
+            2 => Action::ZoomAbout(channel, if value & 1 == 0 { 0.8 } else { 1.25 }),
             3 => Action::ZoomIn,
             4 => Action::ZoomOut,
             5 => Action::GotoEnergy(match value % 5 {
