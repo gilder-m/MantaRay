@@ -609,3 +609,107 @@ fn clearing_lets_the_next_start_through_a_preset_that_was_reached() {
         .expect("after clearing, the preset is no longer reached");
     assert!(remote.is_active());
 }
+
+/// A transport whose fetches wait at a gate the test holds shut.
+///
+/// The connection handshake answers immediately, like any instrument; after
+/// it, every `SHOW_STATUS` stands at the gate until the test lets it through.
+/// This is the slow instrument from the bench, distilled: the 325 ms it took
+/// to answer becomes "as long as the test likes".
+struct Sluggish {
+    handshake: std::collections::VecDeque<(&'static str, &'static str)>,
+    gate: std::sync::mpsc::Receiver<()>,
+}
+
+impl mantaray_device::Transport for Sluggish {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        if let Some((expected, reply)) = self.handshake.pop_front() {
+            assert_eq!(command, expected, "the handshake is out of order");
+            return Ok(reply.to_string());
+        }
+        Ok(match command {
+            "SHOW_STATUS" => {
+                // The instrument taking its time, for exactly as long as the
+                // test wants it to.
+                self.gate.recv().expect("the test holds the gate's sender");
+                "RT=9.00 LT=8.00 DT=1.0% ICR=0 ACTIVE=1 TOTAL=8".to_string()
+            }
+            "SHOW_DATA" => "DATA 4 2 2 2 2".to_string(),
+            _ => "OK".to_string(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "sluggish".to_string()
+    }
+}
+
+/// Behind a courier, a poll returns before a slow instrument answers.
+///
+/// This is the Dell bench finding, pinned: a fetch took 325 ms on the
+/// instrument's side and ran on the interface's thread, so every other frame
+/// froze for a third of a second. With the fetch in a courier's hands the
+/// poll must come back at once - here, while the instrument is still standing
+/// at a gate that has not opened - and the numbers arrive on a later poll,
+/// once the instrument has actually answered.
+#[test]
+fn a_poll_over_a_courier_returns_before_a_slow_instrument_answers() {
+    let (open_gate, gate) = std::sync::mpsc::channel();
+    let transport = Sluggish {
+        handshake: [
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=SLOW-1 SERIAL=1 FIRMWARE=v1 CHANNELS=4",
+            ),
+            (
+                "SHOW_STATUS",
+                "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=0",
+            ),
+            ("SHOW_DATA", "DATA 4 0 0 0 0"),
+            ("SHOW_PRESETS", "PRESETS REAL=0 LIVE=0 PEAK=0 INTEG=0"),
+        ]
+        .into_iter()
+        .collect(),
+        gate,
+    };
+    let mut remote = RemoteMcb::connect(Box::new(transport), 1, "SLOW")
+        .expect("connect")
+        .with_courier();
+
+    // The first poll past the interval asks for a fetch. The instrument now
+    // stands at the gate - and the poll has already returned, which under the
+    // old arrangement is exactly what could not happen.
+    remote.poll(1.0).expect("poll");
+    assert_eq!(
+        remote.status().total_counts,
+        0,
+        "nothing can have arrived: the instrument has not answered yet"
+    );
+
+    // Further polls keep coming back without waiting, and without piling a
+    // queue of fetches behind the one still standing at the gate.
+    for _ in 0..3 {
+        remote.poll(1.0).expect("poll while the instrument dawdles");
+    }
+    assert_eq!(remote.status().total_counts, 0);
+
+    // Let the instrument answer, and the numbers arrive on a later poll.
+    open_gate.send(()).expect("open the gate");
+    let arrived = std::time::Instant::now();
+    loop {
+        remote.poll(0.0).expect("poll");
+        if remote.status().total_counts == 8 {
+            break;
+        }
+        assert!(
+            arrived.elapsed() < Duration::from_secs(5),
+            "the released fetch never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(remote.spectrum().channels, vec![2, 2, 2, 2]);
+    assert!((remote.status().real_time - 9.0).abs() < 1e-9);
+
+    // Commands still round-trip through the same line, in order.
+    remote.stop().expect("STOP answers over the courier");
+}

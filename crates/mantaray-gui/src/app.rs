@@ -3879,7 +3879,9 @@ impl App {
                             address,
                             remote.identity().channels
                         );
-                        remote.into()
+                        // On a courier, so a slow instrument slows nothing
+                        // but its own numbers - never the frame.
+                        remote.with_courier().into()
                     }
                     Err(error) => {
                         self.status = format!("{error}");
@@ -3947,7 +3949,9 @@ impl App {
                         if remembered.is_empty() && !reported.is_empty() {
                             self.remember_serial(entry.number, &reported);
                         }
-                        instrument.into()
+                        // On a courier, so a slow instrument slows nothing
+                        // but its own numbers - never the frame.
+                        instrument.with_courier().into()
                     }
                     Err(error) => {
                         self.status = format!("{error}");
