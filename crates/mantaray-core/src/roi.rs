@@ -102,21 +102,18 @@ impl RoiSet {
 
     /// Marks a region, merging it with any regions it overlaps.
     pub fn mark(&mut self, roi: Roi) {
-        let mut merged = roi;
-        let mut kept: Vec<Roi> = Vec::with_capacity(self.rois.len() + 1);
-        for existing in self.rois.drain(..) {
-            if existing.overlaps(&merged) {
-                merged = Roi::new(
-                    merged.start.min(existing.start),
-                    merged.end.max(existing.end),
-                );
-            } else {
-                kept.push(existing);
-            }
-        }
-        kept.push(merged);
-        kept.sort();
-        self.rois = kept;
+        // The set is kept sorted, so whatever the new region overlaps sits in
+        // one contiguous run: everything before `first` ends before it starts,
+        // everything from `past` on starts after it ends. Splicing the merged
+        // region over that run keeps the order without rebuilding the set -
+        // marking peak by peak used to rebuild and re-sort the whole set per
+        // peak.
+        let first = self.rois.partition_point(|r| r.end < roi.start);
+        let past = self.rois.partition_point(|r| r.start <= roi.end);
+        let merged = self.rois[first..past]
+            .iter()
+            .fold(roi, |m, r| Roi::new(m.start.min(r.start), m.end.max(r.end)));
+        self.rois.splice(first..past, std::iter::once(merged));
     }
 
     /// Unmarks a channel range, trimming or splitting regions as needed.
