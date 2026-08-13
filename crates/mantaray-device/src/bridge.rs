@@ -161,6 +161,19 @@ impl BridgeTransport {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Closes the helper's input, which is how it is told to finish now.
+    ///
+    /// For standing the hub down while another bridge process runs: a probe
+    /// against a live hub is two processes in transaction with one driver,
+    /// which is the exact contention the hub exists to prevent. Lanes still
+    /// holding this line keep their handles; their exchanges answer "the
+    /// bridge is closed" from here on, which is the truth.
+    pub fn park(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            drop(writer);
+        }
+    }
+
     /// The same, naming the adapter to open rather than trusting its position.
     ///
     /// Away from ORTEC's configured detector numbers, `serve N` means the Nth

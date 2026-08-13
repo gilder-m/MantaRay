@@ -3733,6 +3733,22 @@ impl App {
 
     /// Runs the bridge and returns what it printed.
     fn run_bridge(&mut self, arguments: &[&str]) -> Result<String, String> {
+        // The hub is stood down first. Probe and configure are their own
+        // processes, and running one against a live hub is two processes in
+        // transaction with one driver - the exact contention the hub exists
+        // to prevent, felt on the bench as scans crawling through driver
+        // timeouts. Open lanes die with it and say so, which is honest: a
+        // scan is rebuilding the world those lanes lived in. The next local
+        // connect starts a fresh hub.
+        if let Some(line) = self.local_bridge.take() {
+            line.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .park();
+            if mantaray_device::journal::on() {
+                mantaray_device::journal::line("scan: the hub stood down while other bridges run");
+            }
+        }
+        let started = Instant::now();
         let executable = mantaray_device::BridgeTransport::find_executable().ok_or_else(|| {
             format!(
                 "{} is not beside mantaray - the bridge to instruments is missing",
@@ -3749,6 +3765,16 @@ impl App {
         let output = command
             .output()
             .map_err(|error| format!("could not run the bridge: {error}"))?;
+        // The scan was the one slow thing the first bench journals could not
+        // see - it happened in processes that wrote nothing. Its duration is
+        // the measurement a "scanning is slow here" report needs.
+        if mantaray_device::journal::on() {
+            mantaray_device::journal::line(&format!(
+                "scan: `{}` finished in {:.2}s",
+                arguments.join(" "),
+                started.elapsed().as_secs_f64()
+            ));
+        }
         Ok(format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),

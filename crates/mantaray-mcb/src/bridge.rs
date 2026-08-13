@@ -342,6 +342,7 @@ fn open_usb_instrument(arguments: &mut Vec<String>) -> Result<serve::ViaUsb, Str
 /// instrument again - and ORTEC's library, loaded once and shared, routes by
 /// its own detector number for everything the USB road does not reach.
 fn serve_hub(directory: Option<&str>) -> Result<(), String> {
+    let loading = std::time::Instant::now();
     let library = match Umcbi::load(directory) {
         Ok(library) => match library.open() {
             Ok(()) => Some(library),
@@ -355,6 +356,17 @@ fn serve_hub(directory: Option<&str>) -> Result<(), String> {
             None
         }
     };
+    if crate::journal::on() {
+        crate::journal::line(&format!(
+            "hub: ORTEC's library {} in {:.2}s",
+            if library.is_some() {
+                "loaded"
+            } else {
+                "not loaded"
+            },
+            loading.elapsed().as_secs_f64()
+        ));
+    }
     // The handles the opener takes out, so they can be closed when the pipe
     // does; the sessions holding them are gone by then.
     let opened = std::cell::RefCell::new(Vec::new());
@@ -380,20 +392,35 @@ fn open_hub_detector<'a>(
     library: Option<&'a Umcbi>,
     opened: &std::cell::RefCell<Vec<umcbi::Hdet>>,
 ) -> Result<Box<dyn serve::Instrument + 'a>, String> {
+    // Each step timed into the journal: opening is where a slow bench spends
+    // its time, and it is invisible from the application's side - the mirror
+    // that would write fetch lines does not exist yet.
+    let started = std::time::Instant::now();
     match usb_by_position(number) {
         Ok(instrument) => {
-            eprintln!(
-                "hub: detector {number} over USB: {}",
-                serve::Instrument::route(&instrument)
-            );
+            let road = serve::Instrument::route(&instrument);
+            eprintln!("hub: detector {number} over USB: {road}");
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "hub: detector {number} over USB in {:.2}s: {road}",
+                    started.elapsed().as_secs_f64()
+                ));
+            }
             return Ok(Box::new(instrument));
         }
         Err(error) => {
             eprintln!("hub: detector {number} not over USB ({error}); trying ORTEC's library");
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "hub: detector {number} not over USB after {:.2}s ({error})",
+                    started.elapsed().as_secs_f64()
+                ));
+            }
         }
     }
     let library = library
         .ok_or_else(|| "not reachable over USB, and ORTEC's library is not loaded".to_string())?;
+    let fallback = std::time::Instant::now();
     let handle = library.open_detector(number)?;
     opened.borrow_mut().push(handle);
     eprintln!(
@@ -401,6 +428,13 @@ fn open_hub_detector<'a>(
         library.model(handle),
         library.length(handle)
     );
+    if crate::journal::on() {
+        crate::journal::line(&format!(
+            "hub: detector {number} through ORTEC's library in {:.2}s ({:.2}s all told)",
+            fallback.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64()
+        ));
+    }
     Ok(Box::new(serve::ViaUmcbi {
         library,
         detector: handle,

@@ -101,7 +101,17 @@ impl RemoteMcb {
         name: &str,
         expected_serial: Option<&str>,
     ) -> Result<Self, DeviceError> {
+        // Timed into the journal, because connecting is the slow thing a
+        // journal of the connected life cannot see: everything here runs
+        // before the mirror exists to write fetch lines.
+        let started = std::time::Instant::now();
         let configuration = checked(transport.exchange("SHOW_CONFIGURATION")?)?;
+        if crate::journal::on() {
+            crate::journal::line(&format!(
+                "connect d{number}: SHOW_CONFIGURATION answered in {:.2}s",
+                started.elapsed().as_secs_f64()
+            ));
+        }
         let field = |key: &str| -> Option<String> {
             configuration.split_whitespace().find_map(|word| {
                 word.strip_prefix(key)
@@ -120,6 +130,14 @@ impl RemoteMcb {
             && !reported.trim().is_empty()
             && !expected.trim().eq_ignore_ascii_case(reported.trim())
         {
+            // Refusals go in the journal by their reason: a connect that
+            // silently fails and is clicked again reads, in a journal without
+            // this line, as nine unexplained seconds between two handshakes.
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "connect d{number}: refused - reports {reported:?}, expected {expected:?}"
+                ));
+            }
             return Err(DeviceError::Connection {
                 address: transport.peer(),
                 detail: format!(
@@ -174,6 +192,15 @@ impl RemoteMcb {
         };
         remote.refresh()?;
         remote.read_presets();
+        if crate::journal::on() {
+            crate::journal::line(&format!(
+                "connect d{number}: {} serial={:?} {} channels, ready in {:.2}s",
+                remote.identity.model,
+                remote.identity.serial,
+                remote.identity.channels,
+                started.elapsed().as_secs_f64()
+            ));
+        }
         Ok(remote)
     }
 

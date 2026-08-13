@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**A scan stands the hub down first, and the slow parts of connecting are on
+the record (2026-08-13).** Probe and configure are their own processes, and
+running one against a live hub is two processes in transaction with one
+driver - the contention the hub exists to prevent, felt as scans crawling
+through driver timeouts. The hub is parked before any of them runs; open
+lanes say the bridge closed, which is the truth, and the next connect starts
+a fresh hub. And because the first bench journals could not see where a slow
+scan or a slow connect spent its time - all of it ran before anything that
+writes fetch lines existed - the journal now times the scan itself, every
+phase of connecting including a refusal and its reason, and each step of the
+hub opening a detector, road by road.
+
 **Every local detector on Windows shares one bridge process - the hub
 (2026-08-13).** The application ran a bridge process per detector entry, and
 `serve N` took a lone adapter as the one meant whatever N said - so ORTEC's
