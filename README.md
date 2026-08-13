@@ -1,4 +1,4 @@
-# Written with AI but it works I swear!
+*[AI was used in this project](#how-this-was-built)*
 
 ---
 
