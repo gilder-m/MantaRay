@@ -135,6 +135,11 @@ pub fn read(bytes: &[u8]) -> Result<Calibration, FormatError> {
 ///
 /// A calibration with no shape writes three zeros, which read back as no
 /// shape - the same rule reading applies, in the same direction.
+///
+/// The format stores no units and [`read`] assumes keV, so the coefficients
+/// given here must already be in keV: a caller holding anything else must
+/// refuse or convert *before* writing, because a file of MeV coefficients
+/// reads back a thousand times wrong with nothing to say so.
 pub fn write(calibration: &Calibration) -> Vec<u8> {
     let mut out = vec![0u8; EXPECTED_LENGTH];
     for offset in [0x24usize, 0x2c] {

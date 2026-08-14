@@ -3225,6 +3225,20 @@ impl App {
             self.status = "the active spectrum has no calibration to save".into();
             return;
         };
+        // A .Clb carries no units: MAESTRO writes keV and reading assumes it.
+        // The units here are a free-text field, so a calibration held in
+        // anything else would come back rescaled - a MeV gain read as keV is
+        // wrong by a thousand, silently, which is the one mistake a
+        // calibration file must never make. Refused by name rather than
+        // converted by guesswork over free text.
+        if !energy.units.eq_ignore_ascii_case("kev") {
+            self.status = format!(
+                "a .Clb carries keV, and this calibration is in {:?} - recalibrate in keV to \
+                 save it as one",
+                energy.units
+            );
+            return;
+        }
         let shape = spectrum.shape_calibration;
         let stem = self
             .active

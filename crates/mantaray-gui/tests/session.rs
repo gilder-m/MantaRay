@@ -2215,3 +2215,27 @@ fn a_detector_calibration_comes_back_at_the_next_connect() {
     );
     assert!((calibration.coefficients[0]).abs() < 1e-9);
 }
+
+/// A calibration held in anything but keV is refused a `.Clb`, by name.
+///
+/// The format stores no units and reading assumes keV, so writing a MeV
+/// calibration would come back a thousand times wrong with nothing to say
+/// so. The units are a free-text field, so this cannot be converted away -
+/// only refused, before the save dialog is ever reached, which is also what
+/// lets this test run headless.
+#[test]
+fn a_calibration_not_in_kev_is_refused_a_clb_file() {
+    let mut app = App::headless();
+    let mut spectrum = spectrum_with_counts();
+    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::new(
+        [0.0, 0.001, 0.0],
+        "MeV",
+    ));
+    app.open_buffer("mev.Spe".into(), spectrum, None);
+    app.apply_action(Action::SaveCalibration);
+    assert!(
+        app.status.contains("keV") && app.status.contains("MeV"),
+        "the refusal names both units: {}",
+        app.status
+    );
+}
