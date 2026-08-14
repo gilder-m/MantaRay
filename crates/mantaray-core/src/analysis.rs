@@ -367,234 +367,52 @@ pub struct FoundPeak {
     pub centroid: f64,
     /// Measured full width at half maximum, in channels.
     pub width: f64,
-    /// Significance of the second-difference response (how many weighted errors).
+    /// Signal-to-noise of the matched-filter response, in Poisson sigmas.
     pub significance: f64,
     /// Rough net area above the local baseline.
     pub net_estimate: f64,
 }
 
-/// Kernel scales (in channels) scanned by the peak search.
+/// Matched-filter peak search.
 ///
-/// The geometric ladder covers everything from a one-channel spike to the very
-/// broad peaks of a scintillator (a NaI(Tl) line can be 100 channels wide),
-/// which a single fixed width cannot.
-const SEARCH_SCALES: [f64; 9] = [1.0, 1.5, 2.25, 3.375, 5.0, 7.5, 11.25, 17.0, 25.5];
-
-/// Mariscotti-style peak search.
+/// One zero-sum kernel whose width follows the detector's resolution is laid
+/// over every channel; a peak is a local maximum of the resulting
+/// signal-to-noise map that also passes a width gate. The method is
+/// Becquerel's peak finder, reimplemented in the `matched` module, where its
+/// provenance and this program's departures from it are written down. It
+/// replaced a nine-scale second-difference ladder that had no idea what a
+/// peak *should* look like at a given channel - on the bench Cs-137 spectrum
+/// that decided the matter, the ladder reported twenty-four peaks of which
+/// about half were one-channel statistical spikes; the matched filter
+/// reported the seven that are physics.
 ///
-/// For every scale the spectrum is convolved with a zero-sum second-difference
-/// kernel; a peak is reported where the response exceeds the sensitivity factor
-/// times its own weighted error over at least two adjacent channels. Detections
-/// from the different scales are then merged, keeping the most significant.
+/// The width at each channel comes from the spectrum's own shape calibration
+/// when it holds a usable one, and is otherwise learned from the spectrum
+/// itself by a bootstrap pass. The sensitivity setting is the signal-to-noise
+/// a peak must reach - the same Poisson sigmas the ladder thresholded on, so
+/// the dial keeps its meaning.
 pub fn peak_search(spectrum: &Spectrum, settings: &CalculationSettings) -> Vec<FoundPeak> {
     let data = spectrum.as_f64();
-    if data.len() < 9 {
+    if data.len() < 16 {
         return Vec::new();
     }
-    let threshold = settings.sensitivity.clamp(
+    let min_snr = settings.sensitivity.clamp(
         CalculationSettings::MIN_SENSITIVITY,
         CalculationSettings::MAX_SENSITIVITY,
     ) as f64;
-
-    // With a peak-shape calibration in hand, a candidate whose measured width
-    // disagrees wildly with the calibrated resolution is not a gamma peak:
-    // narrow spikes are electronic artefacts (real files end with them at the
-    // top of the ADC range) and very wide ones are continuum structure.
-    let shape = spectrum.shape_calibration.filter(|shape| shape.is_usable());
-
-    let mut candidates: Vec<FoundPeak> = Vec::new();
-    // One response buffer and one squared-kernel scratch for all nine scales;
-    // this used to allocate a spectrum-sized buffer per scale.
-    let mut significance = Vec::new();
-    let mut squares = Vec::new();
-    for sigma in SEARCH_SCALES {
-        let kernel = second_difference_kernel(sigma);
-        let half = kernel.len() / 2;
-        if data.len() <= 2 * half + 2 {
-            continue;
-        }
-        squares.clear();
-        squares.extend(kernel.iter().map(|k| k * k));
-        response(&data, &kernel, &squares, half, &mut significance);
-
-        let mut index = half;
-        while index < data.len() - half {
-            if significance[index] <= threshold {
-                index += 1;
-                continue;
-            }
-            let start = index;
-            while index < data.len() - half && significance[index] > threshold {
-                index += 1;
-            }
-            let end = index - 1;
-            if end - start + 1 < 2 {
-                continue;
-            }
-            let apex = (start..=end)
-                .max_by(|a, b| {
-                    significance[*a]
-                        .partial_cmp(&significance[*b])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or(start);
-            if let Some(peak) = describe_peak(&data, apex, sigma, significance[apex])
-                && shape_consistent(shape.as_ref(), &peak)
-            {
-                candidates.push(peak);
-            }
-        }
-    }
-    merge_candidates(candidates)
-}
-
-/// Narrowest fraction of the calibrated FWHM a real peak may measure.
-///
-/// Deliberately generous: real files often carry a *constant* shape calibration
-/// fitted at high energy, so a genuine low-energy peak can be far narrower than
-/// it predicts. In one of the test fixtures the shape calibration says 11.4
-/// channels everywhere while the 59.5 keV americium peak is a clean 3.3 channels
-/// wide. Only spikes an order of magnitude too narrow are rejected.
-const MIN_WIDTH_FRACTION: f64 = 0.2;
-/// Widest multiple of the calibrated FWHM a real peak may measure.
-///
-/// A peak cannot be much broader than the detector resolution; anything that is
-/// belongs to the continuum (escape structure, Compton edges).
-const MAX_WIDTH_FACTOR: f64 = 3.0;
-
-/// True when a candidate's measured width agrees with the shape calibration, or
-/// when there is no shape calibration to judge it by.
-fn shape_consistent(
-    shape: Option<&crate::calibration::ShapeCalibration>,
-    peak: &FoundPeak,
-) -> bool {
-    let Some(shape) = shape else {
-        return true;
+    let Some(widths) = crate::matched::widths_for(spectrum, &data, min_snr.min(3.0)) else {
+        return Vec::new();
     };
-    let expected = shape.fwhm(peak.centroid);
-    if expected <= 0.0 {
-        return true;
-    }
-    let ratio = peak.width / expected;
-    (MIN_WIDTH_FRACTION..=MAX_WIDTH_FACTOR).contains(&ratio)
-}
-
-/// Zero-sum discrete second-difference kernel of width `sigma`.
-///
-/// `k(j) = (1 - j^2/sigma^2) * exp(-j^2 / 2 sigma^2)`, shifted so the
-/// coefficients sum to exactly zero: a flat or linear background gives no
-/// response at all.
-fn second_difference_kernel(sigma: f64) -> Vec<f64> {
-    let half = (3.0 * sigma).ceil().max(1.0) as isize;
-    let mut kernel: Vec<f64> = (-half..=half)
-        .map(|j| {
-            let x = j as f64 / sigma;
-            (1.0 - x * x) * (-0.5 * x * x).exp()
+    crate::matched::find(&data, &widths, min_snr, crate::matched::width_gate(), 40)
+        .into_iter()
+        .map(|found| FoundPeak {
+            channel: found.centroid.round().max(0.0) as usize,
+            centroid: found.centroid,
+            width: found.fwhm,
+            significance: found.snr,
+            net_estimate: found.area,
         })
-        .collect();
-    let mean = kernel.iter().sum::<f64>() / kernel.len() as f64;
-    kernel.iter_mut().for_each(|k| *k -= mean);
-    kernel
-}
-
-/// Response of the kernel divided by its weighted (Poisson) error.
-///
-/// `squares` is the kernel's coefficients squared, computed once per scale
-/// rather than once per tap - the variance sum is the same taps again, and
-/// squaring inside the inner loop doubled its multiplies. Written into `out`
-/// so the caller can keep one buffer across scales.
-fn response(data: &[f64], kernel: &[f64], squares: &[f64], half: usize, out: &mut Vec<f64>) {
-    out.clear();
-    out.resize(data.len(), 0.0);
-    for index in half..data.len().saturating_sub(half) {
-        let window = &data[index - half..=index + half];
-        let mut sum = 0.0;
-        let mut variance = 0.0;
-        for ((value, k), k2) in window.iter().zip(kernel).zip(squares) {
-            sum += k * value;
-            variance += k2 * value.max(1.0);
-        }
-        out[index] = if variance > 0.0 {
-            sum / variance.sqrt()
-        } else {
-            0.0
-        };
-    }
-}
-
-/// Measures centroid, width and rough area around a detected apex.
-fn describe_peak(data: &[f64], apex: usize, sigma: f64, significance: f64) -> Option<FoundPeak> {
-    let reach = (2.0 * sigma).ceil().max(2.0) as usize;
-    let start = apex.saturating_sub(reach);
-    let end = (apex + reach).min(data.len() - 1);
-    if end <= start + 2 {
-        return None;
-    }
-    // Local baseline: a line between the mean of the two channels at each edge.
-    let y_low = (data[start] + data[start + 1]) / 2.0;
-    let y_high = (data[end] + data[end - 1]) / 2.0;
-    let x_low = start as f64 + 0.5;
-    let x_high = end as f64 - 0.5;
-    let slope = (y_high - y_low) / (x_high - x_low);
-    let net: Vec<f64> = (start..=end)
-        .map(|channel| data[channel] - (y_low + slope * (channel as f64 - x_low)))
-        .collect();
-
-    let local_apex = net
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(index, _)| index)?;
-    let max_net = net[local_apex];
-    if max_net <= 0.0 {
-        return None;
-    }
-    let mut width = width_at_level(&net, local_apex, max_net / 2.0);
-    if width <= 0.0 {
-        width = FWHM_PER_SIGMA * sigma;
-    }
-    let centroid = fit_gaussian(&net, start)
-        .map(|fit| fit.centroid)
-        .or_else(|| moment_centroid(&net, start))
-        .unwrap_or((start + local_apex) as f64);
-    let net_estimate = net.iter().filter(|v| **v > 0.0).sum();
-
-    Some(FoundPeak {
-        channel: start + local_apex,
-        centroid,
-        width,
-        significance,
-        net_estimate,
-    })
-}
-
-/// Keeps the most significant detection of each peak across scales.
-fn merge_candidates(mut candidates: Vec<FoundPeak>) -> Vec<FoundPeak> {
-    candidates.sort_by(|a, b| {
-        a.centroid
-            .partial_cmp(&b.centroid)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut merged: Vec<FoundPeak> = Vec::new();
-    for candidate in candidates {
-        match merged.last_mut() {
-            Some(previous)
-                if (candidate.centroid - previous.centroid).abs()
-                    <= previous.width.max(candidate.width).max(1.0) =>
-            {
-                if candidate.significance > previous.significance {
-                    *previous = candidate;
-                }
-            }
-            _ => merged.push(candidate),
-        }
-    }
-    merged.sort_by(|a, b| {
-        a.centroid
-            .partial_cmp(&b.centroid)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    merged
+        .collect()
 }
 
 /// Runs a peak search and marks every peak found as a region of interest.
@@ -745,16 +563,6 @@ pub fn mda_currie(
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_search_kernel_sums_to_zero() {
-        for sigma in SEARCH_SCALES {
-            let kernel = second_difference_kernel(sigma);
-            let sum: f64 = kernel.iter().sum();
-            assert!(sum.abs() < 1e-12, "sigma {sigma}: sum {sum}");
-            assert!(kernel.len() % 2 == 1, "kernel must be centred");
-        }
-    }
-
     /// A Gaussian on a small pedestal, as a net-counts slice.
     fn gaussian_net(amplitude: f64, centre: f64, sigma: f64, length: usize) -> Vec<f64> {
         (0..length)
@@ -804,30 +612,5 @@ mod tests {
             "the width was read off the noise: {}",
             fit.sigma
         );
-    }
-
-    /// The squared coefficients `response` expects beside a kernel.
-    fn squared(kernel: &[f64]) -> Vec<f64> {
-        kernel.iter().map(|k| k * k).collect()
-    }
-
-    #[test]
-    fn a_flat_background_gives_no_response() {
-        let data = vec![250.0; 64];
-        let kernel = second_difference_kernel(2.0);
-        let half = kernel.len() / 2;
-        let mut z = Vec::new();
-        response(&data, &kernel, &squared(&kernel), half, &mut z);
-        assert!(z[32].abs() < 1e-9, "got {}", z[32]);
-    }
-
-    #[test]
-    fn a_sloping_background_gives_no_response() {
-        let data: Vec<f64> = (0..64).map(|c| 500.0 - 3.0 * c as f64).collect();
-        let kernel = second_difference_kernel(2.0);
-        let half = kernel.len() / 2;
-        let mut z = Vec::new();
-        response(&data, &kernel, &squared(&kernel), half, &mut z);
-        assert!(z[32].abs() < 1e-6, "got {}", z[32]);
     }
 }

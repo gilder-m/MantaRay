@@ -250,7 +250,11 @@ make them reachable:
 - **Dani Solakian** and the Berkeley
   **[RadWatch](https://gitlab.com/radwatch/spectral-analysis)**
   `spectral-analysis` project, whose compiled NNDC gamma database MantaRay's
-  library builder is designed around, used here with permission.
+  library builder is designed around, used here with permission;
+- the **[Becquerel](https://github.com/lbl-anp/becquerel)** project from the
+  Lawrence Berkeley National Laboratory Applied Nuclear Physics group, whose
+  resolution-matched peak-finding method MantaRay's peak search reimplements
+  in Rust, used here with the maintainers' permission (BSD-3).
 
 **Standing on.** [egui and eframe](https://github.com/emilk/egui) for the
 interface, [nusb](https://github.com/kevinmehall/nusb) for USB without a vendor

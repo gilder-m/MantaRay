@@ -9,7 +9,7 @@
 //! | ROI background / areas / uncertainty | §4.3.5.1 equations (17)-(21) |
 //! | Counting activity `cA` | §4.3.5.1 equation (22) |
 //! | Five-point binomial smoothing | §4.3.8 equation (23) |
-//! | Peak search | §4.3.4 (Mariscotti-style second difference) |
+//! | Peak search | §4.3.4's role, by Becquerel's matched-filter method |
 //! | Energy calibration | §4.3.2 (2 points linear, 3+ quadratic, max 96) |
 //!
 //! Channels are zero-based everywhere in this crate.
@@ -24,6 +24,7 @@ pub mod efficiency;
 pub mod elements;
 pub mod error;
 pub mod library;
+mod matched;
 pub mod qa;
 pub mod quant;
 pub mod roi;

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**The peak search knows what a peak should look like (2026-08-13).** Peak
+search is now Becquerel's resolution-matched filter - the method of the
+Lawrence Berkeley National Laboratory Applied Nuclear Physics group's
+[becquerel](https://github.com/lbl-anp/becquerel) package, reimplemented in
+Rust with the maintainers' permission and our thanks. One zero-sum kernel
+whose width follows the detector's own resolution replaces the nine-scale
+second-difference ladder: a one-channel spike where real peaks run fifty
+channels wide scores nothing against a fifty-channel kernel, so the narrow
+statistical spikes the ladder kept reporting are structurally impossible
+rather than merely thresholded. The width comes from the spectrum's shape
+calibration when it holds one; otherwise the spectrum teaches itself its own
+width law from a trial-ladder bootstrap whose per-peak widths are measured
+directly off the counts, each side of a peak judged against its own floor.
+
+Proven on the bench detector's HPGe spectra: Ba-133's five signature lines
+to within half a keV plus its sub-percent 160.6 and 223.2 keV lines, Co-60's
+pair, and all eleven canonical Eu-152 lines with every additional detection
+mapping to a real weak Eu line - including 1085.9 and 1089.7 keV resolved as
+neighbours. The sensitivity dial keeps its meaning: it is the signal-to-noise
+a peak must reach, in the same Poisson sigmas as before. Known blemish,
+recorded honestly: on a background spectrum's nearly empty tail the
+self-taught law can pass a few sparse-count artefacts; a shape calibration
+removes them.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a

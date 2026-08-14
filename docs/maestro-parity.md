@@ -68,7 +68,7 @@ implemented, with the reason.
 | Calibration, 2 points linear, 3+ quadratic, up to 96 | 4.3.2 | yes | with residuals and Destroy Calibration |
 | Calibration units, up to four characters | 4.3.2 | yes | |
 | List Data Range | 4.3.3 | yes | start, duration, Increment, Restore |
-| Peak Search | 4.3.4 | yes | multi-scale Mariscotti, sensitivity 1-5 |
+| Peak Search | 4.3.4 | yes | resolution-matched filter (Becquerel's method), sensitivity 1-5 |
 | Peak Info | 4.3.5 | yes | equations 17-21, with a Gaussian fit and library match |
 | Input Count Rate | 4.3.6 | yes | |
 | Sum | 4.3.7 | yes | selection, region or whole spectrum |

@@ -5197,8 +5197,8 @@ fn about_dialog(app: &mut App, ctx: &egui::Context) {
         ui.separator();
         ui.label(
             "Analysis follows the published MAESTRO behaviour: equations 17-21 for peak areas, \
-             equation 22 for counting activity, equation 23 for smoothing, and a Mariscotti peak \
-             search.",
+             equation 22 for counting activity, equation 23 for smoothing. Peak search is \
+             Becquerel's resolution-matched filter (LBNL, used with permission).",
         );
         ui.label("Reads and writes .Chn, .Spc, .Spe, .Roi, ASCII and its own JSON format.");
         ui.label(

@@ -1589,8 +1589,16 @@ fn decay_corrections_change_the_reported_activity_when_asked() {
     for channel in 0..512 {
         spectrum.channels[channel] = 20;
     }
-    for offset in -5i64..=5 {
-        spectrum.channels[(140 + offset) as usize] += 2000;
+    // A Gaussian line, not the flat-topped block an earlier version drew:
+    // the matched-filter search rejects an eleven-channel rectangle for the
+    // same reason it rejects a Compton edge - nothing physical has that
+    // shape - and this test is about decay arithmetic, not shape tolerance.
+    let sigma = 3.0f64;
+    for channel in 0..512usize {
+        let z = (channel as f64 - 140.0) / sigma;
+        let gaussian =
+            22_000.0 / (sigma * (2.0 * std::f64::consts::PI).sqrt()) * (-0.5 * z * z).exp();
+        spectrum.channels[channel] += gaussian.round() as u64;
     }
     let mut app = App::headless();
     // A private library with a two-hour half life at 140 keV.

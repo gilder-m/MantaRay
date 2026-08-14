@@ -1,4 +1,4 @@
-//! Mariscotti-style peak search (MAESTRO §4.3.4) and automatic ROI marking.
+//! Matched-filter peak search (Becquerel's method) and automatic ROI marking.
 
 use mantaray_core::{
     CalculationSettings, EnergyCalibration, ShapeCalibration, Spectrum, mark_peaks, peak_search,
@@ -56,7 +56,7 @@ fn a_smooth_continuum_yields_no_peaks() {
 #[test]
 fn sensitivity_one_is_more_sensitive_than_five() {
     // A weak peak: ~120 net counts on a continuum of ~77 counts per channel is
-    // a ~3-sigma second-difference response, so a sensitivity of 1 catches it
+    // a ~2-sigma matched-filter response, so a sensitivity of 1 catches it
     // and 5 rejects it.
     let s = synthetic(&[(500.0, 3.0, 120.0)], 1024);
     let sensitive = peak_search(&s, &CalculationSettings::default().with_sensitivity(1));
