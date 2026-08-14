@@ -1119,7 +1119,13 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             .on_hover_text("save the active spectrum (Ctrl+S)")
             .clicked()
         {
-            actions.push(Action::Save);
+            // The same action as the Ctrl+S the hover names: ask where, every
+            // time. This used to push the overwrite-in-place action instead,
+            // which on a file the system will not let this process write to
+            // fails with only a status line to say so - read from the bench
+            // as the button doing nothing while the shortcut "worked",
+            // because the shortcut's dialog is itself what grants the access.
+            actions.push(Action::SaveAs);
         }
         ui.separator();
 
@@ -2709,6 +2715,9 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
             }
             if ui.button("Recall from file...").clicked() {
                 actions.push(Action::RecallCalibration);
+            }
+            if ui.button("Save to file...").clicked() {
+                actions.push(Action::SaveCalibration);
             }
         });
         ui.separator();
@@ -4833,11 +4842,14 @@ fn other_preferences(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label("Default save format");
         egui::ComboBox::from_id_salt("default-save-format")
-            .selected_text(format!(".{}", app.default_format))
+            .selected_text(format!(".{}", crate::app::dotted(&app.default_format)))
             .show_ui(ui, |ui| {
                 for extension in ["chn", "spe", "json", "txt", "csv"] {
                     if ui
-                        .selectable_label(app.default_format == extension, format!(".{extension}"))
+                        .selectable_label(
+                            app.default_format == extension,
+                            format!(".{}", crate::app::dotted(extension)),
+                        )
                         .clicked()
                     {
                         app.default_format = extension.into();

@@ -373,6 +373,17 @@ impl Session<'_> {
     }
 
     fn status(&mut self) -> Result<String, String> {
+        // The counting flag before the clocks. The three are separate
+        // commands, a round trip apart each, and an instrument counting out a
+        // preset can stop *between* them: flag last, the reply said "stopped,
+        // LT=0.98" - clocks older than the stop they arrived beside, and a
+        // preset the instrument honoured to the tick looked unreached. Flag
+        // first, a reply that says stopped carries clocks read after the
+        // stop, which are the settled ones; the harmless converse - counting
+        // beside clocks that have run on a little - is the ordinary state of
+        // any status read from a live instrument. Caught by the bench 926
+        // counting out a one-second live preset.
+        let active = i32::from(self.instrument.is_counting());
         // Live first, then real. The two clocks are separate commands, so they
         // are sampled a round trip apart, and whichever is read second has run
         // on: reading real time second keeps it the larger of the two, which is
@@ -389,7 +400,6 @@ impl Session<'_> {
         } else {
             0.0
         };
-        let active = i32::from(self.instrument.is_counting());
         Ok(format!(
             "RT={real:.2} LT={live:.2} DT={dead:.2}% ICR=0 ACTIVE={active} TOTAL={}",
             self.total

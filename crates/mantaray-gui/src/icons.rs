@@ -49,6 +49,20 @@ pub enum Icon {
     Maximise,
 }
 
+/// The label without its leading glyph, for the arrangements that draw one.
+///
+/// Some labels carry their symbol in the text - "\u{25b6} Start", "\u{2192} Buffer" - so
+/// that the words-only toolbar still shows it. Beside a *drawn* icon the same
+/// glyph is the symbol twice: a triangle, then a triangle. The glyph is the
+/// text arrangement's; the drawn arrangements take the words alone.
+fn worded(label: &str) -> &str {
+    label
+        .split_once(' ')
+        .filter(|(glyph, _)| !glyph.is_empty() && glyph.chars().all(|c| !c.is_alphanumeric()))
+        .map(|(_, rest)| rest)
+        .unwrap_or(label)
+}
+
 /// Paints an icon inside a rectangle, in one colour.
 ///
 /// The rectangle is squared off first, so an icon given a wide button is drawn
@@ -270,7 +284,7 @@ pub fn tinted(
         return ui.add_enabled(enabled, egui::Button::new(text));
     }
 
-    let text = (style == IconStyle::Both).then_some(label);
+    let text = (style == IconStyle::Both).then(|| worded(label));
     let font = egui::TextStyle::Button.resolve(ui.style());
     let text_width = text
         .map(|label| {
@@ -354,6 +368,18 @@ mod tests {
         Icon::Full,
         Icon::Maximise,
     ];
+
+    /// Beside a drawn icon, a label sheds the glyph it carries for the
+    /// words-only arrangement - "Both" used to show the symbol twice.
+    #[test]
+    fn a_label_keeps_its_words_and_loses_its_glyph() {
+        assert_eq!(worded("\u{25b6} Start"), "Start");
+        assert_eq!(worded("\u{25a0} Stop"), "Stop");
+        assert_eq!(worded("\u{2192} Buffer"), "Buffer");
+        // Plain words pass through whole, including multi-word labels.
+        assert_eq!(worded("Save"), "Save");
+        assert_eq!(worded("Peak Info"), "Peak Info");
+    }
 
     /// Every icon draws something, at every size, inside its own button.
     ///

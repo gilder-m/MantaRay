@@ -286,7 +286,14 @@ impl DisplayState {
                     // peak being clipped flat against the top of the plot.
                     VerticalScale::Logarithmic if self.log_decade_top => decade_ceiling(peak),
                     VerticalScale::Logarithmic => logarithmic_ceiling(peak),
-                    _ => peak,
+                    // The automatic linear axis climbs the same ladder, for
+                    // the same two reasons the logarithmic one did: a full
+                    // scale of exactly the tallest channel presses the peak
+                    // flat against the frame, and quarter labels of an
+                    // arbitrary count read as noise - 40737 makes gridlines
+                    // at 10184 and 20368. A fixed Linear scale stays exactly
+                    // where the operator put it.
+                    _ => logarithmic_ceiling(peak),
                 }
             }
         }
@@ -399,15 +406,14 @@ impl DisplayState {
 
     fn set_width_about_marker(&mut self, width: usize) {
         let width = width.clamp(MIN_VIEW_WIDTH, self.length.max(MIN_VIEW_WIDTH));
-        let marker_offset = self.marker.saturating_sub(self.view_start);
-        let fraction = if self.view_width > 1 {
-            marker_offset as f64 / (self.view_width - 1) as f64
-        } else {
-            0.5
-        };
+        // The marker lands in the middle of the new window. This used to keep
+        // the marker at whatever fraction of the window it already occupied,
+        // which meant zooming toward a peak near an edge kept it near the
+        // edge - each step giving the marked peak the least room it could.
+        // Centring is what the bench asked for, and it is what the marker
+        // means: the channel being worked on belongs where the eye is.
         self.view_width = width;
-        let offset = (fraction * (width.saturating_sub(1)) as f64).round() as usize;
-        self.view_start = self.marker.saturating_sub(offset);
+        self.view_start = self.marker.saturating_sub(width / 2);
         self.clamp();
     }
 
@@ -573,18 +579,24 @@ mod tests {
     }
 
     #[test]
-    fn only_the_logarithmic_axis_gains_headroom() {
-        // Automatic fills the window with the tallest channel on purpose;
-        // giving it headroom would be changing something nobody asked about.
+    fn the_automatic_axis_gains_the_same_headroom_as_the_logarithmic() {
+        // An earlier version pinned Automatic to exactly the tallest channel,
+        // on the reasoning that headroom was something nobody asked about.
+        // Then the bench asked: the tallest peak sat clipped flat against the
+        // frame, over gridlines labelled with quarters of an arbitrary count.
         let mut spectrum = Spectrum::new(64);
         spectrum.channels[10] = 1_234;
         let mut display = DisplayState::for_length(64);
 
         display.vertical = VerticalScale::Automatic;
-        assert_eq!(display.full_scale(&spectrum), 1_234);
+        assert_eq!(display.full_scale(&spectrum), 2_000);
 
         display.vertical = VerticalScale::Logarithmic;
         assert_eq!(display.full_scale(&spectrum), 2_000);
+
+        // A fixed scale is the operator's number, exactly.
+        display.vertical = VerticalScale::Linear(1_234);
+        assert_eq!(display.full_scale(&spectrum), 1_234);
     }
 
     #[test]
@@ -622,18 +634,54 @@ mod tests {
     }
 
     #[test]
-    fn zoom_in_narrows_by_a_fifth_and_keeps_the_marker() {
+    fn zoom_in_narrows_by_a_fifth_and_centres_the_marker() {
         let mut state = state();
         state.set_marker(500);
         state.zoom_in();
         // 1024 / 1.2 = 853
         assert_eq!(state.view_width, 853);
         let (start, end) = state.visible();
-        assert!((start..=end).contains(&500), "marker left the window");
+        let middle = (start + end) / 2;
+        assert!(
+            middle.abs_diff(500) <= 1,
+            "the marker belongs in the middle: {start}..={end}"
+        );
         state.zoom_in();
         assert_eq!(state.view_width, 711);
         let (start, end) = state.visible();
-        assert!((start..=end).contains(&500));
+        let middle = (start + end) / 2;
+        assert!(middle.abs_diff(500) <= 1);
+    }
+
+    /// Zooming centres a marker that was sitting off-centre.
+    ///
+    /// The old behaviour kept the marker at the fraction of the window it
+    /// already occupied, so a peak near the window's edge stayed pinned at
+    /// the edge with every step - the window shrank and the marked peak got
+    /// the least of it. A marker nearer the spectrum's end than half the
+    /// window stays as centred as the data allows: the window never runs off
+    /// the spectrum to flatter it.
+    #[test]
+    fn zooming_centres_a_marker_that_sat_at_the_window_edge() {
+        let mut state = state();
+        state.set_marker(900);
+        // A window with the marker at its very edge...
+        state.zoom_to(860, 900);
+        state.zoom_in();
+        // ...has it in the middle after one step.
+        let (start, end) = state.visible();
+        let middle = (start + end) / 2;
+        assert!(
+            middle.abs_diff(900) <= 1,
+            "the marker belongs in the middle: {start}..={end}"
+        );
+
+        // Against the spectrum's end the window stops at the data instead.
+        state.set_marker(1_023);
+        state.zoom_in();
+        let (start, end) = state.visible();
+        assert_eq!(end, 1_023, "the window must not run past the spectrum");
+        assert!((start..=end).contains(&1_023));
     }
 
     #[test]
@@ -775,12 +823,14 @@ mod tests {
     #[test]
     fn automatic_scaling_follows_the_tallest_visible_channel() {
         let mut spectrum = spectrum();
-        spectrum.channels[500] = 5_000;
+        spectrum.channels[500] = 4_999;
         let mut state = state();
         state.vertical = VerticalScale::Automatic;
+        // Follows, at the next rung of the 1-2-5 ladder above it - the same
+        // headroom the logarithmic axis has, so the peak clears the frame.
         assert_eq!(state.full_scale(&spectrum), 5_000);
         state.zoom_to(0, 99);
-        assert_eq!(state.full_scale(&spectrum), 99, "the spike is off screen");
+        assert_eq!(state.full_scale(&spectrum), 100, "the spike is off screen");
     }
 
     #[test]
