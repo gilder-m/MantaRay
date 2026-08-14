@@ -36,20 +36,25 @@ while reporting the ADC overflow wall as four peaks, and the second read
 the 1,408 keV line's area four times low. Now the search always measures
 the spectrum's peak widths off the counts first and keeps the calibration
 only when most measurements agree with it - a lying calibration is outvoted
-by its own counts, and a downturned quadratic is read only up to its
-vertex, since no detector's resolution improves with energy. This also
-serves detectors whose files never carry an honest shape calibration at
-all: NaI(Tl) and friends get the same self-taught width law as an
-uncalibrated spectrum.
+by its own counts. A calibration is also read only across the channels it
+actually described: a fit that turns downward has said nothing about the
+channels past its vertex, so past that point the spectrum's own measured
+growth rate carries it on. This also serves detectors whose files never
+carry an honest shape calibration at all: NaI(Tl) and friends get the same
+self-taught width law as an uncalibrated spectrum.
 
 The measuring pass itself learned three lessons from that background. A
 peak's width is now remeasured with a window matched to the peak until the
 number stops shrinking, because a wide search window on a sloping continuum
 reads its floors far down the slope and taught the law widths a quarter too
-wide. The law is first fitted as a median of pairwise slopes, because the
-511 keV annihilation line - genuinely Doppler-broadened and very loud -
-dragged a least-squares law up until real peaks failed the width gate
-against it. And a candidate whose curvature estimate reads too narrow gets
+wide. The law is first fitted as a weighted median of pairwise slopes, each
+pair carrying the weight of its weaker end: a least-squares fit let the 511
+keV annihilation line - genuinely Doppler-broadened and very loud - drag the
+law up until real peaks failed the width gate against it, and an unweighted
+median let a crowd of five-sigma background wiggles measuring noise outvote
+the two 490-sigma lines a Co-60 spectrum actually has. A slope is a
+statement about two peaks, and it knows no more than the fainter of them.
+And a candidate whose curvature estimate reads too narrow gets
 one appeal to the counts: a direct half-maximum measurement inside the gate
 band keeps it, which returned the Pb-214 295 keV and Ac-228 338 keV lines a
 drift-broadened long acquisition had pushed out, while a one-channel spike
@@ -67,8 +72,53 @@ than two such clusters cannot overrule at all. The presumption protects an
 honest calibration on a spectrum whose one strong line is broadened physics
 of its own - annihilation quanta, most commonly - at a known price: a
 single-line spectrum with a wrong calibration keeps the wrong width, and a
-strong narrow line under a much-too-wide claim is still found but reported
-with the claim's width and an inflated area estimate.
+line found under a claim narrower than the peaks is reported with the
+claim's width and a net area estimate short in the same proportion.
+
+**A spike loud enough to fool the filter is still not a peak (2026-08-14).**
+The width gate reads the signal-to-noise map, and that map's Poisson
+denominator is largest exactly where a tall spike is - which flattens the
+map over the glitch and leaves its curvature reading a width near the
+kernel's own. A 3,000-count spike on a 200-count floor measured 0.92 of a
+nine-channel model, sat comfortably inside the gate, and was reported as a
+peak: the one false positive this whole search was built to make
+impossible. The counts either side settle it without needing a background
+at all, since a peak three channels wide or more holds nearly as much in
+each neighbour as at its apex. The accusation needs the statistics to
+support it as well as the shape - at a handful of counts a neighbour falls
+under half the apex often enough by chance, and demanding shape alone threw
+real lines out of the bench corpus, Tl-208 at 2,614 keV among them. With
+four sigmas of the apex's own noise required, the corpus loses no detection
+at all and the spike still goes.
+
+**Peak Info's background points stand clear of the peak (2026-08-14).**
+An auto-marked region spanned three times the FWHM with the background
+points taken out of that span, which put the innermost of them about two
+sigma from the centroid - where a Gaussian still stands at a tenth of its
+height. Equation (17) then read the background off the peak's own
+shoulders, equation (20) returned a net area a tenth to a seventh short,
+and the Gaussian fit, seeing a peak whose wings had been subtracted away,
+reported every line narrower than the counts do. Three FWHM is where the
+peak ends; the background points now get their own room beyond it. On the
+bench corpus Co-60's 1,332 keV line goes from 14% short to 4%, Cs-137's 662
+keV line from 10% to 2%, and Eu-152's 344 keV line from 14% to exact
+agreement with a generous hand-drawn region - and every fitted width now
+matches the measured one. Regions are wider by exactly the background
+points they always needed.
+
+Reading a calibration only as far as it was fitted is what the bench corpus
+needed most. Thirteen of its fourteen files carry one downturned quadratic,
+which turns over at channel 1,869 of 8,192; held flat across the remaining
+five sixths of every spectrum it claimed 3.7 channels where those peaks
+measure 4.7 to 5.4, and the audit passed it, because every peak that
+vouched for it lived on the near side of the vertex. That quiet quarter of
+a width cost real lines and real counts: Tl-208 at 2,614 keV and Bi-214 at
+1,764 keV went unreported, and Co-60's 1,332 keV line was marked with a
+region returning a third less than its net area. Continued instead at the
+growth rate the counts teach, those files report those lines and read that
+area to within a seventh of a generous hand-drawn region's - and the only
+detection anywhere in the corpus that the change costs is a 0.1-sigma
+fluctuation that the too-narrow kernel had been matching.
 
 ## 0.2.4-alpha (2026-08-13)
 

@@ -91,21 +91,35 @@ fn strong_peaks_survive_every_sensitivity() {
 }
 
 #[test]
-fn mark_peaks_uses_three_fwhm_when_a_shape_calibration_exists() {
+fn mark_peaks_puts_the_background_points_outside_three_fwhm() {
     let mut s = synthetic(&[(400.0, 4.0, 150_000.0)], 1024);
     s.energy_calibration = Some(EnergyCalibration::linear(0.0, 1.0));
     // Constant 9.42-channel FWHM (= 4.0 sigma) so the expected width is exact.
     s.shape_calibration = Some(ShapeCalibration::new([2.3548 * 4.0, 0.0, 0.0]));
-    let n = mark_peaks(&mut s, &CalculationSettings::default());
+    let settings = CalculationSettings::default();
+    let n = mark_peaks(&mut s, &settings);
     assert_eq!(n, 1);
     let roi = s.rois.get(0).copied().expect("an ROI was marked");
     let width = roi.len() as f64;
-    let expected = 3.0 * 2.3548 * 4.0;
+    // Three FWHM is the peak's span; the background points get their own
+    // room beyond it rather than being carved out of it.
+    let expected = 3.0 * 2.3548 * 4.0 + 2.0 * settings.background_points as f64;
     assert!(
         (width - expected).abs() <= 2.0,
-        "ROI width {width} should be ~3x FWHM ({expected})"
+        "ROI width {width} should be 3x FWHM plus the background points ({expected})"
     );
     assert!(roi.contains(400));
+    // The property those channels exist for: equation (17) reads the
+    // background off them, so they must stand clear of the peak. Taken out
+    // of the three-FWHM span instead, the innermost sat at three sigma - on
+    // the peak's own shoulder - and the net area came back a seventh short.
+    let sigma = 4.0;
+    let innermost = (roi.end + 1 - settings.background_points) as f64;
+    let clearance = (innermost - 400.0) / sigma;
+    assert!(
+        clearance >= 3.5,
+        "the background points stand on the peak: innermost at {clearance:.2} sigma"
+    );
 }
 
 #[test]
