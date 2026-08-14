@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a
 detector window wrote to a mirror that lives exactly as long as the

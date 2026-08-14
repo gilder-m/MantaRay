@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.92"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -14,11 +14,11 @@ keywords = ["gamma-spectroscopy", "mca", "hpge", "nuclear", "spectrum"]
 categories = ["science", "visualization"]
 
 [workspace.dependencies]
-mantaray-core = { path = "crates/mantaray-core", version = "0.2.3" }
-mantaray-formats = { path = "crates/mantaray-formats", version = "0.2.3" }
-mantaray-device = { path = "crates/mantaray-device", version = "0.2.3" }
-mantaray-jobs = { path = "crates/mantaray-jobs", version = "0.2.3" }
-mantaray-report = { path = "crates/mantaray-report", version = "0.2.3" }
+mantaray-core = { path = "crates/mantaray-core", version = "0.2.4" }
+mantaray-formats = { path = "crates/mantaray-formats", version = "0.2.4" }
+mantaray-device = { path = "crates/mantaray-device", version = "0.2.4" }
+mantaray-jobs = { path = "crates/mantaray-jobs", version = "0.2.4" }
+mantaray-report = { path = "crates/mantaray-report", version = "0.2.4" }
 
 [profile.release]
 opt-level = 3
