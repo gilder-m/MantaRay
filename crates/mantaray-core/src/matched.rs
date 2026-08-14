@@ -1,49 +1,35 @@
 //! Matched-filter peak search: one kernel, shaped like the detector.
 //!
-//! The method is Becquerel's (`becquerel.core.peakfinder`, Lawrence Berkeley
-//! National Laboratory and the University of California, BSD-3; used with the
-//! maintainers' permission and our thanks). A peak search that knows the
-//! detector's resolution needs only one filter: a zero-sum Mexican-hat kernel
-//! whose width at every channel is the width a real peak would have *there*.
-//! A one-channel spike at a channel where real peaks are fifty channels wide
-//! scores nothing against a fifty-channel kernel - the false positives a
-//! fixed ladder of scales must threshold away are structurally impossible.
-//! On the Cs-137 spectrum that prompted this - from a bench detector in a
-//! degraded state, which made it a stress test - the ladder this replaces
-//! reported twenty-four peaks of which about half were narrow statistical
-//! spikes; the matched filter reported only physical features. On the good
-//! HPGe bench corpus it finds Ba-133's five signature lines to half a keV
-//! plus its sub-percent lines, and all eleven canonical Eu-152 lines with
-//! 1085.9 and 1089.7 keV resolved as neighbours.
+//! The method comes from the [Becquerel](https://github.com/lbl-anp/becquerel)
+//! project of the Lawrence Berkeley National Laboratory Applied Nuclear
+//! Physics group, rewritten in Rust and used with the maintainers'
+//! permission and our thanks.
 //!
-//! What is Becquerel's: the width law `fwhm(x)^2 = c0 + c1*x` (their
-//! `PeakFilter.fwhm` - counting statistics make width grow with the square
-//! root of energy), the bin-integrated second-derivative-of-a-Gaussian
-//! kernel evaluated exactly through its antiderivative, the signal-to-noise
-//! ratio with exact Poisson propagation `snr = K.c / sqrt(K^2.c)`, the
-//! three-point local-maximum rule, the curvature width estimate
-//! `2*sqrt(snr/|snr''|)`, and the shape gate that rejects a candidate whose
-//! measured width disagrees with the model.
+//! A peak search that knows the detector's resolution needs only one filter:
+//! a zero-sum Mexican-hat kernel whose width at every channel is the width a
+//! real peak would have *there*, slid over the spectrum to make a
+//! signal-to-noise map with exact Poisson propagation. A one-channel spike
+//! at a channel where real peaks are fifty channels wide scores nothing
+//! against a fifty-channel kernel - the false positives a fixed ladder of
+//! scales must threshold away are structurally impossible. A peak is a local
+//! maximum of the map that also passes a width gate: the curvature of the
+//! map at its top must imply a width consistent with the resolution model,
+//! which is what rejects glitches and Compton edges alike.
 //!
-//! What is deliberately not copied, with reasons:
-//! - Their kernel matrix is dense, every channel against every channel -
-//!   two gigabytes at sixteen thousand channels. Here the kernel is truncated
-//!   at four sigma and slid, which is the same arithmetic inside the window.
-//! - Their kernels are centred on bin low edges while their centroids are
-//!   reported at bin centres, a half-channel bias. Here a channel index *is*
-//!   the bin centre, kernel and centroid alike.
-//! - Their zero-sum normalisation is applied along the axis the convolution
-//!   does not contract, so a flat continuum nulls only approximately. Here
-//!   each output channel's own kernel is normalised to zero sum, so a flat
-//!   continuum scores exactly zero at every channel.
-//! - Their closest-pair rule keeps whichever candidate has the lower channel.
-//!   Here the higher signal-to-noise wins.
-//! - Their width law needs a reference peak handed in. Here, when the
-//!   spectrum has no usable shape calibration to read widths from, the
-//!   filter itself is scanned over a short ladder of fixed trial widths,
-//!   the law is fitted to the widths the sightings *measured*, and the real
-//!   search runs with the law the spectrum just taught - which also serves
-//!   detectors whose width barely grows, since `c1 = 0` is inside the model.
+//! The kernel width comes from the spectrum's shape calibration when it
+//! holds a usable one. Otherwise the spectrum teaches itself: the filter is
+//! scanned over a short ladder of fixed trial widths to *notice* peaks, each
+//! sighting's width is measured directly off the counts - each side of a
+//! peak judged against its own floor, so a photopeak on a stepped continuum
+//! reads true - and the width law `fwhm(x)^2 = c0 + c1*x` is fitted to what
+//! was measured, medians across rungs for direct measurements and the
+//! self-consistent rung for curvature ones, from clusters more than one rung
+//! confirmed. `c1 = 0` is inside the model, so detectors whose width barely
+//! grows are served by the same law.
+//!
+//! On the HPGe bench corpus this finds Ba-133's five signature lines to
+//! half a keV plus its sub-percent lines, and all eleven canonical Eu-152
+//! lines with 1085.9 and 1089.7 keV resolved as neighbours.
 
 use crate::FWHM_PER_SIGMA;
 use crate::calibration::ShapeCalibration;

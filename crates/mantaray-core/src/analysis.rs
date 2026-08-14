@@ -377,9 +377,9 @@ pub struct FoundPeak {
 ///
 /// One zero-sum kernel whose width follows the detector's resolution is laid
 /// over every channel; a peak is a local maximum of the resulting
-/// signal-to-noise map that also passes a width gate. The method is
-/// Becquerel's peak finder, reimplemented in the `matched` module, where its
-/// provenance and this program's departures from it are written down. It
+/// signal-to-noise map that also passes a width gate. The method comes from
+/// the Becquerel project, rewritten in Rust in the `matched` module, where
+/// it is described. It
 /// replaced a nine-scale second-difference ladder that had no idea what a
 /// peak *should* look like at a given channel - on the bench Cs-137 spectrum
 /// that decided the matter, the ladder reported twenty-four peaks of which
