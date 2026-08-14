@@ -74,9 +74,24 @@ pub(crate) enum Widths<'a> {
 
 impl Widths<'_> {
     /// Expected FWHM at a channel, floored so a kernel always has a body.
+    ///
+    /// A quadratic shape calibration is read only up to its vertex: real
+    /// files carry fits whose negative curvature turns downward past the
+    /// last calibrated peak - one bench file crosses zero at channel 4,800
+    /// of 8,192 - and no detector's resolution improves with energy. Read
+    /// literally, the falling branch shrinks the kernel until it matches
+    /// one-channel spikes over exactly the sparse tail where spikes live.
     pub(crate) fn fwhm(&self, channel: f64) -> f64 {
         let fwhm = match self {
-            Widths::Shape(shape) => shape.fwhm(channel),
+            Widths::Shape(shape) => {
+                let [_, b, c] = shape.coefficients;
+                let channel = if c < 0.0 {
+                    channel.min(-b / (2.0 * c))
+                } else {
+                    channel
+                };
+                shape.fwhm(channel)
+            }
             Widths::Law { c0, c1 } => (c0 + c1 * channel.max(0.0)).max(0.0).sqrt(),
         };
         fwhm.max(1.0)
@@ -122,6 +137,43 @@ impl Widths<'_> {
         // refitted rather than taken from the unclamped solution, so a
         // clamped slope still leaves the law through the points.
         let c0 = ((swy - c1 * swx) / sw).max(1.0);
+        Some(Widths::Law { c0, c1 })
+    }
+
+    /// A robust first law: median of pairwise slopes on `fwhm^2 = c0 + c1*x`.
+    ///
+    /// The trimmed refit needs a reference the outliers cannot drag, and a
+    /// weighted least-squares first pass is no such thing: on the bench
+    /// background it handed the annihilation line - genuinely
+    /// Doppler-broadened, honestly measured, and very loud - the authority
+    /// to raise the whole law until the real 295 and 300 keV lines failed
+    /// the width gate against it. The median of pairwise slopes shrugs off
+    /// a quarter of the points being physics of their own; the weighted fit
+    /// afterwards polishes what survives the trim. Pairs closer than 32
+    /// channels are skipped - their slope is mostly measurement noise
+    /// divided by a small number.
+    fn robust(points: &[(f64, f64, f64)]) -> Option<Self> {
+        let mut slopes = Vec::new();
+        for (i, &(xi, fi, _)) in points.iter().enumerate() {
+            for &(xj, fj, _) in &points[i + 1..] {
+                if (xj - xi).abs() >= 32.0 {
+                    slopes.push((fj * fj - fi * fi) / (xj - xi));
+                }
+            }
+        }
+        let median = |values: &mut Vec<f64>| -> Option<f64> {
+            if values.is_empty() {
+                return None;
+            }
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Some(values[values.len() / 2])
+        };
+        let c1 = median(&mut slopes)?.max(0.0);
+        let mut intercepts: Vec<f64> = points
+            .iter()
+            .map(|(x, fwhm, _)| fwhm * fwhm - c1 * x)
+            .collect();
+        let c0 = median(&mut intercepts)?.max(1.0);
         Some(Widths::Law { c0, c1 })
     }
 }
@@ -267,8 +319,29 @@ pub(crate) fn find(
         }
         let estimate = 2.0 * (snr[channel] / -d2).sqrt();
         let ratio = estimate / fwhm0;
-        if !(gate.0..=gate.1).contains(&ratio) {
+        if ratio > gate.1 {
             continue;
+        }
+        if ratio < gate.0 {
+            // The curvature estimate compresses every width mismatch toward
+            // one, so by the time it reads narrow the candidate is either a
+            // glitch or the model is locally wrong - a linear width law
+            // cannot follow a drift-broadened long acquisition everywhere,
+            // and on the bench background it sat 20% high at 295 keV and
+            // failed two real Pb lines here. The counts can say which is
+            // which: a direct half-maximum measurement inside the same band
+            // keeps the peak. Only a candidate three sigmas clear of the
+            // threshold earns the appeal - one at the edge of existence has
+            // no evidence to overrule a shape prior with - and a one-channel
+            // spike measures exactly the measurement's 2.0-channel clamp,
+            // which is kept out.
+            let saved = snr[channel] >= min_snr + 3.0
+                && direct_width(counts, channel as f64, fwhm0).is_some_and(|(_, measured, _)| {
+                    measured > 2.05 && (gate.0..=gate.1).contains(&(measured / fwhm0))
+                });
+            if !saved {
+                continue;
+            }
         }
         // Sub-channel centroid from the same three points the maximum rule
         // used - the parabola's own top.
@@ -338,12 +411,20 @@ pub(crate) fn find(
 /// their widths are then measured off the counts, not off the rung.
 const BOOTSTRAP_FWHMS: [f64; 6] = [2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 
-/// The width source for a spectrum: its shape calibration, or self-taught.
+/// The width source for a spectrum: its shape calibration if the counts
+/// agree with it, otherwise self-taught.
 ///
-/// With no usable shape calibration, the spectrum teaches itself. The
-/// matched filter is run at each fixed trial width in [`BOOTSTRAP_FWHMS`]
-/// under a loose gate to *notice* peaks; each sighting's width is then
-/// measured directly on the counts - a local background line and a walk to
+/// A shape calibration is never taken on faith. MAESTRO writes a
+/// `$SHAPE_CAL` block whether or not anyone calibrated shape, so real files
+/// carry a constant fitted once under other conditions, or a quadratic from
+/// another geometry - and a wrong width claim does not merely mislabel
+/// peaks, it decides which peaks exist at all. So the spectrum is always
+/// measured first, and the calibration is kept only when it agrees with
+/// what was measured; a lying calibration is outvoted by its own counts.
+///
+/// The measuring pass: the matched filter is run at each fixed trial width
+/// in [`BOOTSTRAP_FWHMS`] under a loose gate to *notice* peaks; each
+/// sighting's width is then measured directly on the counts - a local background line and a walk to
 /// the half-maximum crossings, the measurement `peak_info` has always
 /// trusted - because every kernel-derived width estimate answers partly to
 /// the kernel that made it. (The lesson was paid for twice on the way here:
@@ -366,13 +447,11 @@ pub(crate) fn widths_for<'a>(
     counts: &[f64],
     notice_snr: f64,
 ) -> Option<Widths<'a>> {
-    if let Some(shape) = spectrum
+    let claimed = spectrum
         .shape_calibration
         .as_ref()
         .filter(|shape| shape.is_usable())
-    {
-        return Some(Widths::Shape(shape));
-    }
+        .map(Widths::Shape);
     /// One width as one rung measured it.
     struct Opinion {
         fwhm: f64,
@@ -397,7 +476,12 @@ pub(crate) fn widths_for<'a>(
         for candidate in find(counts, &law, notice_snr, (0.3, 3.0), 40) {
             let (centroid, opinion, weight) = match direct_width(counts, candidate.centroid, trial)
             {
-                Some((centroid, fwhm, significance)) => (
+                // A measurement at the 2.0-channel clamp is not testimony:
+                // it means "at or below what half-maximum walking can see",
+                // which is a glitch's signature, and five glitches measured
+                // that way with spectacular significance once outvoted an
+                // honest calibration. It still marks the sighting, weakly.
+                Some((centroid, fwhm, significance)) if fwhm > 2.0 => (
                     centroid,
                     Opinion {
                         fwhm,
@@ -405,6 +489,15 @@ pub(crate) fn widths_for<'a>(
                         inconsistency: 0.0,
                     },
                     significance,
+                ),
+                Some((centroid, fwhm, _)) => (
+                    centroid,
+                    Opinion {
+                        fwhm,
+                        direct: false,
+                        inconsistency: f64::INFINITY,
+                    },
+                    candidate.snr.min(3.0),
                 ),
                 // A curvature width from a possibly mismatched kernel is a
                 // weak witness however loud the response was.
@@ -481,11 +574,34 @@ pub(crate) fn widths_for<'a>(
             .count()
             >= 2
     };
-    let mut measured: Vec<(f64, f64, f64)> = clusters
+    let confirmed_measured: Vec<(f64, f64, f64)> = clusters
         .iter()
         .filter(|cluster| confirmed(cluster))
         .map(|cluster| (cluster.centroid, median_width(cluster), cluster.weight))
         .collect();
+    // The calibration's audit: it claims a width at every channel where one
+    // was just measured, and it keeps its authority unless most of the
+    // *confirmed* measurements sit outside the search gate's band of the
+    // claim - the same band a peak must hit to be found, so "the calibration
+    // is right" and "the peaks it predicts are findable" are one test. The
+    // burden of proof is on the counts: only clusters two rungs measured
+    // directly may vote, and fewer than two such witnesses cannot overrule -
+    // a presumption that protects an honest calibration on a spectrum whose
+    // one strong line is broadened physics of its own, the way annihilation
+    // quanta are. A truthful calibration then beats any law fitted to a
+    // handful of peaks, being smooth and whole-range.
+    if let Some(claimed) = claimed {
+        let agreeing = confirmed_measured
+            .iter()
+            .filter(|(channel, fwhm, _)| {
+                (WIDTH_GATE.0..=WIDTH_GATE.1).contains(&(fwhm / claimed.fwhm(*channel)))
+            })
+            .count();
+        if confirmed_measured.len() < 2 || 2 * agreeing >= confirmed_measured.len() {
+            return Some(claimed);
+        }
+    }
+    let mut measured = confirmed_measured;
     if measured.len() < 2 {
         measured = clusters
             .iter()
@@ -495,7 +611,7 @@ pub(crate) fn widths_for<'a>(
     let first = match measured.as_slice() {
         [] => return None,
         [(channel, fwhm, _)] => return Some(Widths::from_anchor(*channel, *fwhm)),
-        many => Widths::fit(many)?,
+        many => Widths::robust(many).or_else(|| Widths::fit(many))?,
     };
     // One trimmed refit: a cluster whose median still disagrees with the
     // law by more than the search gate would ever forgive was measured
@@ -514,6 +630,46 @@ pub(crate) fn widths_for<'a>(
 /// A peak's FWHM measured straight off the counts, with its centroid and how
 /// many local-noise sigmas its top stands above the higher of its floors.
 ///
+/// The window starts sized to the rung that noticed the peak, then serves
+/// the peak: when the measurement comes back much narrower than the trial,
+/// it is retaken with a window matched to the measured width. A wide rung's
+/// window spans a hundred channels of *sloping* continuum, its per-side
+/// floors sit far down the slope, the half-level sinks with them, and a
+/// 3.6-channel background line reads five and a half - which taught the
+/// width law to expect widths the real peaks then failed against. The
+/// per-side floors answer the step problem; the matched window answers the
+/// slope problem; both lessons were paid for on the bench.
+fn direct_width(counts: &[f64], centroid: f64, trial_fwhm: f64) -> Option<(f64, f64, f64)> {
+    let mut trial = trial_fwhm;
+    let mut best: Option<(f64, f64, f64)> = None;
+    // To the fixed point: remeasure with the window the last measurement
+    // implies, until the width stops shrinking. Stopping at the first
+    // "close enough" left a quarter of the slope bias in - the background
+    // bench file measured 4.7 channels at 609 keV where the same detector's
+    // Eu-152 files say 3.7 - and a law taught 27% wide fails real peaks at
+    // the width gate. A measurement that grows instead means a neighbour
+    // has entered the window: keep the smaller word and stop.
+    for _ in 0..6 {
+        let Some(measured) = direct_width_once(counts, centroid, trial) else {
+            return best;
+        };
+        let fwhm = measured.1;
+        if fwhm >= trial * 0.95 {
+            // Settled (a hair under the window) keeps the fresh measurement;
+            // grown (over it) keeps the smaller word already in hand.
+            if fwhm <= trial || best.is_none() {
+                best = Some(measured);
+            }
+            return best;
+        }
+        best = Some(measured);
+        trial = fwhm;
+    }
+    best
+}
+
+/// One measurement of [`direct_width`], at one window size.
+///
 /// Each side is judged against its own floor - the smallest count between
 /// the apex and the window's end on that side - and walked out to where the
 /// counts fall halfway from the apex to *that* floor, interpolated between
@@ -524,7 +680,7 @@ pub(crate) fn widths_for<'a>(
 /// channels wide where its own half-maximum is 64. `None` when the top does
 /// not clearly beat the local noise or a crossing never comes - a faint or
 /// crowded peak is not a width measurement.
-fn direct_width(counts: &[f64], centroid: f64, trial_fwhm: f64) -> Option<(f64, f64, f64)> {
+fn direct_width_once(counts: &[f64], centroid: f64, trial_fwhm: f64) -> Option<(f64, f64, f64)> {
     let centre = centroid.round().max(0.0) as usize;
     let reach = ((3.0 * trial_fwhm).ceil() as usize).max(8);
     let low = centre.checked_sub(reach)?;
@@ -540,14 +696,18 @@ fn direct_width(counts: &[f64], centroid: f64, trial_fwhm: f64) -> Option<(f64, 
                 .partial_cmp(&counts[*b])
                 .unwrap_or(std::cmp::Ordering::Equal)
         })?;
-    let floor_left = counts[low..apex]
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
-    let floor_right = counts[apex + 1..=high]
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
+    // Each side's floor is its median, not its minimum. The minimum of a
+    // window of Poisson counts sits two or three noise sigmas below the true
+    // level, which let any +2-sigma wiggle on a flat continuum pass the
+    // significance test below as a "measured peak" - enough of them to
+    // outvote a real calibration in the audit. The median is the level.
+    let side_median = |side: &[f64]| -> f64 {
+        let mut sorted: Vec<f64> = side.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted[sorted.len() / 2]
+    };
+    let floor_left = side_median(&counts[low..apex]);
+    let floor_right = side_median(&counts[apex + 1..=high]);
     let top = counts[apex];
     // The taller floor is the harder test, and the one the peak must beat.
     let floor = floor_left.max(floor_right);
@@ -690,6 +850,85 @@ mod tests {
         for ((centre, _, _), found) in peaks.iter().zip(&found) {
             assert!((found.centroid - centre).abs() < 1.0, "{}", found.centroid);
         }
+    }
+
+    /// A downturned quadratic calibration is read only up to its vertex.
+    ///
+    /// The coefficients are a real HPGe file's; read literally they cross
+    /// zero at channel ~10,300, and the floor of one channel would then
+    /// shape the kernel to match exactly the one-channel spikes the whole
+    /// search exists to reject.
+    #[test]
+    fn a_downturned_shape_calibration_is_clamped_at_its_vertex() {
+        let shape = ShapeCalibration::new([2.4946, 1.745e-3, -1.9356e-7]);
+        let widths = Widths::Shape(&shape);
+        let vertex = 1.745e-3 / (2.0 * 1.9356e-7);
+        assert!(
+            (widths.fwhm(16_000.0) - widths.fwhm(vertex)).abs() < 1e-9,
+            "past the vertex the width must hold at the vertex's"
+        );
+        assert!(
+            widths.fwhm(16_000.0) > 5.0,
+            "the clamp keeps the widest honest width, not the one-channel floor: {}",
+            widths.fwhm(16_000.0)
+        );
+    }
+
+    /// A calibration far narrower than the peaks is outvoted by the counts.
+    ///
+    /// The bench background carries `[1.62, 0, 0]` from some other day while
+    /// its real peaks run four to eight channels wide; trusted, that claim
+    /// rejected Tl-208 at the top of a 2.8-day acquisition through the width
+    /// gate's upper bound.
+    #[test]
+    fn a_too_narrow_shape_calibration_is_overruled() {
+        let peaks = [
+            (250.0, 4.0, 30_000.0),
+            (512.0, 4.0, 50_000.0),
+            (770.0, 4.0, 20_000.0),
+        ];
+        let counts = synthetic(1024, 30.0, &peaks);
+        let mut spectrum = Spectrum::from_counts(counts.iter().map(|c| *c as u64).collect());
+        spectrum.shape_calibration = Some(ShapeCalibration::new([1.62, 0.0, 0.0]));
+        let data = spectrum.as_f64();
+        let widths = widths_for(&spectrum, &data, 3.0).expect("a width source");
+        assert!(
+            matches!(widths, Widths::Law { .. }),
+            "the lying calibration must lose its authority"
+        );
+        let found = find(&data, &widths, 3.0, width_gate(), 40);
+        assert_eq!(found.len(), 3, "all three peaks despite the calibration");
+    }
+
+    /// And one far wider - the constant-at-high-energy case real files carry.
+    #[test]
+    fn a_too_wide_shape_calibration_is_overruled() {
+        let peaks = [(250.0, 1.4, 20_000.0), (512.0, 1.4, 30_000.0)];
+        let counts = synthetic(1024, 30.0, &peaks);
+        let mut spectrum = Spectrum::from_counts(counts.iter().map(|c| *c as u64).collect());
+        spectrum.shape_calibration = Some(ShapeCalibration::new([11.4, 0.0, 0.0]));
+        let data = spectrum.as_f64();
+        let widths = widths_for(&spectrum, &data, 3.0).expect("a width source");
+        let found = find(&data, &widths, 3.0, width_gate(), 40);
+        assert_eq!(found.len(), 2, "narrow real peaks despite the wide claim");
+        for ((centre, _, _), found) in peaks.iter().zip(&found) {
+            assert!((found.centroid - centre).abs() < 1.0, "{}", found.centroid);
+        }
+    }
+
+    /// A truthful calibration keeps its authority over any fitted law.
+    #[test]
+    fn an_honest_shape_calibration_is_kept() {
+        let peaks = [(250.0, 4.0, 30_000.0), (700.0, 4.0, 25_000.0)];
+        let counts = synthetic(1024, 30.0, &peaks);
+        let mut spectrum = Spectrum::from_counts(counts.iter().map(|c| *c as u64).collect());
+        spectrum.shape_calibration = Some(ShapeCalibration::new([4.0 * FWHM_PER_SIGMA, 0.0, 0.0]));
+        let data = spectrum.as_f64();
+        let widths = widths_for(&spectrum, &data, 3.0).expect("a width source");
+        assert!(
+            matches!(widths, Widths::Shape(_)),
+            "agreement must keep the calibration"
+        );
     }
 
     /// And a square-root width law, as a real detector has.

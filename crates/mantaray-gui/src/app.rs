@@ -3684,7 +3684,12 @@ impl App {
             }
             "cal" => {
                 // The auto-calibration story, as a picture: strip the
-                // calibration, then recover it from the peaks.
+                // calibration, then recover it from the peaks. The nuclide
+                // must be in the working library for that, and a capture
+                // runs against a fresh settings directory that has none.
+                if self.library.is_empty() {
+                    self.library = NuclideLibrary::sample_for_tests();
+                }
                 if let Some(spectrum) = self.active_spectrum_mut() {
                     spectrum.energy_calibration = None;
                     spectrum.rois = mantaray_core::RoiSet::default();

@@ -365,7 +365,9 @@ pub struct FoundPeak {
     pub channel: usize,
     /// Interpolated centroid, in channels.
     pub centroid: f64,
-    /// Measured full width at half maximum, in channels.
+    /// Expected full width at half maximum at the centroid, in channels -
+    /// from the shape calibration when the counts agree with it, otherwise
+    /// from the width law the spectrum taught itself.
     pub width: f64,
     /// Signal-to-noise of the matched-filter response, in Poisson sigmas.
     pub significance: f64,
@@ -403,7 +405,11 @@ pub fn peak_search(spectrum: &Spectrum, settings: &CalculationSettings) -> Vec<F
     let Some(widths) = crate::matched::widths_for(spectrum, &data, min_snr.min(3.0)) else {
         return Vec::new();
     };
-    crate::matched::find(&data, &widths, min_snr, crate::matched::width_gate(), 40)
+    // The cap is a runaway guard, not a quota: the bench background carries
+    // 38 genuine lines and lost eight of them to a cap of 40, each pushed
+    // out by a stronger real line. A hundred covers the busiest natural
+    // spectrum with room to spare.
+    crate::matched::find(&data, &widths, min_snr, crate::matched::width_gate(), 100)
         .into_iter()
         .map(|found| FoundPeak {
             channel: found.centroid.round().max(0.0) as usize,
@@ -417,13 +423,17 @@ pub fn peak_search(spectrum: &Spectrum, settings: &CalculationSettings) -> Vec<F
 
 /// Runs a peak search and marks every peak found as a region of interest.
 ///
-/// The region spans three times the FWHM - the calculated width when a
-/// peak-shape calibration exists, the measured width otherwise. MAESTRO's manual
-/// says an uncalibrated search marks "the width of the peak as determined by
-/// Peak Search"; we widen that to three FWHM as well, because the background
-/// points of equations (17)-(21) must fall outside the peak to give a correct
-/// net area. The region is never narrower than `2n + 1` channels, the minimum
-/// the background model needs. Existing regions are kept.
+/// The region spans three times the width the search assigned the peak -
+/// its audited shape calibration or its learned width law, whichever the
+/// search itself trusted. Reading the raw shape calibration here instead
+/// would resurrect exactly the claims the audit overruled: the bench
+/// background's stale constant sized every region 1.6 channels wide.
+/// MAESTRO's manual says an uncalibrated search marks "the width of the
+/// peak as determined by Peak Search"; we widen that to three FWHM as well,
+/// because the background points of equations (17)-(21) must fall outside
+/// the peak to give a correct net area. The region is never narrower than
+/// `2n + 1` channels, the minimum the background model needs. Existing
+/// regions are kept.
 ///
 /// Returns the number of peaks marked.
 pub fn mark_peaks(spectrum: &mut Spectrum, settings: &CalculationSettings) -> usize {
@@ -432,8 +442,7 @@ pub fn mark_peaks(spectrum: &mut Spectrum, settings: &CalculationSettings) -> us
     let minimum = (2 * settings.background_points + 1) as f64;
     let mut marked = 0;
     for peak in &peaks {
-        let fwhm = spectrum.fwhm_at(peak.centroid).unwrap_or(peak.width);
-        let width = (3.0 * fwhm).max(minimum);
+        let width = (3.0 * peak.width).max(minimum);
         let half = width / 2.0;
         let start = (peak.centroid - half).round().max(0.0) as usize;
         let end = ((peak.centroid + half).round().max(0.0) as usize).min(length.saturating_sub(1));

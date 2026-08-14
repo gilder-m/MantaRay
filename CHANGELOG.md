@@ -23,8 +23,52 @@ mapping to a real weak Eu line - including 1085.9 and 1089.7 keV resolved as
 neighbours. The sensitivity dial keeps its meaning: it is the signal-to-noise
 a peak must reach, in the same Poisson sigmas as before. Known blemish,
 recorded honestly: on a background spectrum's nearly empty tail the
-self-taught law can pass a few sparse-count artefacts; a shape calibration
-removes them.
+self-taught law can pass a few sparse-count artefacts; a trustworthy shape
+calibration removes them.
+
+**A shape calibration is audited before it is trusted (2026-08-14).** A
+`$SHAPE_CAL` block rides along in real files whether or not anyone
+calibrated shape - the bench corpus carries a constant 1.6 channels from
+some other day on a 2.8-day background, and a quadratic that turns downward
+and crosses zero at channel 4,800 of 8,192 on the Eu-152 spectra. Trusted
+literally, the first rejected Tl-208 at 2,614 keV through the width gate
+while reporting the ADC overflow wall as four peaks, and the second read
+the 1,408 keV line's area four times low. Now the search always measures
+the spectrum's peak widths off the counts first and keeps the calibration
+only when most measurements agree with it - a lying calibration is outvoted
+by its own counts, and a downturned quadratic is read only up to its
+vertex, since no detector's resolution improves with energy. This also
+serves detectors whose files never carry an honest shape calibration at
+all: NaI(Tl) and friends get the same self-taught width law as an
+uncalibrated spectrum.
+
+The measuring pass itself learned three lessons from that background. A
+peak's width is now remeasured with a window matched to the peak until the
+number stops shrinking, because a wide search window on a sloping continuum
+reads its floors far down the slope and taught the law widths a quarter too
+wide. The law is first fitted as a median of pairwise slopes, because the
+511 keV annihilation line - genuinely Doppler-broadened and very loud -
+dragged a least-squares law up until real peaks failed the width gate
+against it. And a candidate whose curvature estimate reads too narrow gets
+one appeal to the counts: a direct half-maximum measurement inside the gate
+band keeps it, which returned the Pb-214 295 keV and Ac-228 338 keV lines a
+drift-broadened long acquisition had pushed out, while a one-channel spike
+measures exactly the clamp of that measurement and stays out. The peak cap
+rises from 40 to 100: the bench background carries about fifty genuine
+lines, and a cap that returns the strongest 40 was silently trading its
+weakest real lines away. With all of it in place, that 2.8-day background
+reports 52 peaks of which 49 are the natural chains line for line - Pb-210
+at 46.5 keV through Tl-208 at 2,614.5 - and the three that are not sit
+against the ADC overflow wall, named by their position.
+
+The audit hears only witnesses that would stand in court: a cluster votes
+against a calibration only when two rungs measured it directly, and fewer
+than two such clusters cannot overrule at all. The presumption protects an
+honest calibration on a spectrum whose one strong line is broadened physics
+of its own - annihilation quanta, most commonly - at a known price: a
+single-line spectrum with a wrong calibration keeps the wrong width, and a
+strong narrow line under a much-too-wide claim is still found but reported
+with the claim's width and an inflated area estimate.
 
 ## 0.2.4-alpha (2026-08-13)
 
