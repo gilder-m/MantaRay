@@ -75,6 +75,54 @@ single-line spectrum with a wrong calibration keeps the wrong width, and a
 line found under a claim narrower than the peaks is reported with the
 claim's width and a net area estimate short in the same proportion.
 
+**The search stops assuming germanium (2026-08-14).** Measured head to head
+against becquerel 0.7.0 over thirteen spectra - a NaI detector, an ORTEC
+digiBASE, a CsI D3S, a simulated CZT background, a mobile survey and eight
+germanium spectra, 284 peaks verified by independent fits that neither
+finder was allowed to vote on - three assumptions turned out to be about
+germanium rather than about physics, and each cost real lines on everything
+else.
+
+A channel whose kernel ran off the end of the spectrum was skipped
+entirely. That costs four sigmas of reach at each end, which is a dozen
+channels on a germanium spectrum and seventy on a scintillator, and the
+bottom of a scintillator spectrum is where Am-241 at 60 keV and Ba-133 at
+81 keV live: the same synthetic peak was found at channel 500 and invisible
+at channel 60. The kernel is now shortened there instead - symmetrically,
+which is the part that matters, because an even zero-sum kernel is blind to
+a straight line and a lopsided one is not. Lopsided, it reads a spectrum's
+end wall as a peak and teaches the width law nonsense, which is what the
+old refusal was really defending against.
+
+A single measured peak was taken to mean that all of its width had
+accumulated from nothing at channel zero - true enough of germanium, and on
+a scintillator whose peaks run forty channels wide it predicts eighteen
+channels at channel 60, losing a real forty-channel peak there. One
+measurement now claims its own width and no growth rate.
+
+And a constant `$SHAPE_CAL` was believed. No detector's resolution is
+constant, so a single number can only be right somewhere; one real file
+claims a flat 4.27 channels where its low lines measure 1.1 to 2.7, and
+thirteen of them failed the width gate against it. A calibration inside the
+gate's band is no longer automatically the best account of the peaks: where
+the spectrum's own law explains both halves of the measured range better,
+and the claim is out by more than a sixth, the law wins. Both halves,
+because a law fitted to these peaks can be excellent where most of them are
+and nonsense elsewhere - on one bench file a flat law beat an honest
+calibration on average while running half again too wide at 300 keV, and
+preferring it cost five real lines.
+
+Across that corpus the search now finds 271 of 284 verified peaks against
+becquerel's 277, with 57 unverifiable extras against becquerel's 120 - and
+becquerel was handed the true resolution law for every file, which it
+requires and this does not. Centroids land within 0.01 FWHM of the fitted
+truth on germanium against becquerel's 0.05, since the peak is interpolated
+between channels rather than reported as one. On the bench corpus the
+change is close to neutral: Co-60 at 60 cm gains Bi-214's 1,120 keV line,
+Eu-152 at 50 cm stops reporting a valley at 872.8 keV, and Ba-133 at 70 cm
+loses a real 5-sigma Bi-214 line at 1,237.6 keV, which is not yet
+explained.
+
 **A spike loud enough to fool the filter is still not a peak (2026-08-14).**
 The width gate reads the signal-to-noise map, and that map's Poisson
 denominator is largest exactly where a tall spike is - which flattens the

@@ -145,15 +145,23 @@ impl Widths<'_> {
         fwhm.max(1.0)
     }
 
-    /// The law through one known peak, with one channel of width at zero.
+    /// The law through one known peak: that width, held everywhere.
     ///
-    /// `c0 = 1` is Becquerel's `fwhm_at_0` default: some width at zero energy
-    /// (electronic noise) keeps the low channels from demanding infinitely
-    /// sharp peaks.
-    fn from_anchor(ref_channel: f64, ref_fwhm: f64) -> Self {
-        let c0 = 1.0;
-        let c1 = (ref_fwhm * ref_fwhm - c0).max(0.0) / ref_channel.max(1.0);
-        Widths::Law { c0, c1 }
+    /// One measurement cannot establish a growth rate, so it does not claim
+    /// one. Becquerel's `fwhm_at_0` default of one channel says instead that
+    /// all of the width at the reference peak was accumulated from zero,
+    /// which suits the germanium detector a user would be describing by hand
+    /// but is a strong claim to make unprompted: on a scintillator whose
+    /// peaks run forty channels wide it predicts eighteen at channel 60,
+    /// and a 40-channel peak measured against an 18-channel kernel is lost
+    /// at the width gate. Holding the measured width flat is wrong by
+    /// whatever the growth really is - bounded, and in the right order of
+    /// magnitude everywhere.
+    fn from_anchor(_ref_channel: f64, ref_fwhm: f64) -> Self {
+        Widths::Law {
+            c0: (ref_fwhm * ref_fwhm).max(1.0),
+            c1: 0.0,
+        }
     }
 
     /// The law fitted to measured `(channel, fwhm)` pairs, SNR-weighted.
@@ -260,23 +268,42 @@ pub(crate) struct Match {
 /// At every channel, a zero-sum kernel of that channel's expected width is
 /// laid over the counts: `snr = sum(k*c) / sqrt(sum(k^2*c))`, the denominator
 /// being exact Poisson propagation through the filter. Clipped at zero -
-/// valleys are not peaks. A channel whose kernel does not fit inside the
-/// spectrum scores zero rather than being measured with an amputated one: a
-/// truncated, rebalanced kernel stops being a peak detector and starts being
-/// an edge detector, and the wall of counts at a spectrum's low end read as
-/// a broad peak through exactly that - which then taught the width law
-/// nonsense.
+/// valleys are not peaks.
+///
+/// Near the ends the kernel is shortened rather than the channel abandoned,
+/// but shortened *equally on both sides*. Symmetry is the property that
+/// matters: an even, zero-sum kernel is blind to a constant and blind to a
+/// straight line through its centre, so it answers only to curvature. Cut
+/// one wing shorter than the other and it starts answering to slope as
+/// well - and a spectrum's end walls are nothing but slope, which is how an
+/// asymmetric kernel turns into an edge detector and teaches the width law
+/// nonsense. A symmetric short kernel is simply a narrower window on the
+/// same shape.
+///
+/// The apex must still stand a full FWHM clear of either end, so the whole
+/// positive lobe and half of each wing remain. Refusing every shortened
+/// kernel instead - which this did - costs four sigmas of reach at each end,
+/// and that cost scales with the peak width: a germanium spectrum loses a
+/// dozen channels and never notices, while a scintillator with 40-channel
+/// peaks loses seventy at the bottom of a 1,024-channel spectrum, which is
+/// where Am-241 at 60 keV and Ba-133 at 81 keV live. One such peak was
+/// measurably invisible at channel 60 and found at channel 500, for no
+/// reason but where it sat.
 pub(crate) fn snr_map(counts: &[f64], widths: &Widths) -> Vec<f64> {
     let n = counts.len();
     let mut snr = vec![0.0; n];
     let mut kernel: Vec<f64> = Vec::new();
     for (channel, out) in snr.iter_mut().enumerate() {
         let x = channel as f64;
-        let sigma = widths.fwhm(x) / FWHM_PER_SIGMA;
-        let reach = (4.0 * sigma).ceil() as usize + 1;
-        if channel < reach || channel + reach >= n {
+        let fwhm = widths.fwhm(x);
+        let sigma = fwhm / FWHM_PER_SIGMA;
+        let clear = fwhm.ceil() as usize;
+        if channel < clear || channel + clear >= n {
             continue;
         }
+        let reach = ((4.0 * sigma).ceil() as usize + 1)
+            .min(channel)
+            .min(n - 1 - channel);
         let low = channel - reach;
         let high = channel + reach;
         build_kernel(x, sigma, low, high, &mut kernel);
@@ -704,14 +731,64 @@ pub(crate) fn widths_for<'a>(
     }
     let learned = learn_law(points);
     if let Some(shape) = claimed {
-        let claim = Widths::Shape(shape);
+        // Judge the calibration as it would actually be used - continued past
+        // its vertex where the counts have taught a growth rate.
+        let growth = match &learned {
+            Some(Widths::Law { c1, .. }) => *c1,
+            _ => 0.0,
+        };
+        let claim = match vertex(shape) {
+            Some(vertex) if vertex < counts.len() as f64 && growth > 0.0 => Widths::Spliced {
+                shape,
+                vertex,
+                c1: growth,
+            },
+            _ => Widths::Shape(shape),
+        };
         let agreeing = confirmed_measured
             .iter()
             .filter(|(channel, fwhm, _)| {
                 (WIDTH_GATE.0..=WIDTH_GATE.1).contains(&(fwhm / claim.fwhm(*channel)))
             })
             .count();
-        if confirmed_measured.len() < 2 || 2 * agreeing >= confirmed_measured.len() {
+        let outvoted = confirmed_measured.len() >= 2 && 2 * agreeing < confirmed_measured.len();
+        // Sitting inside the band is not the same as being the best account
+        // of the peaks. A constant calibration is the case that matters: no
+        // detector's resolution is constant, so a single number can only be
+        // right somewhere, and one fitted around the middle of the range
+        // stays inside the band there while running half again too wide at
+        // the bottom. One real file claims a flat 4.27 channels where its
+        // low lines measure 1.1 to 2.7, and thirteen of them failed the
+        // width gate against it. Where the calibration is both materially
+        // wrong - mispredicting the typical measured peak by more than a
+        // sixth, well inside the gate that would have caught it outright -
+        // and clearly worse than the spectrum's own law, the law is
+        // preferred. Both conditions are needed: an accurate calibration is
+        // not to be unseated because a law fitted to these very peaks
+        // predicts them a shade better, which it always will.
+        //
+        // The law must win at both ends of the measured range, not merely on
+        // average. A law is fitted to these peaks and can be excellent where
+        // most of them are while being nonsense elsewhere - the same trap the
+        // calibration falls into. One bench file's law reads a flat 4.98
+        // channels, right at the two loud Co-60 lines that dominate the
+        // measurements and half again too wide at 300 keV; on average it beat
+        // an honest calibration, and preferring it there cost five real
+        // lines. Splitting the measurements at their median channel and
+        // requiring the law to be the better account of both halves keeps
+        // that law where it belongs.
+        let outexplained = confirmed_measured.len() >= 4
+            && learned.as_ref().is_some_and(|law| {
+                let mut ordered = confirmed_measured.clone();
+                ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                let (lower, upper) = ordered.split_at(ordered.len() / 2);
+                let claimed_error = disagreement(&claim, &ordered);
+                claimed_error > 0.15
+                    && disagreement(law, &ordered) < 0.8 * claimed_error
+                    && disagreement(law, lower) < disagreement(&claim, lower)
+                    && disagreement(law, upper) < disagreement(&claim, upper)
+            });
+        if !outvoted && !outexplained {
             // Agreement is only ever evidence about the range the peaks that
             // agreed live in. A downturned quadratic that turns over inside
             // the spectrum has said nothing at all about the channels past
@@ -723,18 +800,7 @@ pub(crate) fn widths_for<'a>(
             // has taught itself how width grows, the calibration is
             // continued at that rate instead - the fit where it was fitted,
             // the counts where it was not.
-            let growth = match &learned {
-                Some(Widths::Law { c1, .. }) => *c1,
-                _ => 0.0,
-            };
-            return Some(match vertex(shape) {
-                Some(vertex) if vertex < counts.len() as f64 && growth > 0.0 => Widths::Spliced {
-                    shape,
-                    vertex,
-                    c1: growth,
-                },
-                _ => Widths::Shape(shape),
-            });
+            return Some(claim);
         }
     }
     learned
@@ -750,7 +816,7 @@ fn learn_law<'a>(mut measured: Vec<(f64, f64, f64)>) -> Option<Widths<'a>> {
     let first = match measured.as_slice() {
         [] => return None,
         [(channel, fwhm, _)] => return Some(Widths::from_anchor(*channel, *fwhm)),
-        many => Widths::robust(many).or_else(|| Widths::fit(many))?,
+        many => best_law(many)?,
     };
     measured.retain(|(channel, fwhm, _)| {
         let predicted = first.fwhm(*channel);
@@ -758,8 +824,50 @@ fn learn_law<'a>(mut measured: Vec<(f64, f64, f64)>) -> Option<Widths<'a>> {
     });
     match measured.as_slice() {
         [] | [_] => Some(first),
-        many => Widths::fit(many).or(Some(first)),
+        many => best_law(many).or(Some(first)),
     }
+}
+
+/// Whichever of the two fits explains the measured peaks better.
+///
+/// Neither fit is right everywhere. The weighted least squares uses every
+/// point but hands its loudest one the authority to bend the law, which the
+/// Doppler-broadened 511 keV line duly does. The median of pairwise slopes
+/// shrugs that off, but it is a low-efficiency estimator: where the
+/// measurements are noisy its slope lands on zero, and `c1` clamped at zero
+/// from below turns "no clear growth" into "no growth at all". That is not
+/// a harmless default - a flat law is far too wide at the low channels, and
+/// on one 8,192-channel spectrum it read 4.3 channels everywhere against a
+/// truth running 2.9 to 6.6, failing thirteen real lines at the width gate
+/// for being narrower than a law that had stopped listening.
+///
+/// So both are fitted and the peaks choose between them, by the median
+/// disagreement below: one vote each, so the loud line that bends a fit
+/// cannot also excuse it.
+fn best_law<'a>(points: &[(f64, f64, f64)]) -> Option<Widths<'a>> {
+    match (Widths::robust(points), Widths::fit(points)) {
+        (Some(robust), Some(least_squares)) => {
+            if disagreement(&robust, points) <= disagreement(&least_squares, points) {
+                Some(robust)
+            } else {
+                Some(least_squares)
+            }
+        }
+        (robust, least_squares) => robust.or(least_squares),
+    }
+}
+
+/// The median of `|measured / predicted - 1|` over the measured peaks.
+///
+/// One vote per peak and no weighting: this is asking how much of the
+/// spectrum a law explains, not how well it serves its loudest line.
+fn disagreement(law: &Widths, points: &[(f64, f64, f64)]) -> f64 {
+    let mut errors: Vec<f64> = points
+        .iter()
+        .map(|(channel, fwhm, _)| (fwhm / law.fwhm(*channel) - 1.0).abs())
+        .collect();
+    errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    errors[errors.len() / 2]
 }
 
 /// A peak's FWHM measured straight off the counts, with its centroid and how
@@ -1044,6 +1152,89 @@ mod tests {
             found.iter().map(|p| p.centroid).collect::<Vec<_>>()
         );
         assert!((found[0].centroid - 300.0).abs() < 1.0);
+    }
+
+    /// A wide peak near the spectrum's end is still found.
+    ///
+    /// The kernel is shortened symmetrically there rather than the channel
+    /// abandoned. Refusing shortened kernels costs four sigmas of reach at
+    /// each end, which is nothing on a germanium spectrum and seventy
+    /// channels on a scintillator: the same peak was found at channel 500
+    /// and invisible at channel 60.
+    #[test]
+    fn a_wide_peak_near_the_edge_is_found() {
+        let fwhm = 40.0;
+        let sigma = fwhm / FWHM_PER_SIGMA;
+        let counts = synthetic(
+            1024,
+            200.0,
+            &[(60.0, sigma, 120_000.0), (500.0, sigma, 120_000.0)],
+        );
+        let widths = Widths::Law {
+            c0: fwhm * fwhm,
+            c1: 0.0,
+        };
+        let found = find(&counts, &widths, 3.0, width_gate(), 40);
+        let centroids: Vec<f64> = found.iter().map(|p| p.centroid).collect();
+        assert!(
+            found.iter().any(|p| (p.centroid - 60.0).abs() < 4.0),
+            "the peak near the edge must be found: {centroids:?}"
+        );
+        assert!(
+            found.iter().any(|p| (p.centroid - 500.0).abs() < 4.0),
+            "and the one in the middle: {centroids:?}"
+        );
+    }
+
+    /// One measured peak claims its own width, and no growth rate.
+    ///
+    /// Assuming instead that all of it accumulated from nothing at channel
+    /// zero suits a germanium detector and badly misdescribes a
+    /// scintillator: for a 40-channel peak at channel 500 it predicts
+    /// eighteen channels at channel 60, and loses a real 40-channel peak
+    /// there at the width gate.
+    #[test]
+    fn a_single_measurement_does_not_invent_a_growth_rate() {
+        let law = Widths::from_anchor(500.0, 40.0);
+        for channel in [0.0, 60.0, 500.0, 1000.0] {
+            let width = law.fwhm(channel);
+            assert!(
+                (width - 40.0).abs() < 0.5,
+                "one measurement must be held flat: {width} at channel {channel}"
+            );
+        }
+    }
+
+    /// A constant calibration is not a resolution model.
+    ///
+    /// No detector's resolution is constant, so a single number can only be
+    /// right somewhere. One fitted around the middle of the range stays
+    /// inside the width gate's band there while running half again too wide
+    /// at the bottom, where it fails real lines. Where the spectrum's own
+    /// law is the better account of both ends, the law wins.
+    #[test]
+    fn a_constant_calibration_loses_to_a_law_that_fits_both_ends() {
+        let truth = |channel: f64| (2.0 + 0.0045 * channel).sqrt();
+        let peaks: Vec<(f64, f64, f64)> = [200.0, 600.0, 1200.0, 2500.0, 4000.0, 6000.0]
+            .iter()
+            .map(|centre| (*centre, truth(*centre) / FWHM_PER_SIGMA, 150_000.0))
+            .collect();
+        let counts = synthetic(8192, 200.0, &peaks);
+        let mut spectrum = Spectrum::from_counts(counts.iter().map(|c| *c as u64).collect());
+        // Right in the middle of the range, far too wide at the bottom.
+        spectrum.shape_calibration = Some(ShapeCalibration::new([4.3, 0.0, 0.0]));
+        let data = spectrum.as_f64();
+        let widths = widths_for(&spectrum, &data, 3.0).expect("a width source");
+        assert!(
+            matches!(widths, Widths::Law { .. }),
+            "a constant claim must lose to a law that explains both ends"
+        );
+        let found = find(&data, &widths, 3.0, width_gate(), 100);
+        assert!(
+            found.iter().any(|p| (p.centroid - 200.0).abs() < 3.0),
+            "the narrow low line the constant claim would have failed: {:?}",
+            found.iter().map(|p| p.centroid).collect::<Vec<_>>()
+        );
     }
 
     /// A weak line is not accused of being a spike on the strength of noise.
