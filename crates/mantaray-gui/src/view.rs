@@ -1762,7 +1762,30 @@ pub(crate) fn peak_info_lines(
             info.net_count_rate(live_time)
         ));
     }
-    if let Some(fit) = info.fit {
+    // A region that holds more than one line reports each of them. The
+    // figures above are the region's - the gross and net areas belong to the
+    // whole bump and cannot be divided by equation (20) - so the per-line
+    // areas here come from the fit that separated them, and are the only
+    // numbers in the card that are about one line rather than the region.
+    if info.multiplet.len() > 1 {
+        lines.push(format!("{} lines in this region:", info.multiplet.len()));
+        for (number, peak) in info.multiplet.iter().enumerate() {
+            let position = match calibration {
+                Some(cal) => format!("{:.2} {}", cal.energy(peak.centroid), cal.units),
+                None => format!("{:.2} ch", peak.centroid),
+            };
+            let width = match calibration {
+                Some(cal) => cal.width(peak.centroid, peak.fwhm()),
+                None => peak.fwhm(),
+            };
+            lines.push(format!(
+                "  {}: {position}  FWHM {width:.2}  area {:.0} \u{b1}{:.0}",
+                number + 1,
+                peak.area,
+                peak.area_uncertainty
+            ));
+        }
+    } else if let Some(fit) = info.fit {
         lines.push(format!(
             "Fit: sigma {:.2} ch, height {:.0}, area {:.0}",
             fit.sigma,
@@ -2400,5 +2423,66 @@ mod tests {
         // Wider and taller than the whole plot: it must not run off the top left.
         let card = place_info_box(plot, inset, 100.0, 60.0, Vec2::new(400.0, 300.0));
         assert_eq!(card.min, Pos2::new(plot.left() + 4.0, plot.top() + 4.0));
+    }
+
+    /// The peak-information card names every line a region holds.
+    ///
+    /// The card is the only place a resolved doublet is seen, so what it
+    /// prints is the feature. A region that holds two lines must say so, name
+    /// both, and give each its own area - the region-wide gross and net areas
+    /// above belong to the bump and cannot be divided between them.
+    #[test]
+    fn the_card_reports_every_line_of_a_multiplet() {
+        use mantaray_core::{CalculationSettings, Roi, resolved_peak_info};
+
+        // Two lines one width apart on a sloping continuum: one bump.
+        let (sigma, area) = (6.0, 100_000.0);
+        let fwhm = mantaray_core::FWHM_PER_SIGMA * sigma;
+        let centres = [200.0 - fwhm / 2.0, 200.0 + fwhm / 2.0];
+        let counts: Vec<u64> = (0..400)
+            .map(|channel| {
+                let x = channel as f64;
+                let peaks: f64 = centres
+                    .iter()
+                    .map(|centre| {
+                        let z = (x - centre) / sigma;
+                        area / (sigma * (2.0 * std::f64::consts::PI).sqrt()) * (-0.5 * z * z).exp()
+                    })
+                    .sum();
+                (3000.0 - 4.0 * x + peaks).max(1.0).round() as u64
+            })
+            .collect();
+        let spectrum = Spectrum::from_counts(counts);
+        let info = resolved_peak_info(
+            &spectrum,
+            Roi::new(150, 250),
+            &CalculationSettings::default(),
+        )
+        .expect("the region measures");
+
+        let lines = peak_info_lines(&spectrum, &info, None);
+        let card = lines.join("\n");
+        assert!(
+            card.contains("2 lines in this region:"),
+            "the card does not say the region holds two lines:\n{card}"
+        );
+        for centre in centres {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.trim_start().starts_with(char::is_numeric)
+                        && line.contains("area")
+                        && line.split_whitespace().any(|word| word
+                            .parse::<f64>()
+                            .is_ok_and(|v| { (v - centre).abs() < 1.0 }))),
+                "no line of the card is about the peak at {centre:.1}:\n{card}"
+            );
+        }
+        // And the single-peak fit line is not also printed, which would read
+        // as a third measurement of something.
+        assert!(
+            !card.contains("Fit: sigma"),
+            "a multiplet card should not also print the single-peak fit:\n{card}"
+        );
     }
 }

@@ -67,6 +67,14 @@ enum Commands {
         /// Nuclide library for identification.
         #[arg(long)]
         library: Option<PathBuf>,
+        /// Show what double-clicking each peak would report.
+        ///
+        /// The search already separates the multiplets it is sure of. This
+        /// asks the same fit without the search's extra caution, which is
+        /// what an operator interrogating one peak gets, and prints the
+        /// lines only where they say more than the search did.
+        #[arg(long)]
+        resolve: bool,
     },
     /// Write an ROI report.
     Report {
@@ -243,7 +251,8 @@ fn main() -> Result<()> {
             file,
             sensitivity,
             library,
-        } => peaks(&file, sensitivity, library.as_deref()),
+            resolve,
+        } => peaks(&file, sensitivity, library.as_deref(), resolve),
         Commands::Report {
             file,
             column,
@@ -514,7 +523,7 @@ fn convert(
     Ok(())
 }
 
-fn peaks(path: &Path, sensitivity: u32, library_path: Option<&Path>) -> Result<()> {
+fn peaks(path: &Path, sensitivity: u32, library_path: Option<&Path>, resolve: bool) -> Result<()> {
     let spectrum = load(path)?;
     let settings = CalculationSettings::default().with_sensitivity(sensitivity);
     let found = peak_search(&spectrum, &settings);
@@ -557,8 +566,71 @@ fn peaks(path: &Path, sensitivity: u32, library_path: Option<&Path>) -> Result<(
                 peak.net_estimate
             ),
         }
+        if resolve {
+            for line in resolved_lines(&spectrum, peak, &found, &settings, &library) {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
+}
+
+/// The lines one found peak's region turns out to hold, when the fit finds
+/// more of them than the search already had. Empty otherwise, so nothing is
+/// printed twice and a singlet prints nothing extra.
+///
+/// The region is the one `resolving_region` draws, which is what the search
+/// and the double-click in the window both use.
+fn resolved_lines(
+    spectrum: &Spectrum,
+    peak: &mantaray_core::FoundPeak,
+    found: &[mantaray_core::FoundPeak],
+    settings: &CalculationSettings,
+    library: &NuclideLibrary,
+) -> Vec<String> {
+    let Some(region) = mantaray_core::resolving_region(peak.centroid, peak.width, spectrum.len())
+    else {
+        return Vec::new();
+    };
+    let Ok(info) = mantaray_core::resolved_peak_info(spectrum, region, settings) else {
+        return Vec::new();
+    };
+    // The search may already have separated these lines, in which case the
+    // fit has told us nothing new and printing it again only suggests there
+    // are more peaks than there are.
+    let already = found
+        .iter()
+        .filter(|other| region.contains(other.centroid.round().max(0.0) as usize))
+        .count();
+    if info.multiplet.len() < 2 || info.multiplet.len() <= already {
+        return Vec::new();
+    }
+    info.multiplet
+        .iter()
+        .map(|line| match &spectrum.energy_calibration {
+            Some(cal) => {
+                let energy = cal.energy(line.centroid);
+                let matched = library.best_match(energy, 2.0);
+                format!(
+                    "     \u{2514} {:>10.2} {:>10.2} {:>7.2} {:>11.0} {:<9}",
+                    line.centroid,
+                    energy,
+                    cal.width(line.centroid, line.fwhm()),
+                    line.area,
+                    matched
+                        .as_ref()
+                        .map(|m| m.nuclide.name.as_str())
+                        .unwrap_or("-"),
+                )
+            }
+            None => format!(
+                "     \u{2514} {:>10.2} {:>7.2} {:>11.0}",
+                line.centroid,
+                line.fwhm(),
+                line.area
+            ),
+        })
+        .collect()
 }
 
 fn report(

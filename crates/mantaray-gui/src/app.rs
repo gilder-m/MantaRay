@@ -2395,18 +2395,21 @@ impl App {
                         .map(|(_, peak)| (peak.centroid, peak.width))
                         .unwrap_or((marker as f64, 8.0)),
                 };
-                // Never narrower than the background channels need, or the
-                // figures cannot be computed at all.
-                let width = (fwhm * 1.5).max(settings.background_points as f64 + 2.0);
-                let low = (centre - width).max(0.0) as usize;
-                let high = ((centre + width) as usize).min(spectrum.len().saturating_sub(1));
-                (high > low).then(|| Roi::new(low, high))
+                // The same region the search would draw around this peak, so
+                // that double-clicking a bump and searching for it are asking
+                // about the same channels: wide enough for the whole peak and
+                // for a neighbour close enough to have been merged with it.
+                mantaray_core::resolving_region(centre, fwhm, spectrum.len())
+                    .filter(|region| region.len() > 2 * settings.background_points)
             });
         let Some(region) = region else {
             self.status = "could not fit a peak here".into();
             return;
         };
-        match peak_info(spectrum, region, &settings) {
+        // The resolving variant: this is the one place an operator has asked
+        // about one particular peak, so it is worth the tens of milliseconds
+        // to find out whether it is in fact two.
+        match mantaray_core::resolved_peak_info(spectrum, region, &settings) {
             Ok(info) => {
                 let calibration = spectrum.energy_calibration.clone();
                 let live_time = spectrum.live_time;
@@ -2444,6 +2447,16 @@ impl App {
                         info.centroid, info.fwhm, info.net_area, info.net_area_uncertainty
                     ),
                 };
+                // A region that turned out to hold more than one line says so
+                // where it will be read: the figures above then describe the
+                // strongest of them, not the whole bump.
+                if info.multiplet.len() > 1 {
+                    self.status = format!(
+                        "{} | {} lines in this region",
+                        self.status,
+                        info.multiplet.len()
+                    );
+                }
                 self.windows[index].peak_info = Some(info);
             }
             Err(error) => self.status = format!("Could Not Properly Fit Peak: {error}"),

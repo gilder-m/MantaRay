@@ -23,6 +23,7 @@ pub mod calibration;
 pub mod efficiency;
 pub mod elements;
 pub mod error;
+pub mod fit;
 pub mod library;
 mod matched;
 pub mod qa;
@@ -34,7 +35,8 @@ pub mod undo;
 
 pub use analysis::{
     FoundPeak, GaussianFit, PeakInfo, StripFactor, counting_activity, mark_peaks, mda_currie,
-    peak_info, peak_search, smooth, smoothed, statistical_uncertainty, strip, sum_channels,
+    peak_info, peak_search, resolved_peak_info, resolving_region, smooth, smoothed,
+    statistical_uncertainty, strip, sum_channels,
 };
 pub use calibration::{
     AutoCalibration, CalibrationPoint, CalibrationTable, EnergyCalibration, MAX_CALIBRATION_POINTS,
@@ -45,6 +47,7 @@ pub use efficiency::{
     efficiency_from_source, source_activity_at,
 };
 pub use error::{AnalysisError, CalibrationError};
+pub use fit::{FitOptions, FittedPeak, RegionFit, fit_multiplet, fit_region};
 pub use library::{
     EnergyIndex, LibraryHit, LibraryMatch, LibraryPeak, Nuclide, NuclideFlags, NuclideLibrary,
     PhotonKind, parse_nuclide_name, significant,

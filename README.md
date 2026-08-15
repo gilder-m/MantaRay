@@ -254,7 +254,13 @@ make them reachable:
 - the **[Becquerel](https://github.com/lbl-anp/becquerel)** project from the
   Lawrence Berkeley National Laboratory Applied Nuclear Physics group, whose
   resolution-matched peak-finding method MantaRay's peak search reimplements
-  in Rust, used here with the maintainers' permission (BSD-3).
+  in Rust, used here with the maintainers' permission (BSD-3);
+- **[InterSpec](https://github.com/sandialabs/InterSpec)** from Sandia National
+  Laboratories, whose approach to fitting a whole region at once - solving the
+  linear parameters exactly instead of searching for them, and sharing one
+  width across the peaks in a region - MantaRay's multiplet fitting is written
+  after. No InterSpec code is used or included; the arrangement was read and
+  reimplemented in Rust.
 
 **Standing on.** [egui and eframe](https://github.com/emilk/egui) for the
 interface, [nusb](https://github.com/kevinmehall/nusb) for USB without a vendor

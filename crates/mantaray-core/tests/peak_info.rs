@@ -199,3 +199,100 @@ fn roi_must_lie_inside_the_spectrum() {
     let err = peak_info(&s, Roi::new(5, 500), &CalculationSettings::default()).unwrap_err();
     assert!(matches!(err, AnalysisError::RoiOutOfRange { .. }));
 }
+
+/// Two Gaussians a width apart on a sloping continuum, as counts.
+fn doublet(separation_fwhm: f64) -> Spectrum {
+    let (sigma, area) = (6.0, 100_000.0);
+    let fwhm = 2.354_820_045_030_949 * sigma;
+    let centres = [
+        200.0 - separation_fwhm * fwhm / 2.0,
+        200.0 + separation_fwhm * fwhm / 2.0,
+    ];
+    let counts: Vec<u64> = (0..400)
+        .map(|channel| {
+            let x = channel as f64;
+            let continuum = 3000.0 - 4.0 * x;
+            let peaks: f64 = centres
+                .iter()
+                .map(|centre| {
+                    let z = (x - centre) / sigma;
+                    area / (sigma * (2.0 * std::f64::consts::PI).sqrt()) * (-0.5 * z * z).exp()
+                })
+                .sum();
+            (continuum + peaks).max(1.0).round() as u64
+        })
+        .collect();
+    Spectrum::from_counts(counts)
+}
+
+/// Asking about one peak resolves the region; the cheap call does not.
+///
+/// The distinction is deliberate and load-bearing: the region tables and the
+/// acquisition presets call `peak_info` for every region they draw, and
+/// fitting each one several times over would be felt. An operator asking
+/// about one particular peak is a different question and gets the fit.
+#[test]
+fn resolving_is_what_separates_a_doublet_and_peak_info_stays_cheap() {
+    let s = doublet(1.0);
+    let region = Roi::new(150, 250);
+    let settings = CalculationSettings::default();
+
+    let plain = peak_info(&s, region, &settings).expect("the region measures");
+    assert!(
+        plain.multiplet.is_empty(),
+        "peak_info must not pay for the fit: {:?}",
+        plain.multiplet
+    );
+
+    let resolved = mantaray_core::resolved_peak_info(&s, region, &settings).expect("and resolves");
+    assert_eq!(
+        resolved.multiplet.len(),
+        2,
+        "a doublet one width apart: {:?}",
+        resolved
+            .multiplet
+            .iter()
+            .map(|peak| peak.centroid)
+            .collect::<Vec<_>>()
+    );
+    let fwhm = 2.354_820_045_030_949 * 6.0;
+    for (line, expected) in resolved
+        .multiplet
+        .iter()
+        .zip([200.0 - fwhm / 2.0, 200.0 + fwhm / 2.0])
+    {
+        assert!(
+            (line.centroid - expected).abs() < 1.0,
+            "{} should be {expected:.1}",
+            line.centroid
+        );
+        assert!(
+            (line.area - 100_000.0).abs() < 8_000.0,
+            "area {} should be about 100000",
+            line.area
+        );
+    }
+    // The headline centroid describes the strongest line, not the middle of
+    // the bump - which is where the single-Gaussian fit would have put it,
+    // and where no line is.
+    let middle = (resolved.multiplet[0].centroid + resolved.multiplet[1].centroid) / 2.0;
+    assert!(
+        (resolved.centroid - middle).abs() > 0.4 * fwhm,
+        "the centroid sat between the two lines: {}",
+        resolved.centroid
+    );
+}
+
+/// A region holding one peak reports no multiplet, however it is asked.
+#[test]
+fn a_single_peak_resolves_to_itself() {
+    let s = doublet(0.0);
+    let resolved =
+        mantaray_core::resolved_peak_info(&s, Roi::new(150, 250), &CalculationSettings::default())
+            .expect("one peak measures");
+    assert!(
+        resolved.multiplet.is_empty(),
+        "one peak was reported as {:?}",
+        resolved.multiplet
+    );
+}

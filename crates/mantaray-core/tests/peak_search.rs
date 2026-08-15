@@ -75,6 +75,62 @@ fn sensitivity_one_is_more_sensitive_than_five() {
     );
 }
 
+/// A pair the matched filter cannot separate is separated anyway.
+///
+/// The filter's kernel is as wide as a peak, so two lines a width apart make
+/// one bump with one maximum and the search answers "one peak" - and then the
+/// width law learns that bump's width, which is half again a real peak's, and
+/// the kernel built from it is wider still. Fitting the region breaks the
+/// circle: two Gaussians either account for the counts better than one or
+/// they do not, and no amount of kernel width changes that answer.
+#[test]
+fn a_doublet_the_filter_merges_is_returned_as_two_peaks() {
+    let sigma = 6.0;
+    let fwhm = 2.354_820_045_030_949 * sigma;
+    let (left, right) = (200.0 - fwhm / 2.0, 200.0 + fwhm / 2.0);
+    let s = synthetic(&[(left, sigma, 100_000.0), (right, sigma, 100_000.0)], 400);
+    let found = peak_search(&s, &CalculationSettings::default());
+    let centres: Vec<f64> = found.iter().map(|p| p.centroid).collect();
+    assert_eq!(found.len(), 2, "one bump, two lines: {centres:?}");
+    assert!(
+        (found[0].centroid - left).abs() < 1.0,
+        "{} should be {left:.1}",
+        found[0].centroid
+    );
+    assert!(
+        (found[1].centroid - right).abs() < 1.0,
+        "{} should be {right:.1}",
+        found[1].centroid
+    );
+    // And each is reported with one line's width, not the pair's.
+    for peak in &found {
+        assert!(
+            (peak.width - fwhm).abs() < 0.15 * fwhm,
+            "width {} should be about {fwhm:.1}",
+            peak.width
+        );
+    }
+}
+
+/// The other half of that claim: one peak stays one peak.
+///
+/// A search that splits whenever it can would double every peak list, which
+/// is a worse fault than merging a doublet - a line that is not there sends
+/// someone looking for a nuclide that is not there.
+#[test]
+fn a_single_peak_is_not_split_by_the_search() {
+    for sigma in [3.0, 6.0, 12.0] {
+        let s = synthetic(&[(300.0, sigma, 200_000.0)], 700);
+        let found = peak_search(&s, &CalculationSettings::default());
+        let near: Vec<f64> = found
+            .iter()
+            .map(|p| p.centroid)
+            .filter(|c| (c - 300.0).abs() < 6.0 * sigma)
+            .collect();
+        assert_eq!(near.len(), 1, "sigma {sigma} gave {near:?}");
+    }
+}
+
 #[test]
 fn strong_peaks_survive_every_sensitivity() {
     let s = synthetic(&[(300.0, 3.0, 200_000.0)], 1024);
@@ -141,4 +197,37 @@ fn mark_peaks_keeps_existing_regions() {
     assert_eq!(n, 1);
     assert_eq!(s.rois.len(), 2);
     assert!(s.rois.at(15).is_some());
+}
+
+/// The region drawn around a peak is the same one wherever it is drawn.
+///
+/// The search, the CLI's `--resolve` and the window's double-click all ask
+/// the same question about a peak, and they only give the same answer if
+/// they ask it about the same channels: when the search looked at forty
+/// channels and the double-click at thirty, one overflow artefact came back
+/// as three pieces to one of them and two to the other.
+#[test]
+fn one_region_rule_serves_every_caller() {
+    use mantaray_core::resolving_region;
+
+    // Three widths each side for a wide peak: sized by what could overlap
+    // it, not by where it ends, so that a companion lands well inside the
+    // window rather than against the edge where it will be disbelieved.
+    let wide = resolving_region(500.0, 40.0, 1024).expect("a region");
+    assert_eq!(wide.start, 380);
+    assert_eq!(wide.end, 620);
+
+    // A floor of twenty channels for a narrow one, which is what makes the
+    // question askable at all on a germanium line three channels wide.
+    let narrow = resolving_region(500.0, 3.0, 1024).expect("a region");
+    assert_eq!(narrow.start, 480);
+    assert_eq!(narrow.end, 520);
+
+    // Clamped to the spectrum at both ends, and refused where there is no
+    // room left rather than returning something inside out.
+    let low = resolving_region(5.0, 3.0, 1024).expect("a region");
+    assert_eq!(low.start, 0);
+    let high = resolving_region(1020.0, 3.0, 1024).expect("a region");
+    assert_eq!(high.end, 1023);
+    assert!(resolving_region(5.0, 3.0, 1).is_none());
 }

@@ -2,6 +2,78 @@
 
 ## Unreleased
 
+**A region is fitted as a whole, and told how many lines are in it
+(2026-08-14).** Double-clicking a peak now asks whether it is one peak. The
+whole region is fitted at once - several Gaussians sharing one width, on one
+continuum, with a Compton step and a low-energy tail - and the number of
+lines is decided by the counts rather than assumed. Where a region turns out
+to hold more than one, Peak Info reports each line's own centroid, width and
+area, and the headline figures describe the strongest of them instead of the
+midpoint of the bump, which is where no line is.
+
+The peak search uses the same machinery, and it closes a gap that could not
+be closed any other way. A matched filter's kernel is as wide as a peak, so
+two lines closer than about one and a fifth of a width make a single
+response - and the merge was self-sustaining, because the bump's width is
+half again a real line's, the spectrum's width law learns *that*, and the
+kernel built from it is wider still. Two lines a full width apart came back
+as one peak 27 channels wide where the truth is 14. Fitting settles it
+without reference to any kernel: on synthetic pairs the search now separates
+them from **0.6 of a width apart**, where the same test puts becquerel's
+floor at 1.0 - and where the pair is four to one rather than even, becquerel
+separates it at no separation tested at all, its weaker member never making
+a maximum of its own. Both comparisons give becquerel the true resolution
+law, which it requires and this does not.
+
+On the fourteen-spectrum bench corpus this changes exactly one result, and
+it is a real one: Ba-133's 79.6 and 81.0 keV pair, which every previous
+version reported as a single line, now comes back as two - 0.12 and 0.13 keV
+from their book values, in a 7.8% intensity ratio against the evaluated
+7.7%. Nothing else on the corpus moves.
+
+The arrangement follows [InterSpec](https://github.com/sandialabs/InterSpec)
+(Sandia National Laboratories), rewritten in Rust: the amplitudes, continuum
+and step are linear given the centroids and width, so they are solved exactly
+rather than searched for, and the peaks in a region share one width. Both
+matter - a doublet is a three-parameter search rather than a nine-parameter
+one, and free widths would let a fit explain one fat peak as a narrow spike
+on a broad pedestal.
+
+Held back deliberately, and measured rather than assumed: a split has to
+survive a chi-square improvement of 40, a companion has to hold at least a
+twentieth of its region, the parts have to be narrower than the bump they
+came from, and no peak may sit within a width of the region's edge. Each of
+those was added because something real got past its absence - a clean Ba-133
+356 keV line offered a companion a fiftieth its size, the discriminator
+cut-on at the bottom of every spectrum offered three, the overflow wall at
+the top offered three more. The one limit that cannot be tuned away: a
+detector tailing worse than about 8% will have its strongest lines split,
+because at that point the counts genuinely do not distinguish a tail from a
+companion. At 4% - worse than a detector in reasonable health - none of
+forty trials split.
+
+One region rule serves every caller, because the search and the double-click
+only agree if they are asked about the same channels - with the search
+looking at forty channels and the double-click at thirty, the same overflow
+artefact came back as three pieces to one and two to the other. Three widths
+each side, never less than twenty channels: sized by what could overlap the
+peak rather than by where the peak ends, because a companion must stand a
+full width inside the window before the fit will believe in it, and a window
+drawn just wide enough to contain a neighbour puts that neighbour exactly
+where it will be disbelieved. Double-clicking a peak with nothing selected
+therefore measures over a wider region than before, which also puts the
+background channels of equations (17)-(21) well clear of the peak's
+shoulders.
+
+`peak_info` is unchanged and still cheap; the fitting lives in the new
+`resolved_peak_info`, so the region tables and the acquisition presets that
+call it for every region on every frame pay nothing. Peak search itself now
+costs about a third of a second on an 8,192-channel spectrum where it cost
+twenty milliseconds - it is fitting every peak it finds - and a region whose
+single Gaussian already explains it for less than the splitting threshold is
+skipped outright, which cannot change any result and is over half of them.
+The CLI's `peaks` command gains `--resolve`.
+
 **The peak search knows what a peak should look like (2026-08-13).** Peak
 search is now Becquerel's resolution-matched filter - the method of the
 Lawrence Berkeley National Laboratory Applied Nuclear Physics group's

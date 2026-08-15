@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::FWHM_PER_SIGMA;
 use crate::calibration::{EnergyCalibration, least_squares3};
 use crate::error::AnalysisError;
+use crate::fit::FittedPeak;
 use crate::roi::Roi;
 use crate::settings::CalculationSettings;
 use crate::spectrum::Spectrum;
@@ -62,6 +63,14 @@ pub struct PeakInfo {
     pub fw_x_m: f64,
     /// The Gaussian fit, when one could be made.
     pub fit: Option<GaussianFit>,
+    /// Every line the region turned out to hold, when it holds more than one.
+    ///
+    /// Empty for an ordinary single peak, so nothing that reads a region as
+    /// one peak has to change. When it is not empty the region is a
+    /// multiplet, [`PeakInfo::centroid`] and [`PeakInfo::fit`] describe the
+    /// strongest of these lines rather than the midpoint of the bump, and the
+    /// per-line areas are here.
+    pub multiplet: Vec<FittedPeak>,
 }
 
 impl PeakInfo {
@@ -118,11 +127,42 @@ impl PeakInfo {
     }
 }
 
-/// Computes the Peak Info figures for a region.
+/// Computes the Peak Info figures for a region, as one peak.
+///
+/// Cheap and unconditional: this is what the region tables, the reports and
+/// the acquisition presets call, sometimes for every region on every frame.
+/// It never asks whether the region holds more than one line - see
+/// [`resolved_peak_info`] for that, which costs some tens of milliseconds and
+/// is meant for one region at a time.
 pub fn peak_info(
     spectrum: &Spectrum,
     roi: Roi,
     settings: &CalculationSettings,
+) -> Result<PeakInfo, AnalysisError> {
+    peak_info_inner(spectrum, roi, settings, false)
+}
+
+/// Peak Info for a region, having first asked how many lines are in it.
+///
+/// Everything [`peak_info`] reports, plus [`PeakInfo::multiplet`] when the
+/// counts turn out to hold more than one line - in which case the centroid
+/// and the fit describe the strongest of them rather than the middle of the
+/// bump. This is what an operator asking about one particular peak should
+/// get; it fits the whole region several times over and takes long enough
+/// that running it across a table of regions would be felt.
+pub fn resolved_peak_info(
+    spectrum: &Spectrum,
+    roi: Roi,
+    settings: &CalculationSettings,
+) -> Result<PeakInfo, AnalysisError> {
+    peak_info_inner(spectrum, roi, settings, true)
+}
+
+fn peak_info_inner(
+    spectrum: &Spectrum,
+    roi: Roi,
+    settings: &CalculationSettings,
+    resolve: bool,
 ) -> Result<PeakInfo, AnalysisError> {
     let length = spectrum.len();
     if length == 0 {
@@ -219,11 +259,39 @@ pub fn peak_info(
         (0.0, 0.0)
     };
 
-    let fit = fit_gaussian(&net, l);
-    let centroid = match &fit {
+    let mut fit = fit_gaussian(&net, l);
+    let mut centroid = match &fit {
         Some(fit) => fit.centroid,
         None => moment_centroid(&net, l).unwrap_or_else(|| roi.center()),
     };
+
+    // Is this one line or several? The single-Gaussian fit above cannot tell -
+    // it is a parabola through one bump's logarithm and will fit the middle
+    // of a doublet as confidently as it fits a real peak, reporting a width
+    // half again too large and a centroid that belongs to neither line. So
+    // the whole region is fitted at once and asked how many peaks it holds.
+    // Only a region that turns out to hold more than one is treated
+    // differently; everything else keeps the measurement it always had.
+    let multiplet = match resolve {
+        true => multiplet_in(&spectrum.as_f64(), roi, fwhm, max_net),
+        false => Vec::new(),
+    };
+    if let Some(strongest) = multiplet
+        .iter()
+        .max_by(|a, b| {
+            a.amplitude
+                .partial_cmp(&b.amplitude)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .filter(|_| multiplet.len() > 1)
+    {
+        centroid = strongest.centroid;
+        fit = Some(GaussianFit {
+            amplitude: strongest.amplitude,
+            centroid: strongest.centroid,
+            sigma: strongest.sigma,
+        });
+    }
 
     Ok(PeakInfo {
         roi,
@@ -238,8 +306,116 @@ pub fn peak_info(
         fwhm,
         fw_x_m,
         fit,
+        multiplet,
     })
 }
+
+/// The lines a region holds, when it holds more than one.
+///
+/// Empty for a region the joint fit reads as a single peak - which is the
+/// common case and the one that must stay cheap and unchanged - and empty
+/// when the fit cannot be made at all.
+///
+/// The width to start from is the region's own measured FWHM. The shape
+/// calibration is deliberately not consulted: a file's `$SHAPE_CAL` is
+/// written whether or not anyone calibrated shape, and a fit seeded from a
+/// wrong width searches the wrong neighbourhood. The measured width is
+/// inflated when the region really is a doublet, but the fit shrinks it as it
+/// adds peaks, so an inflated start is the right kind of wrong.
+fn multiplet_in(counts: &[f64], roi: Roi, measured_fwhm: f64, max_net: f64) -> Vec<FittedPeak> {
+    if max_net <= 0.0 {
+        return Vec::new();
+    }
+    let fwhm = if measured_fwhm > 1.0 {
+        measured_fwhm
+    } else {
+        roi.len() as f64 / 4.0
+    };
+    let fit = crate::fit::fit_multiplet(
+        counts,
+        roi,
+        roi.center(),
+        fwhm / FWHM_PER_SIGMA,
+        MOST_LINES_IN_A_REGION,
+        crate::fit::FitOptions::default(),
+    );
+    match fit {
+        Some(fit) if fit.peaks.len() > 1 && believable_lines(&fit.peaks, fwhm) => fit.peaks,
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a set of fitted lines is a resolution of the bump or a decoration
+/// of something that was never a peak.
+///
+/// The same two questions wherever a region is separated, so that
+/// double-clicking a bump and searching for it agree about what a line is.
+/// Both are asked against the bump itself rather than against the width law,
+/// because when a bump really is two lines the law has already been taught
+/// that bump's merged width and is the wrong ruler for its parts.
+///
+/// How much narrower may the parts be? A merged pair reads about twice a
+/// single line's width when the two are a width apart, and three times at two
+/// widths, so a third of the whole is as narrow as an honest part gets.
+/// Narrower is not a resolution but a spike: the overflow wall at the top of
+/// one bench background - a jagged pile-up artefact, never a peak - offered
+/// three "lines" a quarter the width of the bump holding them. Wider than the
+/// bump is not a resolution either, since separating something can only make
+/// its parts smaller than the whole; the low-level discriminator's cut-on at
+/// the bottom of every spectrum, which is a peak's rising flank with no peak
+/// behind it, offered lines half again wider than itself.
+///
+/// And a line far smaller than its neighbour is much more likely to be the
+/// strong peak's own shape than a separate line: a tail not quite caught, a
+/// percent of asymmetry. Shape errors are small and a real line has no reason
+/// to be. Ba-133's genuine 79.6 and 81.0 keV pair stands at 8% and is kept;
+/// the companion the fit offered beside the same source's 356 keV line, which
+/// the counts show as a clean single peak, stood at 1.3% and is not.
+fn believable_lines(lines: &[FittedPeak], bump_fwhm: f64) -> bool {
+    let strongest = lines.iter().map(|line| line.area).fold(0.0f64, f64::max);
+    lines.iter().all(|line| {
+        let share = line.fwhm() / bump_fwhm.max(f64::EPSILON);
+        (SPLIT_WIDTH_BAND.0..=SPLIT_WIDTH_BAND.1).contains(&share)
+            && line.area >= MIN_COMPANION_SHARE * strongest
+    })
+}
+
+/// The half-width of a region drawn around a peak to ask what it holds.
+///
+/// Three widths each side, and never less than twenty channels. The size is
+/// set by what could overlap the peak rather than by where the peak ends,
+/// which is why it is so much wider than the peak: a companion has to sit a
+/// full width inside the window before the fit will believe in it - against
+/// the window's edge a Gaussian is fitted from one side only and can be
+/// anything - so a window drawn just wide enough to contain a neighbour puts
+/// that neighbour exactly where it will be disbelieved. At two and a half
+/// widths a real four-to-one pair one and a fifth widths apart was lost that
+/// way on seven noise realisations in sixteen; at three widths, three.
+///
+/// The floor of twenty channels is what makes the question askable at all on
+/// a narrow germanium line, which does not fill enough channels to support a
+/// two-Gaussian model inside its own three widths. The extra span is nearly
+/// all continuum, which is what the continuum term is for.
+///
+/// Everything that draws its own region uses this, so that double-clicking a
+/// bump and searching for it are asking about the same channels. They are
+/// not otherwise: with the search looking at forty channels and the
+/// double-click at thirty, the same overflow wall came back as three pieces
+/// to one and two to the other.
+pub fn resolving_region(centroid: f64, fwhm: f64, length: usize) -> Option<Roi> {
+    let half = (3.0 * fwhm).ceil().max(20.0);
+    let low = (centroid - half).max(0.0) as usize;
+    let high = ((centroid + half) as usize).min(length.saturating_sub(1));
+    (high > low).then(|| Roi::new(low, high))
+}
+
+/// How many lines one region is allowed to resolve into.
+///
+/// Three covers every multiplet an operator marks by hand - Eu-152's 1,085
+/// and 1,089 keV pair, Ba-133's 79 and 81, a photopeak with a
+/// single-escape line leaning on it. Past three, a region wide enough to
+/// hold four lines is a region that should have been marked as two.
+const MOST_LINES_IN_A_REGION: usize = 3;
 
 /// Width of a peak at an absolute level, by linear interpolation between the
 /// background-subtracted channels. Returns 0.0 when the level is not crossed on
@@ -369,7 +545,11 @@ pub struct FoundPeak {
     /// from the shape calibration when the counts agree with it, otherwise
     /// from the width law the spectrum taught itself.
     pub width: f64,
-    /// Signal-to-noise of the matched-filter response, in Poisson sigmas.
+    /// How firmly the peak is held, in sigmas: the matched filter's
+    /// signal-to-noise for a peak the filter found on its own, and the
+    /// fitted area over its own uncertainty for one separated out of a
+    /// multiplet. Both answer "how sure are we", on the same scale, which is
+    /// what the sensitivity setting and the neighbour resolution need of it.
     pub significance: f64,
     /// Rough net area above the local baseline.
     pub net_estimate: f64,
@@ -409,14 +589,107 @@ pub fn peak_search(spectrum: &Spectrum, settings: &CalculationSettings) -> Vec<F
     // 38 genuine lines and lost eight of them to a cap of 40, each pushed
     // out by a stronger real line. A hundred covers the busiest natural
     // spectrum with room to spare.
-    crate::matched::find(&data, &widths, min_snr, crate::matched::width_gate(), 100)
-        .into_iter()
-        .map(|found| FoundPeak {
-            channel: found.centroid.round().max(0.0) as usize,
-            centroid: found.centroid,
-            width: found.fwhm,
-            significance: found.snr,
-            net_estimate: found.area,
+    let found: Vec<FoundPeak> =
+        crate::matched::find(&data, &widths, min_snr, crate::matched::width_gate(), 100)
+            .into_iter()
+            .map(|found| FoundPeak {
+                channel: found.centroid.round().max(0.0) as usize,
+                centroid: found.centroid,
+                width: found.fwhm,
+                significance: found.snr,
+                net_estimate: found.area,
+            })
+            .collect();
+    resolve_multiplets(&data, found)
+}
+
+/// The smallest share of a region's strongest line that a companion may hold.
+///
+/// See [`believable_lines`].
+const MIN_COMPANION_SHARE: f64 = 0.05;
+
+/// How wide a split's parts may be, as a share of the bump they came from.
+///
+/// See [`believable_lines`] for what each end is defending against.
+const SPLIT_WIDTH_BAND: (f64, f64) = (0.33, 1.15);
+
+/// Splits any peak the filter merged, by fitting its region.
+///
+/// The matched filter answers with one maximum per bump, and two lines closer
+/// than about one and a fifth of a width make one bump: the kernel is as wide
+/// as a peak, so it smooths a pair that close into a single response. Worse,
+/// the merge is self-sustaining - the width the bump measures is half again a
+/// real peak's, the spectrum's width law learns that width, and a kernel
+/// built to the learned width is now far too wide to ever separate the pair
+/// that taught it. Two lines a full width apart were merged into one 27
+/// channels wide where the truth is 14.
+///
+/// Fitting the region settles it, because a fit is not smoothing anything:
+/// two Gaussians and one continuum either account for the counts better than
+/// one Gaussian or they do not. Only where the fit is sure - see
+/// [`crate::fit`] for what "sure" costs - is the peak replaced by its parts.
+fn resolve_multiplets(counts: &[f64], found: Vec<FoundPeak>) -> Vec<FoundPeak> {
+    let mut resolved: Vec<FoundPeak> = Vec::with_capacity(found.len());
+    for peak in found {
+        let mut parts = split_of(counts, &peak);
+        match parts.len() {
+            0 => resolved.push(peak),
+            _ => resolved.append(&mut parts),
+        }
+    }
+    // Neighbouring regions overlap, so the same line can be found twice -
+    // once on its own account and once inside its neighbour's region. The
+    // stronger word wins, exactly as it does in the search itself.
+    resolved.sort_by(|a, b| {
+        b.significance
+            .partial_cmp(&a.significance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<FoundPeak> = Vec::with_capacity(resolved.len());
+    for peak in resolved {
+        let separation = (peak.width * 0.5).max(2.0);
+        if kept
+            .iter()
+            .all(|held| (held.centroid - peak.centroid).abs() >= separation)
+        {
+            kept.push(peak);
+        }
+    }
+    kept.sort_by(|a, b| {
+        a.centroid
+            .partial_cmp(&b.centroid)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    kept
+}
+
+/// The lines one found peak turns out to be, or empty if it is just itself.
+fn split_of(counts: &[f64], peak: &FoundPeak) -> Vec<FoundPeak> {
+    let Some(region) = resolving_region(peak.centroid, peak.width, counts.len()) else {
+        return Vec::new();
+    };
+    let fit = crate::fit::fit_multiplet(
+        counts,
+        region,
+        peak.centroid,
+        peak.width / FWHM_PER_SIGMA,
+        MOST_LINES_IN_A_REGION,
+        crate::fit::FitOptions::default(),
+    );
+    let Some(fit) = fit.filter(|fit| fit.peaks.len() > 1) else {
+        return Vec::new();
+    };
+    if !believable_lines(&fit.peaks, peak.width) {
+        return Vec::new();
+    }
+    fit.peaks
+        .iter()
+        .map(|line| FoundPeak {
+            channel: line.centroid.round().max(0.0) as usize,
+            centroid: line.centroid,
+            width: line.fwhm(),
+            significance: line.significance(),
+            net_estimate: line.area,
         })
         .collect()
 }
@@ -636,6 +909,162 @@ mod tests {
             (fit.sigma - 4.0).abs() < 0.2,
             "the width was read off the noise: {}",
             fit.sigma
+        );
+    }
+
+    /// Counts holding Gaussians on a sloping continuum.
+    fn region_counts(peaks: &[(f64, f64, f64)]) -> Vec<f64> {
+        (0..400)
+            .map(|channel| {
+                let x = channel as f64;
+                3000.0 - 4.0 * x
+                    + peaks
+                        .iter()
+                        .map(|(centre, sigma, area)| {
+                            let z = (x - centre) / sigma;
+                            area / (sigma * (2.0 * std::f64::consts::PI).sqrt())
+                                * (-0.5 * z * z).exp()
+                        })
+                        .sum::<f64>()
+            })
+            .collect()
+    }
+
+    fn bump(centroid: f64, width: f64) -> FoundPeak {
+        FoundPeak {
+            channel: centroid.round() as usize,
+            centroid,
+            width,
+            significance: 50.0,
+            net_estimate: 0.0,
+        }
+    }
+
+    /// A whisper beside a shout is the shout's own shape, not a second line.
+    ///
+    /// This is Ba-133's 356 keV line as the bench corpus has it: a clean
+    /// single peak that a fit will nonetheless improve on by adding a
+    /// companion a fiftieth its size, because no Gaussian is exactly the
+    /// shape of a real peak. A companion has to hold a real share of the
+    /// region before it is a line.
+    #[test]
+    fn a_companion_far_smaller_than_its_neighbour_is_not_a_line() {
+        let sigma = 6.0;
+        let fwhm = FWHM_PER_SIGMA * sigma;
+        let counts = region_counts(&[(200.0, sigma, 400_000.0), (200.0 + fwhm, sigma, 8_000.0)]);
+        // Two percent of its neighbour: under the share guard, not a line.
+        let parts = split_of(&counts, &bump(200.0, fwhm));
+        assert!(
+            parts.is_empty(),
+            "a 2% companion was reported as a line: {:?}",
+            parts.iter().map(|p| p.centroid).collect::<Vec<_>>()
+        );
+        // Ten percent of it, and the same fit is believed - so the guard is
+        // about the share, not about refusing to split at all.
+        let counts = region_counts(&[(200.0, sigma, 400_000.0), (200.0 + fwhm, sigma, 40_000.0)]);
+        let parts = split_of(&counts, &bump(200.0, fwhm));
+        assert_eq!(parts.len(), 2, "a 10% companion is a line: {parts:?}");
+    }
+
+    /// The rule that decides whether a set of fitted lines is a resolution.
+    ///
+    /// Stated directly because the two ends of it defend against different
+    /// real things, and both were found on real files rather than reasoned
+    /// out. Below a third of the bump's width the "lines" are the
+    /// one-channel structure of an overflow artefact; above the bump's own
+    /// width they are decoration on an edge - the discriminator cut-on at the
+    /// bottom of every spectrum came back as two lines and then three, each
+    /// wider than the bump containing them, which cannot be what separating
+    /// something does.
+    #[test]
+    fn a_resolution_makes_parts_smaller_than_the_whole() {
+        let line = |centroid: f64, fwhm: f64, area: f64| FittedPeak {
+            centroid,
+            sigma: fwhm / FWHM_PER_SIGMA,
+            amplitude: area / (fwhm / FWHM_PER_SIGMA * (2.0 * std::f64::consts::PI).sqrt()),
+            area,
+            area_uncertainty: area / 50.0,
+        };
+        // Two honest halves of a ten-channel bump.
+        assert!(believable_lines(
+            &[line(100.0, 7.0, 5_000.0), line(107.0, 7.0, 5_000.0)],
+            10.0
+        ));
+        // Wider than the bump they came out of: an edge, not a pair.
+        assert!(!believable_lines(
+            &[line(100.0, 13.0, 5_000.0), line(107.0, 13.0, 5_000.0)],
+            10.0
+        ));
+        // A quarter of the bump's width: spikes inside an artefact.
+        assert!(!believable_lines(
+            &[line(100.0, 2.5, 5_000.0), line(107.0, 2.5, 5_000.0)],
+            10.0
+        ));
+        // A companion a fiftieth of its neighbour: the strong line's shape.
+        assert!(!believable_lines(
+            &[line(100.0, 7.0, 5_000.0), line(107.0, 7.0, 100.0)],
+            10.0
+        ));
+        // A companion a tenth of it, which Ba-133's 79.6 keV line is: a line.
+        assert!(believable_lines(
+            &[line(100.0, 7.0, 5_000.0), line(107.0, 7.0, 500.0)],
+            10.0
+        ));
+    }
+
+    /// A step with nothing behind it is not a line, however it is decorated.
+    ///
+    /// Every spectrum begins with one: below the low-level discriminator the
+    /// counts are exactly zero, and at it they step to the continuum inside a
+    /// channel. That edge is a peak's rising flank with no peak behind it, and
+    /// the fit will put lines on it - wider ones than the bump it was asked
+    /// about, which is the tell, because separating something can only make
+    /// its parts smaller than the whole. On one bench Cs-137 spectrum this
+    /// edge came back as two lines and then three.
+    #[test]
+    fn a_step_with_nothing_behind_it_is_not_a_line() {
+        // Nothing at all, then a flat continuum: the discriminator's cut-on.
+        let counts: Vec<f64> = (0..400)
+            .map(|channel| if channel < 190 { 0.0 } else { 150.0 })
+            .collect();
+        // What the search reports there: a narrow bump on the edge itself.
+        let parts = split_of(&counts, &bump(192.0, 2.2));
+        assert!(
+            parts.is_empty(),
+            "the cut-on was decorated with lines: {:?}",
+            parts
+                .iter()
+                .map(|p| (p.centroid, p.width))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Pieces far narrower than the bump they came from are not lines either.
+    ///
+    /// The overflow wall at the top of a spectrum is a jagged pile-up
+    /// artefact several channels wide with one-channel structure in it; asked
+    /// to resolve it, the fit will happily offer three "lines" a quarter the
+    /// width of anything the detector can produce there.
+    #[test]
+    fn pieces_much_narrower_than_the_bump_are_not_lines() {
+        let mut counts = region_counts(&[]);
+        // Three narrow spikes inside what a search would call one wide bump.
+        for (centre, area) in [(196.0, 60_000.0), (200.0, 60_000.0), (204.0, 60_000.0)] {
+            for (channel, value) in counts.iter_mut().enumerate() {
+                let z = (channel as f64 - centre) / 0.8;
+                *value += area / (0.8 * (2.0 * std::f64::consts::PI).sqrt()) * (-0.5 * z * z).exp();
+            }
+        }
+        // The search would report one bump about 14 channels wide here; its
+        // parts measure under two, which is a fifth of that.
+        let parts = split_of(&counts, &bump(200.0, 14.0));
+        assert!(
+            parts.is_empty(),
+            "spikes a fifth the bump's width were called lines: {:?}",
+            parts
+                .iter()
+                .map(|p| (p.centroid, p.width))
+                .collect::<Vec<_>>()
         );
     }
 }
