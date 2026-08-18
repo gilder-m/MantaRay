@@ -1980,7 +1980,11 @@ impl App {
                         spectrum.rois = mantaray_core::RoiSet::default();
                     }
                     let found = mark_peaks(spectrum, &settings);
-                    self.status = format!("{found} peak(s) marked");
+                    // Close peaks share one merged region, so the two counts
+                    // can differ - a split doublet is two peaks in one
+                    // region, and saying only "2 peaks" reads as two regions.
+                    let regions = spectrum.rois.iter().count();
+                    self.status = format!("{found} peak(s) marked in {regions} region(s)");
                 }
             }
             Action::PeakInfoAtMarker => self.peak_info_at_marker(),

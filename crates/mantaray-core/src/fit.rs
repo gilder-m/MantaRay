@@ -257,7 +257,8 @@ impl Default for FitOptions {
 /// for it - each new Gaussian must improve the fit by a set margin of
 /// chi-square, carry several sigma of its own area, stand half a width from
 /// its neighbours and a full width from the region's edges. `most` caps the
-/// count; a region has to be very busy indeed to hold more than three.
+/// count, though one peak is always attempted - a `most` of zero behaves as
+/// one; a region has to be very busy indeed to hold more than three.
 ///
 /// `sigma_guess` is the width the resolution model expects here. It is a
 /// starting point and a scale for the bounds, not a constraint: a fit that
@@ -444,6 +445,11 @@ fn worst_residual(counts: &[f64], fit: &RegionFit) -> Option<f64> {
 ///
 /// The centroids and the shared width are searched for; everything else -
 /// the amplitudes, the continuum, the step - follows exactly from them.
+///
+/// Every seed must lie inside the region and `sigma_guess` must be finite;
+/// `None` otherwise. A seed outside the region is a caller's mistake, and
+/// clamping it to the edge - which is where the bounds would put it - would
+/// manufacture a peak there instead of surfacing the mistake.
 pub fn fit_region(
     counts: &[f64],
     roi: Roi,
@@ -451,7 +457,14 @@ pub fn fit_region(
     sigma_guess: f64,
     options: FitOptions,
 ) -> Option<RegionFit> {
-    if seeds.is_empty() || roi.end >= counts.len() {
+    if seeds.is_empty() || roi.start > roi.end || roi.end >= counts.len() {
+        return None;
+    }
+    if seeds
+        .iter()
+        .any(|seed| !(roi.start as f64..=roi.end as f64).contains(seed))
+        || !sigma_guess.is_finite()
+    {
         return None;
     }
     let width = roi.len();
@@ -486,11 +499,19 @@ pub fn fit_region(
     let sigma0 = sigma_guess.max(0.5);
     // The width may range widely - the guess is a resolution model's opinion,
     // and the region may be exactly where that opinion is wrong - but not so
-    // far that one Gaussian can impersonate the continuum.
-    let sigma_bounds = (
-        (0.3 * sigma0).max(0.5),
-        (3.0 * sigma0).min(width as f64 / 4.0).max(0.6),
-    );
+    // far that one Gaussian can impersonate the continuum. The lower bound
+    // yields to the upper: a guess large enough that three tenths of it
+    // reaches a quarter of the region used to invert the bounds, and `clamp`
+    // aborts the process on inverted bounds rather than picking an end. A
+    // guess that large leaves the width nowhere to move at all, and a fit
+    // that cannot move the width has nothing to say about the region, so it
+    // is refused rather than returned pinned at the ceiling.
+    let sigma_high = (3.0 * sigma0).min(width as f64 / 4.0).max(0.6);
+    let sigma_low = (0.3 * sigma0).max(0.5).min(sigma_high);
+    if sigma_low >= sigma_high {
+        return None;
+    }
+    let sigma_bounds = (sigma_low, sigma_high);
     let mut start: Vec<f64> = seeds.to_vec();
     start.push(sigma0.clamp(sigma_bounds.0, sigma_bounds.1));
     let mut bounds: Vec<(f64, f64)> = seeds
@@ -569,6 +590,9 @@ pub fn fit_region(
         tails,
         tail_widths: TAIL_WIDTHS,
         chi_square: solution.chi_square,
+        // Counted against the full model: a coefficient the active set
+        // pinned at zero still counts as spent, which errs toward claiming
+        // fewer degrees of freedom than the data really kept.
         degrees_of_freedom: width.saturating_sub(parameters),
     })
 }
@@ -690,8 +714,13 @@ fn solve_linear(
             }
         }
         let solution = solve_n(ata.clone(), atb)?;
-        // The first negative constrained coefficient is dropped and the rest
+        // The most negative constrained coefficient is dropped and the rest
         // re-solved; repeating until none is negative is the active set.
+        // Dropped coefficients are never readmitted - a full NNLS would
+        // revisit them when later drops change the picture - so the solution
+        // is feasible but can sit a little above the true constrained
+        // minimum. The shortfall is paid identically by every candidate the
+        // ladder compares, which is what the comparisons need.
         let offender = active
             .iter()
             .enumerate()
@@ -781,8 +810,9 @@ fn step_shape(channel: f64, centre: f64, sigma: f64) -> f64 {
 /// `exp(d/b + s^2/(2 b^2)) * erfc(d/(sqrt(2) s) + s/(sqrt(2) b))`, the
 /// standard Hypermet tail - an exponential of decay length `b` convolved with
 /// the Gaussian, so it joins the peak smoothly instead of stepping. Normalised
-/// to one at the centroid, so its coefficient reads as a fraction of the peak
-/// height. Zero well above the peak, where the exponential's growth and the
+/// to one at the centroid, so its coefficient is the tail's height there in
+/// counts, on the same scale as the Gaussian amplitudes - see
+/// [`RegionFit::tails`]. Zero well above the peak, where the exponential's growth and the
 /// error function's decay would otherwise multiply out to a floating-point
 /// infinity times zero.
 fn tail_shape(channel: f64, centre: f64, sigma: f64, widths: f64) -> f64 {
@@ -826,8 +856,9 @@ fn erfc(x: f64) -> f64 {
 /// Derivative-free because the objective is a least-squares solve rather than
 /// a formula, and the problem is small - a doublet is three parameters - so
 /// the simplex's indifference to conditioning is worth more than a gradient
-/// method's speed. Bounds are applied by clamping inside the objective, which
-/// leaves the search a flat shelf outside them rather than a cliff.
+/// method's speed. Bounds are applied by projection: every point the search
+/// proposes is clamped into the box before it is evaluated or kept, so the
+/// simplex itself always lies inside the bounds.
 fn nelder_mead(
     start: &[f64],
     steps: &[f64],
@@ -870,10 +901,24 @@ fn nelder_mead_once(
         (clamped, value)
     };
     let mut simplex: Vec<(Vec<f64>, f64)> = Vec::with_capacity(n + 1);
-    simplex.push(evaluate(start));
+    let (start, at_start) = evaluate(start);
+    simplex.push((start.clone(), at_start));
     for axis in 0..n {
-        let mut point = start.to_vec();
-        point[axis] += steps[axis];
+        let mut point = start.clone();
+        // A start sitting on an upper bound would clamp an upward step
+        // straight back onto itself: the simplex would open with no extent
+        // along this axis, and since every move below is an affine
+        // combination of the vertices, nothing could ever give it one - the
+        // parameter would sit silently pinned wherever it began, and a fit
+        // whose width guess landed on the ceiling duly reported the ceiling,
+        // to high confidence, as the measured width. Step downward instead
+        // when upward has nowhere to go.
+        let stepped = (point[axis] + steps[axis]).min(bounds[axis].1);
+        point[axis] = if stepped > point[axis] {
+            stepped
+        } else {
+            (point[axis] - steps[axis]).max(bounds[axis].0)
+        };
         simplex.push(evaluate(&point));
     }
     // Enough iterations for a three-parameter problem to converge several
@@ -985,6 +1030,146 @@ mod tests {
                         .sum::<f64>()
             })
             .collect()
+    }
+
+    /// A width guess too big for the region is refused, not fitted.
+    ///
+    /// A guess past the region's ceiling used to invert the width bounds,
+    /// and `clamp` aborts the whole process on inverted bounds. The fit has
+    /// no answer for such a region either way - the width would have nowhere
+    /// to move - but "no answer" is `None`, never an abort.
+    #[test]
+    fn a_width_guess_too_big_for_the_region_is_refused_not_fatal() {
+        let counts = spectrum(300, 100.0, 0.0, &[(110.0, 3.0, 50_000.0)]);
+        let narrow = fit_region(
+            &counts,
+            Roi::new(100, 120),
+            &[110.0],
+            20.0,
+            FitOptions::default(),
+        );
+        assert!(narrow.is_none(), "{narrow:?}");
+        let infinite = fit_region(
+            &counts,
+            Roi::new(50, 250),
+            &[110.0],
+            f64::INFINITY,
+            FitOptions::default(),
+        );
+        assert!(infinite.is_none(), "{infinite:?}");
+    }
+
+    /// A width guess at the ceiling still finds the true width.
+    ///
+    /// The guess starts the search on the upper bound, where a simplex built
+    /// only by stepping upward has no extent in the width at all - it used
+    /// to return the ceiling itself, to high confidence, as the measurement.
+    /// The opening step goes downhill instead when up is out of bounds.
+    #[test]
+    fn a_width_guess_at_the_ceiling_still_finds_the_true_width() {
+        let counts = spectrum(400, 50.0, 0.0, &[(200.0, 6.0, 100_000.0)]);
+        // The region allows sigma up to (240 - 160 + 1) / 4 = 20.25; a guess
+        // of 21 lands exactly there.
+        let fit = fit_region(
+            &counts,
+            Roi::new(160, 240),
+            &[200.0],
+            21.0,
+            FitOptions::default(),
+        )
+        .expect("a clean peak fits");
+        assert!(
+            (fit.peaks[0].sigma - 6.0).abs() < 0.5,
+            "sigma {} should be about 6, not the bound",
+            fit.peaks[0].sigma
+        );
+    }
+
+    /// A seed outside the region is refused rather than clamped to its edge.
+    #[test]
+    fn a_seed_outside_the_region_is_refused() {
+        let counts = spectrum(400, 100.0, 0.0, &[(200.0, 4.0, 50_000.0)]);
+        for seed in [320.0, 100.0, f64::NAN] {
+            let fit = fit_region(
+                &counts,
+                Roi::new(150, 250),
+                &[seed],
+                4.0,
+                FitOptions::default(),
+            );
+            assert!(fit.is_none(), "seed {seed} returned {fit:?}");
+        }
+    }
+
+    /// A region built inside out is refused, not underflowed.
+    ///
+    /// `Roi::new` orders its bounds, but the fields are public and a
+    /// deserialized region carries whatever the file said.
+    #[test]
+    fn a_region_built_inside_out_is_refused() {
+        let counts = spectrum(300, 100.0, 0.0, &[(110.0, 3.0, 50_000.0)]);
+        let fit = fit_region(
+            &counts,
+            Roi {
+                start: 120,
+                end: 100,
+            },
+            &[110.0],
+            3.0,
+            FitOptions::default(),
+        );
+        assert!(fit.is_none(), "{fit:?}");
+    }
+
+    /// Every solved coefficient lands in the field named for it.
+    ///
+    /// Built from the model's own shapes, so the least-squares solution is
+    /// the construction; what is being tested is the bookkeeping that turns
+    /// the coefficient vector back into continuum, step and tails - an index
+    /// swap there would satisfy every fit-quality test while labelling the
+    /// step as a tail.
+    #[test]
+    fn the_solved_coefficients_land_in_their_named_fields() {
+        let (centre, sigma) = (200.0, 6.0);
+        let (floor, amplitude, step_height, tail_height) = (400.0, 5_000.0, 60.0, 250.0);
+        let counts: Vec<f64> = (0..400)
+            .map(|channel| {
+                let x = channel as f64;
+                let z = (x - centre) / sigma;
+                floor
+                    + amplitude * (-0.5 * z * z).exp()
+                    + step_height * step_shape(x, centre, sigma)
+                    + tail_height * tail_shape(x, centre, sigma, TAIL_WIDTHS)
+            })
+            .collect();
+        let fit = fit_region(
+            &counts,
+            Roi::new(150, 250),
+            &[centre],
+            sigma,
+            FitOptions::default(),
+        )
+        .expect("the model fits its own shape");
+        assert!(
+            (fit.continuum[0] - floor).abs() < 0.05 * floor,
+            "continuum {} should be about {floor}",
+            fit.continuum[0]
+        );
+        assert!(
+            (fit.step - step_height).abs() < 0.2 * step_height,
+            "step {} should be about {step_height}",
+            fit.step
+        );
+        assert!(
+            (fit.tails[0] - tail_height).abs() < 0.2 * tail_height,
+            "tail {} should be about {tail_height}",
+            fit.tails[0]
+        );
+        assert!(
+            (fit.peaks[0].amplitude - amplitude).abs() < 0.05 * amplitude,
+            "amplitude {} should be about {amplitude}",
+            fit.peaks[0].amplitude
+        );
     }
 
     /// One clean peak comes back with its own parameters.

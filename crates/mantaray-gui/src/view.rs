@@ -1775,11 +1775,11 @@ pub(crate) fn peak_info_lines(
                 None => format!("{:.2} ch", peak.centroid),
             };
             let width = match calibration {
-                Some(cal) => cal.width(peak.centroid, peak.fwhm()),
-                None => peak.fwhm(),
+                Some(cal) => format!("{:.2} {}", cal.width(peak.centroid, peak.fwhm()), cal.units),
+                None => format!("{:.2} ch", peak.fwhm()),
             };
             lines.push(format!(
-                "  {}: {position}  FWHM {width:.2}  area {:.0} \u{b1}{:.0}",
+                "  {}: {position}  FWHM {width}  area {:.0} \u{b1}{:.0}",
                 number + 1,
                 peak.area,
                 peak.area_uncertainty

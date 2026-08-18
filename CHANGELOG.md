@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+**The fit refuses what it cannot measure (2026-08-17).** A review of the new
+fitting found faults, all fixed here. A width guess too large for its region
+inverted the width bounds and brought the whole program down; such a region
+is now refused, because a width left nowhere to move measures nothing. A
+guess landing exactly on the permitted ceiling was silently kept there - the
+simplex opened with no extent along the width, and every later move is a
+combination of where it already is - so the ceiling itself came back, to
+high confidence, as the measured width; the opening step now goes downhill
+when upward is out of bounds, and the same region recovers the true width
+from the same guess. A seed outside the region was clamped to its edge
+rather than refused. The headline width of a resolved multiplet was still
+the merged bump's, printed beside the strongest line's centroid - one line's
+position wearing a two-line width, on the status line, on the card, and on
+the drawn FWHM bar; both headline widths now follow the fitted line. The
+`peaks --resolve` table printed its `└` rows' widths in energy under a
+column of widths in channels, two characters out of line and missing the
+delta column; the rows now match their table. "Marked N peaks" now also says
+how many regions those peaks landed in, because two lines of a close doublet
+share one merged region and the bare count read as two. And the sensitivity
+dial now covers every peak the search returns, however found: a split whose
+weakest line does not reach the dial is left as the bump the filter
+reported, which did.
+
+None of this moves the bench corpus: all fourteen spectra come back
+identical to the byte. One crowded field spectrum beyond it does move, and
+for the stated reason: the added-peak search opens its probes half a width
+and a width out from the strongest line, which can land within a step of the
+region's edge - exactly where the old simplex opened partly dead - and with
+the opening repaired it finds a third line in a close X-ray complex and
+re-measures two close pairs it already had.
+
 **A region is fitted as a whole, and told how many lines are in it
 (2026-08-14).** Double-clicking a peak now asks whether it is one peak. The
 whole region is fitted at once - several Gaussians sharing one width, on one
@@ -41,8 +72,9 @@ on a broad pedestal.
 
 Held back deliberately, and measured rather than assumed: a split has to
 survive a chi-square improvement of 40, a companion has to hold at least a
-twentieth of its region, the parts have to be narrower than the bump they
-came from, and no peak may sit within a width of the region's edge. Each of
+twentieth of the region's strongest line, the parts have to fit a width band
+drawn from the bump they came from - a third of it up to a shade wider than
+it - and no peak may sit within a width of the region's edge. Each of
 those was added because something real got past its absence - a clean Ba-133
 356 keV line offered a companion a fiftieth its size, the discriminator
 cut-on at the bottom of every spectrum offered three, the overflow wall at

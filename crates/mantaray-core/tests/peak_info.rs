@@ -283,6 +283,45 @@ fn resolving_is_what_separates_a_doublet_and_peak_info_stays_cheap() {
     );
 }
 
+/// The headline width of a multiplet is one line's, not the bump's.
+///
+/// The centroid names the strongest line, so every width printed beside it
+/// must belong to that line too. The merged bump's half-maximum crossing is
+/// half again a real line's width; quoting it next to one line's position
+/// put a two-line width on a one-line label, on the status line, on the
+/// card, and on the drawn FWHM bar.
+#[test]
+fn the_headline_width_of_a_multiplet_is_one_lines_not_the_bumps() {
+    let s = doublet(1.0);
+    let region = Roi::new(150, 250);
+    let settings = CalculationSettings::default();
+    let single_fwhm = 2.354_820_045_030_949 * 6.0;
+
+    let plain = peak_info(&s, region, &settings).expect("the region measures");
+    assert!(
+        plain.fwhm > single_fwhm + 4.0,
+        "the merged bump should measure well over one line: {}",
+        plain.fwhm
+    );
+
+    let resolved = mantaray_core::resolved_peak_info(&s, region, &settings).expect("and resolves");
+    assert_eq!(resolved.multiplet.len(), 2, "a doublet one width apart");
+    assert!(
+        (resolved.fwhm - single_fwhm).abs() < 2.0,
+        "the headline width {} should be one line's {single_fwhm:.1}, not the bump's {}",
+        resolved.fwhm,
+        plain.fwhm
+    );
+    // And the 1/x width follows the same Gaussian rather than the bump:
+    // for the default fw_x of 5 that is fwhm times sqrt(ln 5 / ln 2).
+    let expected = resolved.fwhm * (5.0f64.ln() / 2.0f64.ln()).sqrt();
+    assert!(
+        (resolved.fw_x_m - expected).abs() < 1e-6,
+        "fw_x_m {} should be {expected}",
+        resolved.fw_x_m
+    );
+}
+
 /// A region holding one peak reports no multiplet, however it is asked.
 #[test]
 fn a_single_peak_resolves_to_itself() {

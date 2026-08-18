@@ -67,9 +67,10 @@ pub struct PeakInfo {
     ///
     /// Empty for an ordinary single peak, so nothing that reads a region as
     /// one peak has to change. When it is not empty the region is a
-    /// multiplet, [`PeakInfo::centroid`] and [`PeakInfo::fit`] describe the
-    /// strongest of these lines rather than the midpoint of the bump, and the
-    /// per-line areas are here.
+    /// multiplet: [`PeakInfo::centroid`], [`PeakInfo::fit`], [`PeakInfo::fwhm`]
+    /// and [`PeakInfo::fw_x_m`] all describe the strongest of these lines
+    /// rather than the bump as a whole, the gross and net areas remain the
+    /// whole region's, and the per-line areas are here.
     pub multiplet: Vec<FittedPeak>,
 }
 
@@ -242,7 +243,7 @@ fn peak_info_inner(
         .unwrap_or(0);
     let max_net = net[peak_index];
 
-    let (fwhm, fw_x_m) = if max_net > 0.0 {
+    let (mut fwhm, mut fw_x_m) = if max_net > 0.0 {
         (
             width_at_level(&net, peak_index, max_net / 2.0),
             width_at_level(
@@ -291,6 +292,19 @@ fn peak_info_inner(
             centroid: strongest.centroid,
             sigma: strongest.sigma,
         });
+        // The headline measurements must all describe the same peak. The
+        // centroid names the strongest line, so the widths follow it -
+        // quoting the merged bump's half-maximum crossing beside one line's
+        // position would pin a two-line width on a one-line label. Both
+        // widths follow from the fitted Gaussian, which is the only place a
+        // single line's width exists: the bump the region actually draws
+        // never narrows to half of any one line's maximum.
+        fwhm = strongest.fwhm();
+        let x = settings
+            .fw_x
+            .clamp(CalculationSettings::MIN_FW_X, CalculationSettings::MAX_FW_X)
+            as f64;
+        fw_x_m = strongest.fwhm() * (x.ln() / std::f64::consts::LN_2).sqrt();
     }
 
     Ok(PeakInfo {
@@ -600,7 +614,7 @@ pub fn peak_search(spectrum: &Spectrum, settings: &CalculationSettings) -> Vec<F
                 net_estimate: found.area,
             })
             .collect();
-    resolve_multiplets(&data, found)
+    resolve_multiplets(&data, found, min_snr)
 }
 
 /// The smallest share of a region's strongest line that a companion may hold.
@@ -628,10 +642,10 @@ const SPLIT_WIDTH_BAND: (f64, f64) = (0.33, 1.15);
 /// two Gaussians and one continuum either account for the counts better than
 /// one Gaussian or they do not. Only where the fit is sure - see
 /// [`crate::fit`] for what "sure" costs - is the peak replaced by its parts.
-fn resolve_multiplets(counts: &[f64], found: Vec<FoundPeak>) -> Vec<FoundPeak> {
+fn resolve_multiplets(counts: &[f64], found: Vec<FoundPeak>, min_snr: f64) -> Vec<FoundPeak> {
     let mut resolved: Vec<FoundPeak> = Vec::with_capacity(found.len());
     for peak in found {
-        let mut parts = split_of(counts, &peak);
+        let mut parts = split_of(counts, &peak, min_snr);
         match parts.len() {
             0 => resolved.push(peak),
             _ => resolved.append(&mut parts),
@@ -664,7 +678,14 @@ fn resolve_multiplets(counts: &[f64], found: Vec<FoundPeak>) -> Vec<FoundPeak> {
 }
 
 /// The lines one found peak turns out to be, or empty if it is just itself.
-fn split_of(counts: &[f64], peak: &FoundPeak) -> Vec<FoundPeak> {
+///
+/// The sensitivity dial promises that every peak the search returns has
+/// reached `min_snr`, however the peak was found - so a split whose weakest
+/// line falls short of the dial is not taken, and the bump the filter
+/// reported (which did reach it) stands. Dropping just the short line
+/// instead would leave a set of lines that no longer accounts for the bump
+/// they came from.
+fn split_of(counts: &[f64], peak: &FoundPeak, min_snr: f64) -> Vec<FoundPeak> {
     let Some(region) = resolving_region(peak.centroid, peak.width, counts.len()) else {
         return Vec::new();
     };
@@ -680,6 +701,9 @@ fn split_of(counts: &[f64], peak: &FoundPeak) -> Vec<FoundPeak> {
         return Vec::new();
     };
     if !believable_lines(&fit.peaks, peak.width) {
+        return Vec::new();
+    }
+    if fit.peaks.iter().any(|line| line.significance() < min_snr) {
         return Vec::new();
     }
     fit.peaks
@@ -719,6 +743,11 @@ fn split_of(counts: &[f64], peak: &FoundPeak) -> Vec<FoundPeak> {
 /// same lines come back within a few percent and the fitted width matches
 /// the measured one. The region is never narrower than `2n + 1` channels,
 /// the minimum the background model needs. Existing regions are kept.
+///
+/// Peaks whose regions overlap share one merged region - the two lines of a
+/// close doublet are one region of interest, as they must be, since separate
+/// abutting regions would each take the other's peak for background. The
+/// count of peaks marked can therefore exceed the count of regions.
 ///
 /// Returns the number of peaks marked.
 pub fn mark_peaks(spectrum: &mut Spectrum, settings: &CalculationSettings) -> usize {
@@ -953,7 +982,7 @@ mod tests {
         let fwhm = FWHM_PER_SIGMA * sigma;
         let counts = region_counts(&[(200.0, sigma, 400_000.0), (200.0 + fwhm, sigma, 8_000.0)]);
         // Two percent of its neighbour: under the share guard, not a line.
-        let parts = split_of(&counts, &bump(200.0, fwhm));
+        let parts = split_of(&counts, &bump(200.0, fwhm), 3.0);
         assert!(
             parts.is_empty(),
             "a 2% companion was reported as a line: {:?}",
@@ -962,8 +991,34 @@ mod tests {
         // Ten percent of it, and the same fit is believed - so the guard is
         // about the share, not about refusing to split at all.
         let counts = region_counts(&[(200.0, sigma, 400_000.0), (200.0 + fwhm, sigma, 40_000.0)]);
-        let parts = split_of(&counts, &bump(200.0, fwhm));
+        let parts = split_of(&counts, &bump(200.0, fwhm), 3.0);
         assert_eq!(parts.len(), 2, "a 10% companion is a line: {parts:?}");
+    }
+
+    /// The sensitivity dial's promise covers split lines too.
+    ///
+    /// Every peak the search returns has reached the dial, however it was
+    /// found. A companion found by fitting enters on its fitted
+    /// significance, so a split whose weakest line falls short of the dial
+    /// is not taken - the bump the filter reported, which did reach the
+    /// dial, stands instead.
+    #[test]
+    fn a_split_whose_weakest_line_misses_the_dial_is_not_taken() {
+        let sigma = 6.0;
+        let fwhm = FWHM_PER_SIGMA * sigma;
+        let counts = region_counts(&[(200.0, sigma, 400_000.0), (200.0 + fwhm, sigma, 40_000.0)]);
+        let parts = split_of(&counts, &bump(200.0, fwhm), 3.0);
+        assert_eq!(parts.len(), 2, "this split is taken at the default dial");
+        let weakest = parts
+            .iter()
+            .map(|part| part.significance)
+            .fold(f64::INFINITY, f64::min);
+        let parts = split_of(&counts, &bump(200.0, fwhm), weakest + 1.0);
+        assert!(
+            parts.is_empty(),
+            "a split under the dial was taken: {:?}",
+            parts.iter().map(|p| p.significance).collect::<Vec<_>>()
+        );
     }
 
     /// The rule that decides whether a set of fitted lines is a resolution.
@@ -1028,7 +1083,7 @@ mod tests {
             .map(|channel| if channel < 190 { 0.0 } else { 150.0 })
             .collect();
         // What the search reports there: a narrow bump on the edge itself.
-        let parts = split_of(&counts, &bump(192.0, 2.2));
+        let parts = split_of(&counts, &bump(192.0, 2.2), 3.0);
         assert!(
             parts.is_empty(),
             "the cut-on was decorated with lines: {:?}",
@@ -1057,7 +1112,7 @@ mod tests {
         }
         // The search would report one bump about 14 channels wide here; its
         // parts measure under two, which is a fifth of that.
-        let parts = split_of(&counts, &bump(200.0, 14.0));
+        let parts = split_of(&counts, &bump(200.0, 14.0), 3.0);
         assert!(
             parts.is_empty(),
             "spikes a fifth the bump's width were called lines: {:?}",

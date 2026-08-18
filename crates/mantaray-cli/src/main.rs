@@ -611,20 +611,29 @@ fn resolved_lines(
             Some(cal) => {
                 let energy = cal.energy(line.centroid);
                 let matched = library.best_match(energy, 2.0);
+                // The same columns as the row above, with the fit's own
+                // width and area where the search's estimates sit: a width
+                // in channels under a column of widths in channels.
                 format!(
-                    "     \u{2514} {:>10.2} {:>10.2} {:>7.2} {:>11.0} {:<9}",
+                    "{:>4} {:>10.2} {:>10.2} {:>7.2} {:>11.0} {:<9} {:>7}",
+                    "\u{2514}",
                     line.centroid,
                     energy,
-                    cal.width(line.centroid, line.fwhm()),
+                    line.fwhm(),
                     line.area,
                     matched
                         .as_ref()
                         .map(|m| m.nuclide.name.as_str())
                         .unwrap_or("-"),
+                    matched
+                        .as_ref()
+                        .map(|m| format!("{:+.2}", m.delta))
+                        .unwrap_or_else(|| "-".to_string()),
                 )
             }
             None => format!(
-                "     \u{2514} {:>10.2} {:>7.2} {:>11.0}",
+                "{:>4} {:>10.2} {:>7.2} {:>11.0}",
+                "\u{2514}",
                 line.centroid,
                 line.fwhm(),
                 line.area
@@ -644,7 +653,8 @@ fn report(
     let settings = CalculationSettings::default();
     if spectrum.rois.is_empty() && mark {
         let marked = mark_peaks(&mut spectrum, &settings);
-        eprintln!("marked {marked} peak(s)");
+        let regions = spectrum.rois.iter().count();
+        eprintln!("marked {marked} peak(s) in {regions} region(s)");
     }
     let library = load_library(library_path)?;
     let options = if column {
@@ -669,7 +679,8 @@ fn analyse_command(
     let settings = CalculationSettings::default();
     if spectrum.rois.is_empty() {
         let marked = mark_peaks(&mut spectrum, &settings);
-        eprintln!("marked {marked} peak(s)");
+        let regions = spectrum.rois.iter().count();
+        eprintln!("marked {marked} peak(s) in {regions} region(s)");
     }
     let library = load_library(library_path)?;
     // Refused rather than reported empty: "no nuclides found" and "nothing to
@@ -726,7 +737,8 @@ fn auto_calibrate_command(
     let settings = CalculationSettings::default();
     if spectrum.rois.is_empty() {
         let marked = mark_peaks(&mut spectrum, &settings);
-        eprintln!("marked {marked} peak(s)");
+        let regions = spectrum.rois.iter().count();
+        eprintln!("marked {marked} peak(s) in {regions} region(s)");
     }
     // Centroids strongest first, which is the order the matcher wants.
     let mut peaks: Vec<(f64, f64)> = spectrum
