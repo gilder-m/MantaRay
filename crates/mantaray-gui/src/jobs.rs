@@ -140,7 +140,11 @@ pub fn run_next_sample(app: &mut App) -> Vec<Action> {
     let Some(job) = app.queue.current().cloned() else {
         return vec![Action::Status("the queue is empty".into())];
     };
-    if !app.changer.is_ready() {
+    if app
+        .changer
+        .as_ref()
+        .is_some_and(|changer| !changer.is_ready())
+    {
         return vec![Action::Status("the sample changer is still moving".into())];
     }
     let Some(index) = app.active else {
@@ -172,10 +176,20 @@ pub fn run_next_sample(app: &mut App) -> Vec<Action> {
     ))]
 }
 
-/// Finishes the sample being counted and advances the changer.
+/// Finishes the sample being counted and advances the changer, if any.
 pub fn finish_current_sample(app: &mut App) {
     app.queue.complete_current();
-    app.changer.request_change();
+    if let Some(changer) = &mut app.changer {
+        changer.request_change();
+    }
+}
+
+/// The refusal for a changer command when there is no changer.
+fn no_changer(command: &str) -> JobError {
+    JobError::host(format!(
+        "{command}: no sample changer is connected - change the sample by hand, \
+         or run this job from a build that has one"
+    ))
 }
 
 fn device(error: mantaray_device::DeviceError) -> JobError {
@@ -291,8 +305,12 @@ impl JobHost for App {
     }
 
     fn wait_changer(&mut self) -> Result<(), JobError> {
+        let changer = self
+            .changer
+            .as_mut()
+            .ok_or_else(|| no_changer("WAIT_CHANGER"))?;
         let mut guard = 0;
-        while !self.changer.poll(1.0) && guard < 1_000 {
+        while !changer.poll(1.0) && guard < 1_000 {
             guard += 1;
         }
         Ok(())
@@ -688,9 +706,13 @@ impl JobHost for App {
     }
 
     fn change_sample(&mut self) -> Result<(), JobError> {
-        self.changer.request_change();
+        let changer = self
+            .changer
+            .as_mut()
+            .ok_or_else(|| no_changer("CHANGE_SAMPLE"))?;
+        changer.request_change();
         let mut guard = 0;
-        while !self.changer.poll(1.0) && guard < 1_000 {
+        while !changer.poll(1.0) && guard < 1_000 {
             guard += 1;
         }
         Ok(())

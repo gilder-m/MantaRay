@@ -103,8 +103,8 @@ enum Commands {
         /// Nuclide library; the built-in standard library by default.
         #[arg(long)]
         library: Option<PathBuf>,
-        /// Constant absolute efficiency, as a fraction.
-        #[arg(long)]
+        /// Constant absolute efficiency, as a fraction (5 % is 0.05).
+        #[arg(long, value_parser = efficiency_fraction)]
         efficiency: Option<f64>,
         /// Sample quantity for per-unit results.
         #[arg(long)]
@@ -382,6 +382,24 @@ fn serve(address: &str, channels: usize) -> Result<()> {
     eprintln!("serving a {channels}-channel simulated MCB on {address} (Ctrl+C stops it)");
     mantaray_device::server::serve(listener, instrument).context("serving")?;
     Ok(())
+}
+
+/// Reads `--efficiency`, which must be a fraction above 0 and at most 1.
+///
+/// Taken as given, 0 reported every nuclide found at 0 Bq, and a percentage
+/// typed as one - 5 for 5 % - made every activity a hundred times too small.
+fn efficiency_fraction(text: &str) -> Result<f64, String> {
+    let value: f64 = text
+        .trim()
+        .parse()
+        .map_err(|_| format!("{text:?} is not a number"))?;
+    if value.is_finite() && value > 0.0 && value <= 1.0 {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{text} is not an efficiency: give a fraction above 0 and at most 1 (5 % is 0.05)"
+        ))
+    }
 }
 
 fn load(path: &Path) -> Result<Spectrum> {

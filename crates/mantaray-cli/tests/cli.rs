@@ -242,6 +242,27 @@ fn analyse_reports_an_activity_and_writes_csv() {
 }
 
 #[test]
+fn analyse_refuses_an_efficiency_that_is_not_a_fraction() {
+    // 0 used to report Cs-137 detected at 0 Bq; 5 (meant as 5 %) made every
+    // activity a hundred times too small.
+    let dir = workspace();
+    let path = dir.join("analyse-efficiency.chn");
+    sample(&path);
+    for bad in ["0", "5", "NaN", "inf"] {
+        let (stdout, stderr, ok) = run(&[
+            "analyse",
+            path.to_str().unwrap(),
+            "--library",
+            library_file().to_str().unwrap(),
+            "--efficiency",
+            bad,
+        ]);
+        assert!(!ok, "--efficiency {bad} was accepted: {stdout}");
+        assert!(stderr.contains("fraction"), "{bad}: {stderr}");
+    }
+}
+
+#[test]
 fn calibrate_fits_and_saves() {
     let dir = workspace();
     let path = dir.join("calibrate.chn");

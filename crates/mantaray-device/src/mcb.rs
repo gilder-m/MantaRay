@@ -278,6 +278,18 @@ pub trait Mcb: Send {
     /// Applies settings. Fails while locked, or on out-of-range values.
     fn set_properties(&mut self, properties: McbProperties) -> Result<(), DeviceError>;
 
+    /// Sets the high-voltage target, sent even when it equals what the
+    /// settings already say.
+    ///
+    /// The settings an instrument starts from need not be the instrument's
+    /// own - a network instrument's are defaults - so a bias the operator
+    /// applies must go out whatever the mirror holds.
+    fn set_high_voltage(&mut self, volts: f64) -> Result<(), DeviceError> {
+        let mut properties = self.properties().clone();
+        properties.high_voltage.target_volts = volts;
+        self.set_properties(properties)
+    }
+
     /// Current presets.
     fn presets(&self) -> &Presets {
         &self.properties().presets

@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+**A network instrument gets only the settings the operator changed
+(2026-11-05).** Every edit in MCB Properties - or the Insight dialog's pole
+zero - sent the instrument `SET_HV`, `SET_GAIN_COARSE` and
+`SET_PRESET_CLEAR` together, built from a mirror that starts from defaults
+rather than from the instrument. Changing the lower discriminator put a
+3000 V bias nobody chose on whatever detector it was, and opening the ADC
+tab was enough: its range clamp on the default upper discriminator counted
+as an edit. The same send cleared the presets of a count in progress. Now
+each command goes out only when its own setting changed, and the upper
+discriminator starts at the instrument's last channel. The high-voltage
+target waits for an Apply button, so a drag or a half-typed number no
+longer sends every voltage it passes through; Apply always sends, even the
+number already shown, and the tab says the instrument's own setting is not
+read back. Switching the bias on or off from here is refused by name: the
+checkbox used to send `SET_HV` with the target - bias left on - while
+showing it off, and no on/off command has been proven against an
+instrument yet.
+
+**A GammaVision `.Spc` reads its own energy calibration (2026-11-05).** The
+reader looked first in the last record, which in a GammaVision file is
+channel data, and its counts passed for coefficients of 1e-43 - every peak
+below a thousandth of a keV. The calibration is read from the first
+calibration record, byte 20, where a GammaVision 6.09 file keeps it
+(checked against the `.Clb` it was calibrated with); a record inside the
+channel data is never read as one, and coefficients must look like a
+calibration before they are believed. Written files carry the calibration
+there too, and still in the last record for earlier versions.
+
+**A decay correction too large to compute is left out by name
+(2026-11-05).** A nuclide more than about a thousand half-lives from its
+reference date - Tl-208 three days on - had a correction of infinity, and
+its activity, its uncertainty and the report's total came out NaN. The
+reference-date correction is left out for that nuclide, which is reported
+at the time of the count, and a note names it. The weighted mean of a
+nuclide's lines no longer overflows to 0/0 for large but finite activities.
+
+**A curve that gives no efficiency is not taken for one (2026-11-05).** An
+efficiency curve with no points, or a constant of zero, passed for a curve,
+and every nuclide found came out "detected, 0 Bq" with no note. Such a
+curve now leaves the results in count rates with a note saying why; a
+nuclide whose found lines all get no efficiency or no yield is withheld
+from the activity table with a note, its peaks still identified; and a
+spectrum with no live time says so instead of reporting zeros. `analyse
+--efficiency` takes only a fraction above 0 and at most 1 - 5, meant as
+5 %, made every activity a hundred times too small - and the dialog's
+constant efficiency refuses 0.
+
+**A shipped build has no pretend sample changer (2026-11-05).** The
+simulated changer was part of every build, so `CHANGE_SAMPLE` and
+`WAIT_CHANGER` succeeded at once and a batch job could count one sample
+over and over believing the rack had moved. Outside a simulator build there
+is no changer: both commands stop the job by name, the Batch dialog says to
+change each sample by hand, and the queue still runs sample by sample.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a

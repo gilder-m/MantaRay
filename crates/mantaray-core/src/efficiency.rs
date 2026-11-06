@@ -180,9 +180,24 @@ impl EfficiencyCalibration {
         }
     }
 
-    /// True when no efficiency information is available.
+    /// True when the curve can give no efficiency at any energy: no model, no
+    /// point above zero to interpolate, no usable coefficients, or a constant
+    /// that is not a positive number.
+    ///
+    /// Only the first used to count. A curve with no points, or a constant of
+    /// zero, passed for a curve, and every nuclide found came out as 0 Bq.
     pub fn is_empty(&self) -> bool {
-        matches!(self.model, EfficiencyModel::None)
+        match &self.model {
+            EfficiencyModel::None => true,
+            EfficiencyModel::Constant(value) => !(value.is_finite() && *value > 0.0),
+            EfficiencyModel::Interpolated => !self
+                .points
+                .iter()
+                .any(|point| point.efficiency.is_finite() && point.efficiency > 0.0),
+            EfficiencyModel::LogLogPolynomial(coefficients) => {
+                coefficients.is_empty() || !coefficients.iter().all(|a| a.is_finite())
+            }
+        }
     }
 
     /// Energy range covered by the calibration points.

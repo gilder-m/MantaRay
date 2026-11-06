@@ -537,6 +537,135 @@ fn a_preset_being_typed_survives_the_next_frame() {
 }
 
 #[test]
+fn a_bias_being_typed_does_not_reach_the_instrument_until_applied() {
+    // Bias went to the instrument as the field changed: a drag sent every
+    // voltage it crossed, and typing 1500 sent 1, 15 and 150 first.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 3;
+    let applied = mantaray_device::Mcb::properties(&app.detectors[0])
+        .high_voltage
+        .target_volts;
+    app.dialogs.hv_edit = Some((0, applied - 500.0));
+
+    for _ in 0..3 {
+        let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+        assert!(
+            painted_text(&output).contains("not applied yet"),
+            "the tab says the typed target is pending"
+        );
+        assert_eq!(app.dialogs.hv_edit, Some((0, applied - 500.0)));
+        assert_eq!(
+            mantaray_device::Mcb::properties(&app.detectors[0])
+                .high_voltage
+                .target_volts,
+            applied,
+            "a target nobody applied reached the instrument"
+        );
+    }
+
+    // Apply is what sends it, and the edit ends there.
+    click_text(&mut app, &ctx, "Apply");
+    assert_eq!(
+        mantaray_device::Mcb::properties(&app.detectors[0])
+            .high_voltage
+            .target_volts,
+        applied - 500.0
+    );
+    assert_eq!(app.dialogs.hv_edit, None);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(!painted_text(&output).contains("not applied yet"));
+}
+
+#[test]
+fn a_bias_edit_belongs_to_its_detector_and_its_dialog() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 3;
+
+    // Typed for another detector: not shown here, not kept.
+    app.dialogs.hv_edit = Some((99, 1200.0));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(!painted_text(&output).contains("not applied yet"));
+    assert_eq!(app.dialogs.hv_edit, None);
+
+    // Closing the dialog drops a pending edit.
+    app.dialogs.hv_edit = Some((0, 1200.0));
+    app.dialogs.set(Dialog::McbProperties, false);
+    assert_eq!(app.dialogs.hv_edit, None);
+}
+
+#[test]
+fn a_constant_efficiency_of_zero_is_refused() {
+    // Zero passed for a curve and reported every nuclide found at 0 Bq.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Efficiency);
+    app.dialogs.efficiency_constant = 0.0;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(app.efficiency, None);
+    assert!(app.status.contains("efficiency of 0"), "{}", app.status);
+
+    app.dialogs.efficiency_constant = 0.05;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(
+        app.efficiency,
+        Some(mantaray_core::EfficiencyCalibration::constant(0.05))
+    );
+}
+
+#[test]
+fn the_batch_dialog_says_whether_there_is_a_sample_changer() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Batch);
+    let with = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(with.contains("changer at position"), "{with}");
+    assert!(with.contains("Change sample"));
+
+    app.changer = None;
+    let without = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(without.contains("no sample changer"), "{without}");
+    assert!(
+        !without.contains("Change sample"),
+        "no button for a changer that is not there"
+    );
+}
+
+/// Clicks the first piece of painted text that reads exactly `text`, then
+/// draws one more frame so whatever the click queued is applied.
+fn click_text(app: &mut App, ctx: &egui::Context, text: &str) {
+    let output = frame(app, ctx, [1400.0, 900.0]);
+    let at = text_rect(&output, text)
+        .unwrap_or_else(|| panic!("no {text:?} on screen"))
+        .center();
+    frame_with_events(
+        app,
+        ctx,
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    frame(app, ctx, [1400.0, 900.0]);
+}
+
+#[test]
 fn every_dialog_opens_and_draws_with_nothing_loaded() {
     // The same walk with no spectrum at all: dialogs must cope with an empty
     // session rather than assuming there is data to describe.

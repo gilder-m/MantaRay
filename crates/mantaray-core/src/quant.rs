@@ -5,7 +5,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{PeakInfo, mda_currie, peak_info};
-use crate::efficiency::EfficiencyCalibration;
+use crate::efficiency::{EfficiencyCalibration, EfficiencyModel};
 use crate::library::NuclideLibrary;
 use crate::settings::CalculationSettings;
 use crate::spectrum::Spectrum;
@@ -283,6 +283,23 @@ pub fn analyse(
     let live_time = spectrum.live_time;
 
     let mut notes: Vec<String> = Vec::new();
+    if options
+        .efficiency
+        .as_ref()
+        .is_some_and(|curve| curve.is_empty() && curve.model != EfficiencyModel::None)
+    {
+        notes.push(
+            "the efficiency curve gives no efficiency at any energy (no points above zero, \
+             or a constant that is not a positive number); results are count rates"
+                .to_string(),
+        );
+    }
+    if live_time <= 0.0 && !peaks.is_empty() {
+        notes.push(
+            "the spectrum has no live time, so no activity or count rate can be computed"
+                .to_string(),
+        );
+    }
     if options.decay_correct_to_reference
         && options.sample.reference_date.is_some()
         && spectrum.start_time.is_none()
@@ -332,12 +349,14 @@ pub fn analyse(
     }
 
     let mut nuclides: Vec<NuclideResult> = Vec::new();
+    let mut beyond_reference: Vec<String> = Vec::new();
     for nuclide in library.iter() {
         let matched = by_nuclide.get(nuclide.name.as_str());
         if matched.is_none() && !(mda_possible && !nuclide.flags.no_mda) {
             continue;
         }
-        let decay_correction = decay_corrections(spectrum, options, nuclide.half_life_seconds);
+        let (decay_correction, refused) =
+            decay_corrections(spectrum, options, nuclide.half_life_seconds);
         let lines: Vec<LineResult> = matched
             .into_iter()
             .flatten()
@@ -409,11 +428,42 @@ pub fn analyse(
         if lines.is_empty() {
             if mda_possible && !nuclide.flags.no_mda {
                 match mda_only_result(spectrum, options, nuclide, decay_correction) {
-                    Ok(result) => nuclides.push(result),
+                    Ok(result) => {
+                        if refused {
+                            beyond_reference.push(nuclide.name.clone());
+                        }
+                        nuclides.push(result)
+                    }
                     Err(reason) => notes.push(format!("no MDA for {}: {reason}", nuclide.name)),
                 }
             }
             continue;
+        }
+        // A nuclide found where no line can carry a number used to be reported
+        // detected at 0 Bq. Its peaks stay in the peak table; the activity row
+        // is withheld, and the note says why.
+        if live_time <= 0.0 {
+            continue;
+        }
+        if has_efficiency
+            && !lines
+                .iter()
+                .any(|line| line.efficiency > 0.0 && line.yield_percent > 0.0)
+        {
+            let energies = lines
+                .iter()
+                .map(|line| format!("{:.1}", line.energy))
+                .collect::<Vec<_>>()
+                .join(", ");
+            notes.push(format!(
+                "no activity for {}: the efficiency curve or the library yield is zero at \
+                 its {energies} keV line(s)",
+                nuclide.name
+            ));
+            continue;
+        }
+        if refused {
+            beyond_reference.push(nuclide.name.clone());
         }
 
         // With an efficiency curve every usable line estimates the same
@@ -423,14 +473,14 @@ pub fn analyse(
             weighted_mean(&lines)
         } else {
             let total: f64 = lines.iter().map(|line| line.activity).sum();
-            let variance: f64 = lines
+            let spread = lines
                 .iter()
-                .map(|line| line.activity_uncertainty * line.activity_uncertainty)
-                .sum();
-            (total, variance.sqrt())
+                .map(|line| line.activity_uncertainty)
+                .fold(0.0, f64::hypot);
+            (total, spread)
         };
         let library_sigma = activity * nuclide.uncertainty_percent / 200.0;
-        uncertainty = (uncertainty * uncertainty + library_sigma * library_sigma).sqrt();
+        uncertainty = uncertainty.hypot(library_sigma);
         let mda = lines
             .iter()
             .map(|line| line.mda)
@@ -447,6 +497,9 @@ pub fn analyse(
             lines,
         });
     }
+    if !beyond_reference.is_empty() {
+        notes.push(beyond_reference_note(&beyond_reference));
+    }
 
     QuantitativeReport {
         peaks,
@@ -460,11 +513,18 @@ pub fn analyse(
     }
 }
 
+/// The decay correction for one nuclide, and whether the reference-date part
+/// had to be left out.
+///
+/// Past about 1024 half-lives the correction to the reference date is more
+/// than a double can hold. Applied as infinity, it turned the nuclide's
+/// activity into NaN, and the report's total with it - three days is enough
+/// for a nuclide with a three-minute half-life.
 fn decay_corrections(
     spectrum: &Spectrum,
     options: &AnalysisOptions,
     half_life_seconds: f64,
-) -> f64 {
+) -> (f64, bool) {
     let mut correction = 1.0;
     if options.correct_decay_during_count {
         let count_time = if spectrum.real_time > 0.0 {
@@ -478,9 +538,32 @@ fn decay_corrections(
         && let (Some(reference), Some(measured)) =
             (options.sample.reference_date, spectrum.start_time)
     {
-        correction *= decay_to_reference(half_life_seconds, reference, measured);
+        let corrected = correction * decay_to_reference(half_life_seconds, reference, measured);
+        if !corrected.is_finite() {
+            return (correction, true);
+        }
+        correction = corrected;
     }
-    correction
+    (correction, false)
+}
+
+/// The note for nuclides whose reference-date correction was left out.
+fn beyond_reference_note(names: &[String]) -> String {
+    const LISTED: usize = 10;
+    let mut listed = names
+        .iter()
+        .take(LISTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > LISTED {
+        listed.push_str(&format!(" and {} more", names.len() - LISTED));
+    }
+    format!(
+        "decay correction to the reference date left out for {listed}: too many half-lives \
+         lie between that date and the count for the correction to be computed, so these \
+         are reported at the time of the count"
+    )
 }
 
 fn weighted_mean(lines: &[LineResult]) -> (f64, f64) {
@@ -497,14 +580,21 @@ fn weighted_mean(lines: &[LineResult]) -> (f64, f64) {
             .fold(0.0f64, f64::max);
         return (mean, spread);
     }
+    // Weights relative to the most precise line. As 1/sigma^2 they overflowed
+    // for large activities: the squares became infinite, the weights zero and
+    // the mean 0/0.
+    let best = usable
+        .iter()
+        .map(|line| line.activity_uncertainty)
+        .fold(f64::INFINITY, f64::min);
     let mut weight_sum = 0.0;
     let mut weighted = 0.0;
     for line in &usable {
-        let weight = 1.0 / (line.activity_uncertainty * line.activity_uncertainty);
+        let weight = (best / line.activity_uncertainty).powi(2);
         weight_sum += weight;
         weighted += weight * line.activity;
     }
-    (weighted / weight_sum, (1.0 / weight_sum).sqrt())
+    (weighted / weight_sum, best / weight_sum.sqrt())
 }
 
 fn is_detected(

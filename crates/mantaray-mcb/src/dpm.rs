@@ -252,8 +252,8 @@ impl<'a> Dpm<'a> {
         let memory = self.read_in(HISTOGRAM, 0, bytes)?;
         let mut counts = Vec::with_capacity(channels);
         let mut regions = Vec::with_capacity(channels);
-        for word in memory.chunks_exact(4) {
-            let raw = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        for word in memory.as_chunks::<4>().0 {
+            let raw = u32::from_le_bytes(*word);
             counts.push(raw & !ROI_FLAG);
             regions.push(raw & ROI_FLAG != 0);
         }
@@ -509,12 +509,16 @@ mod tests {
             .flat_map(|word| word.to_le_bytes())
             .collect();
         let counts: Vec<u32> = memory
-            .chunks_exact(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & !ROI_FLAG)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w) & !ROI_FLAG)
             .collect();
         let regions: Vec<bool> = memory
-            .chunks_exact(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & ROI_FLAG != 0)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w) & ROI_FLAG != 0)
             .collect();
         assert_eq!(counts, [15355, 1239, 1243, 0]);
         assert_eq!(regions, [true, false, true, false]);

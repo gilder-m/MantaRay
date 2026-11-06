@@ -222,6 +222,12 @@ pub struct Dialogs {
     /// tick the moment it was made, so the half-finished edit lives here until
     /// it is applied or the dialog is closed.
     pub presets_edit: Option<(usize, Presets)>,
+    /// High-voltage target being typed, and the detector it is for.
+    ///
+    /// Bias reaches the instrument only when Apply is pressed. Applied as it
+    /// changed, a drag across the field sent every voltage it passed through,
+    /// and typing 1500 sent 1, 15 and 150 on the way.
+    pub hv_edit: Option<(usize, f64)>,
 }
 
 impl Default for Dialogs {
@@ -294,6 +300,7 @@ impl Default for Dialogs {
             region_cache: None,
             detector_name_edit: None,
             presets_edit: None,
+            hv_edit: None,
         }
     }
 }
@@ -348,8 +355,11 @@ impl Dialogs {
             // Half-typed calibration texts must not greet the next opening -
             // the table would show the old typing over different points.
             Dialog::Calibration => self.calibration_edits.clear(),
-            // A half-finished preset edit dies with its dialog.
-            Dialog::McbProperties => self.presets_edit = None,
+            // A half-finished preset or bias edit dies with its dialog.
+            Dialog::McbProperties => {
+                self.presets_edit = None;
+                self.hv_edit = None;
+            }
             _ => {}
         }
     }
@@ -2532,14 +2542,35 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     return;
                 }
                 3 => {
+                    // The target is held here until Apply (see `hv_edit`).
+                    let applied = properties.high_voltage.target_volts;
+                    let mut target = match app.dialogs.hv_edit {
+                        Some((owner, volts)) if owner == detector => volts,
+                        _ => applied,
+                    };
                     egui::Grid::new("hv").num_columns(2).show(ui, |ui| {
                         ui.label("Target (V)");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut properties.high_voltage.target_volts)
-                                    .range(0.0..=5000.0),
-                            )
-                            .changed();
+                        ui.add(
+                            egui::DragValue::new(&mut target)
+                                .range(0.0..=5000.0)
+                                .update_while_editing(false),
+                        );
+                        // Always available: the target shown may be a
+                        // default rather than the instrument's, and applying
+                        // the same number must still send it.
+                        if ui.button("Apply").clicked() {
+                            match app.detectors[detector].set_high_voltage(target) {
+                                Ok(()) => {
+                                    // So an edit later this frame cannot
+                                    // send the old target back.
+                                    properties.high_voltage.target_volts = target;
+                                    actions.push(Action::Status(format!(
+                                        "high voltage target set to {target:.0} V"
+                                    )))
+                                }
+                                Err(error) => actions.push(Action::Status(error.to_string())),
+                            }
+                        }
                         ui.end_row();
                         ui.label("Enabled");
                         changed |= ui
@@ -2550,6 +2581,19 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                         ui.label(format!("{:.0} V", status.high_voltage));
                         ui.end_row();
                     });
+                    ui.label(
+                        egui::RichText::new(
+                            "the target is the last one applied from here; \
+                             the instrument's own setting is not read back",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    if target != applied {
+                        ui.label(egui::RichText::new("not applied yet").weak());
+                    }
+                    app.dialogs.hv_edit = (target != properties.high_voltage.target_volts)
+                        .then_some((detector, target));
                 }
                 4 => {
                     changed |= ui
@@ -3105,10 +3149,20 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                         .range(0.0..=1.0),
                 );
                 if ui.button("Use").clicked() {
-                    app.efficiency = Some(EfficiencyCalibration::constant(
-                        app.dialogs.efficiency_constant,
-                    ));
-                    actions.push(Action::Status("constant efficiency in force".into()));
+                    // Zero is no efficiency: it reported every nuclide found
+                    // at 0 Bq.
+                    if app.dialogs.efficiency_constant > 0.0 {
+                        app.efficiency = Some(EfficiencyCalibration::constant(
+                            app.dialogs.efficiency_constant,
+                        ));
+                        actions.push(Action::Status("constant efficiency in force".into()));
+                    } else {
+                        actions.push(Action::Status(
+                            "an efficiency of 0 gives no activities - enter the fraction, \
+                             e.g. 0.05 for 5 %"
+                                .into(),
+                        ));
+                    }
                 }
             });
             ui.separator();
@@ -5146,26 +5200,29 @@ fn batch_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
             )),
         );
         ui.separator();
-        ui.label(format!(
-            "changer at position {} of {}{}",
-            app.changer.position(),
-            app.changer.positions(),
-            if app.changer.is_ready() {
-                ""
-            } else {
-                ", moving"
-            }
-        ));
+        match &app.changer {
+            Some(changer) => ui.label(format!(
+                "changer at position {} of {}{}",
+                changer.position(),
+                changer.positions(),
+                if changer.is_ready() { "" } else { ", moving" }
+            )),
+            None => ui.label("no sample changer: change each sample by hand"),
+        };
         ui.horizontal(|ui| {
             if ui.button("Run next sample").clicked() {
                 actions.extend(crate::jobs::run_next_sample(app));
             }
-            if ui.button("Change sample").clicked() {
-                app.changer.request_change();
+            if let Some(changer) = &mut app.changer
+                && ui.button("Change sample").clicked()
+            {
+                changer.request_change();
             }
             if ui.button("Reset queue").clicked() {
                 app.queue.reset();
-                app.changer.reset();
+                if let Some(changer) = &mut app.changer {
+                    changer.reset();
+                }
             }
         });
     });
