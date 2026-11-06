@@ -20,6 +20,16 @@ checkbox used to send `SET_HV` with the target - bias left on - while
 showing it off, and no on/off command has been proven against an
 instrument yet.
 
+**A GammaVision `.Spc` reads its own energy calibration (2026-11-05).** The
+reader looked first in the last record, which in a GammaVision file is
+channel data, and its counts passed for coefficients of 1e-43 - every peak
+below a thousandth of a keV. The calibration is read from the first
+calibration record, byte 20, where a GammaVision 6.09 file keeps it
+(checked against the `.Clb` it was calibrated with); a record inside the
+channel data is never read as one, and coefficients must look like a
+calibration before they are believed. Written files carry the calibration
+there too, and still in the last record for earlier versions.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a
