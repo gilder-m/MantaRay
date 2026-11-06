@@ -159,7 +159,7 @@ the file has not been tried.
 #### L: Little of the `.Chn` trailer and format sniffing is pinned by tests
 Mutation testing: a `-101` footer (calibration without a quadratic term) is
 never read by a test, nor a `.Chn` with descriptions after the calibration,
-and 12 mutants in `sniff` survive.
+and 18 mutants in `sniff` survive every test in the workspace.
 
 ### GUI (`crates/mantaray-gui`)
 
@@ -291,6 +291,10 @@ no `--locked`, no tests and no CI gate before a tag is released; ci.yml has no
 
 ### Tests
 
+Entries marked confirmed come from mutation testing against the whole
+workspace at dc01d73. Each named change was made to the code, every test in
+the workspace ran, and all of them still passed.
+
 #### M: About 30 "real file" tests pass having read nothing
 `tests/fixtures/` holds only a README, and the skip message is swallowed, so
 CI shows `ok`. No test reads a byte written by MAESTRO or GammaVision. Decide
@@ -301,14 +305,118 @@ It answers "OK" when its script runs out and never checks the script was used
 up; `a_job_preset_reaches_the_wire_not_just_the_mirror` still passes with its
 bug reverted.
 
+#### M: No test checks a number Peak Info shows
+Confirmed. Peak Info's activity, its ±, the net-area uncertainty % and the
+fitted Gaussian's FWHM and area can each be replaced by 0 or 1
+(analysis.rs ~29-117). So can the sloped background line (~184-194), the
+minimum-width check `2n + 1` (~142), the moment centroid (~288-300), the
+half-maximum crossings (~250-280) and the Gaussian fit's own arithmetic
+(~320-351). Both the report and the GUI's Peak Info show these values. Peak
+search is barely pinned either: region edges (~413-431), `shape_consistent`
+(can always say yes), the second-difference kernel and `describe_peak`'s
+arithmetic. **Fix:** one test per number against a value worked by hand, on a
+sloped background and a known Gaussian.
+
+#### M: Presets and the network detector's lock are untested
+Confirmed. In presets.rs:
+- Flipping the MDA preset's `current <= target` (~152) makes it stop a count
+  at once.
+- The `limit > 0` guards (~123-150) can let a preset of 0 stop a count at once.
+- `progress` can multiply where it divides (~167-191).
+- `mda_of` can return 0.
+
+On a network detector (remote.rs):
+- `lock` can store nothing, `unlock` can accept any password, `is_locked` can
+  return a constant, and `ensure_unlocked` can always pass (~483, ~722-742).
+- `start`'s already-satisfied guard is tested for the live-time preset only:
+  real time, ROI peak and ROI integral can be dropped from it (~603-606).
+- The reconstructed start time (~466-475) and the `CAL=` hand-over at connect
+  (~170-174) are untested.
+
+`AnyMcb::set_presets` and `AnyMcb::lock` (any.rs ~102, ~202), the wrapper the
+GUI and CLI call, can do nothing. So can the dashboard tile's status text and
+its 90 % dead-time flag (lib.rs ~110-135), and the low-count-rate alarm's
+"only once counting" condition (alarm.rs ~85), which the GUI evaluates every
+frame.
+
+#### M: CLI job commands are not tested to do anything
+Confirmed: no other crate's tests reach this code. Even with
+`--features simulator`, which the CLI's end-to-end tests need, each of these
+in job_host.rs can be replaced by "do nothing, succeed":
+- `RECALL`, `RECALL_ROIS`, `SAVE_ROIS`
+- `STRIP`, `SMOOTH`
+- `LOAD_LIBRARY`, `EXPORT`, `IMPORT`
+- `STOP`, `CLEAR`, `LOCK`, `UNLOCK`
+- `CLEAR_PRESETS`, `SET_PRESET_REAL`, `SET_PRESET_PEAK`,
+  `SET_PRESET_INTEGRAL`, `SET_PRESET_UNCERTAINTY`
+
+So can `mantaray serve`, `build-library` and `auto-calibrate`, and dropping
+`acquire`'s live or real preset (run on d3f5686).
+
+#### M: File readers: N42 calibration, the binary `.Lib`, list-mode slices
+Confirmed:
+- N42-2011's `<EnergyCalibration>` can be dropped (n42.rs ~187), as can the
+  joining of split `<Data>` blocks (~173).
+- The binary ORTEC `.Lib` reader is barely checked. Its minutes, hours and
+  days half-life units can each be dropped to seconds (library.rs ~168-170),
+  which makes those nuclides' half-lives 60 or more times too short.
+- `ListModeFile::slice` and `duration` and `ListRange::is_valid` are untested.
+- So are the `.Chn` start-time parse and much of the ASCII reader and writer.
+
+#### M: Activities, calibration and efficiency are barely pinned by core's own tests *(unverified)*
+Core's own tests miss these, but the whole-workspace check stalled on them,
+so another crate's tests may catch some:
+- quant.rs: `is_detected` can always say yes; `total_activity` and
+  `bq_to_uci` can return 0; the decay-during-counting correction, the
+  per-line decay corrections, the weighted mean and the absent-nuclide MDA can
+  be changed.
+- calibration.rs: energy to channel, `auto_calibrate`'s matching and the
+  table's units.
+- efficiency.rs: interpolation between points, `range()`, and a certified
+  source's decayed activity and efficiency point.
+- library.rs: `decay_constant` and `best_match`.
+
+#### L: Finish the mutation run *(stopped 2026-11-06)*
+In the whole-workspace check, 184 core mutants (quant, calibration,
+efficiency, library, roi, qa, spectrum) timed out. Every one stalled just
+after a fresh test binary launched, spread across 49 binaries, while macOS's
+`syspolicyd` and XProtect were busy checking new binaries. They say nothing
+about the code. Adding the terminal under Developer Tools in Privacy &
+Security should stop those checks for binaries it launches; then re-run with
+`--iterate`.
+
+Also never run against the workspace:
+- about 30 formats survivors (spc, spe, n42, nndc)
+- the report (9) and jobs (85) survivors
+- about 138 device survivors outside the simulator
+
+The GUI (2,892 mutants) was not mutated, for time. mcb never is: only
+hardware exercises it.
+
+Run with `MANTARAY_MCB` unset:
+`cargo mutants -p <crate> --test-workspace=true -j 2 --minimum-test-timeout 120`.
+
 #### L: Where the suite's trust is thin
 Every quantitative test runs at 1 keV per channel with a constant efficiency;
 every Peak Info test has the same background on both sides; MDA values are
 never asserted through `analyse`; the log-log interpolation test also passes
 linear interpolation; about nine frame tests assert a shape count the empty
 interface already passes; crash recovery is tested in memory only; fixed temp
-paths collide between concurrent runs. Mutation testing on 2026-11-05 missed
-15 of 49 viable mutants in report, 64 of 94 in cli and 110 of 234 in jobs.
+paths collide between concurrent runs, and 15 of the 18 `temp_dir()` uses in
+tests, in nine files, have no cleanup (library_files.rs:178 leaves a
+`mantaray-binlib-<pid>` folder per run).
+
+Mutation testing on `main` (d3f5686), each crate against its own tests only,
+missed:
+
+| Crate | Missed | Notes |
+|---|---|---|
+| core | 563 of 1,717 | 47 in the test-only `sample_for_tests` |
+| device | 288 of 717 | 88 in the simulator or its random numbers |
+| formats | 187 of 796 | |
+| jobs | 110 of 234 | |
+| cli | 49 of 94 | with `--features simulator`; 64 without |
+| report | 15 of 49 | |
 
 ## Features
 
