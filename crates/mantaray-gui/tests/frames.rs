@@ -599,6 +599,25 @@ fn a_bias_edit_belongs_to_its_detector_and_its_dialog() {
     assert_eq!(app.dialogs.hv_edit, None);
 }
 
+#[test]
+fn a_constant_efficiency_of_zero_is_refused() {
+    // Zero passed for a curve and reported every nuclide found at 0 Bq.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Efficiency);
+    app.dialogs.efficiency_constant = 0.0;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(app.efficiency, None);
+    assert!(app.status.contains("efficiency of 0"), "{}", app.status);
+
+    app.dialogs.efficiency_constant = 0.05;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(
+        app.efficiency,
+        Some(mantaray_core::EfficiencyCalibration::constant(0.05))
+    );
+}
+
 /// Clicks the first piece of painted text that reads exactly `text`, then
 /// draws one more frame so whatever the click queued is applied.
 fn click_text(app: &mut App, ctx: &egui::Context, text: &str) {

@@ -30,6 +30,25 @@ channel data is never read as one, and coefficients must look like a
 calibration before they are believed. Written files carry the calibration
 there too, and still in the last record for earlier versions.
 
+**A decay correction too large to compute is left out by name
+(2026-11-05).** A nuclide more than about a thousand half-lives from its
+reference date - Tl-208 three days on - had a correction of infinity, and
+its activity, its uncertainty and the report's total came out NaN. The
+reference-date correction is left out for that nuclide, which is reported
+at the time of the count, and a note names it. The weighted mean of a
+nuclide's lines no longer overflows to 0/0 for large but finite activities.
+
+**A curve that gives no efficiency is not taken for one (2026-11-05).** An
+efficiency curve with no points, or a constant of zero, passed for a curve,
+and every nuclide found came out "detected, 0 Bq" with no note. Such a
+curve now leaves the results in count rates with a note saying why; a
+nuclide whose found lines all get no efficiency or no yield is withheld
+from the activity table with a note, its peaks still identified; and a
+spectrum with no live time says so instead of reporting zeros. `analyse
+--efficiency` takes only a fraction above 0 and at most 1 - 5, meant as
+5 %, made every activity a hundred times too small - and the dialog's
+constant efficiency refuses 0.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a
