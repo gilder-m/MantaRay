@@ -1000,3 +1000,126 @@ fn a_persistent_length_change_is_adopted_on_the_second_fetch() {
         "two agreeing fetches are a real gain change"
     );
 }
+
+/// A line that answers like a quiet eight-channel instrument and keeps a log
+/// of every command sent, for tests that care what did *not* go out.
+struct Recording {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl mantaray_device::Transport for Recording {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+            "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
+            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "recording".into()
+    }
+}
+
+fn connect_recording() -> (RemoteMcb, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let transport = Recording { log: log.clone() };
+    let remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH").expect("connect");
+    log.lock().expect("log").clear();
+    (remote, log)
+}
+
+#[test]
+fn editing_one_setting_sends_only_that_setting() {
+    // The mirror's bias is a default, not a reading. Before this, changing the
+    // lower discriminator sent SET_HV 3000, SET_GAIN_COARSE 20 and
+    // SET_PRESET_CLEAR: a bias nobody chose, and the presets of the count
+    // gone.
+    let (mut remote, log) = connect_recording();
+    let mut properties = remote.properties().clone();
+    properties.adc.lower_discriminator = 10;
+    remote.set_properties(properties).expect("set");
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+    assert_eq!(remote.properties().adc.lower_discriminator, 10);
+    assert_eq!(
+        remote.presets().live_time,
+        Some(300.0),
+        "the instrument's preset is still mirrored"
+    );
+}
+
+#[test]
+fn the_bias_and_the_gain_go_out_only_when_they_change() {
+    let (mut remote, log) = connect_recording();
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.target_volts = 1500.0;
+    remote.set_properties(properties.clone()).expect("bias");
+    assert_eq!(*log.lock().expect("log"), vec!["SET_HV 1500".to_string()]);
+
+    log.lock().expect("log").clear();
+    properties.amplifier.coarse_gain = 50.0;
+    remote.set_properties(properties).expect("gain");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SET_GAIN_COARSE 50".to_string()],
+        "the bias already set is not sent again"
+    );
+    assert_eq!(remote.properties().high_voltage.target_volts, 1500.0);
+}
+
+#[test]
+fn switching_the_bias_off_is_refused_rather_than_faked() {
+    // Unticking Enabled used to send SET_HV with the target - bias left on -
+    // while the dialog showed it off.
+    let (mut remote, log) = connect_recording();
+    let before = remote.properties().high_voltage.enabled;
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.enabled = !before;
+    let error = remote
+        .set_properties(properties)
+        .expect_err("no on/off command is proven");
+    assert!(error.to_string().contains("high voltage"), "{error}");
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+    assert_eq!(
+        remote.properties().high_voltage.enabled,
+        before,
+        "the mirror does not claim the change"
+    );
+}
+
+#[test]
+fn the_upper_discriminator_starts_inside_the_instrument() {
+    // At u32::MAX the ADC tab's range clamp fired on first draw, and the
+    // clamp counted as an edit.
+    let (remote, _) = connect_recording();
+    assert_eq!(remote.properties().adc.upper_discriminator, 7);
+}
+
+#[test]
+fn an_applied_bias_is_sent_even_when_the_mirror_already_says_it() {
+    // The mirror's target is a default, not a reading: applying that same
+    // number must still reach the instrument, or 3000 V could never be set.
+    let (mut remote, log) = connect_recording();
+    let shown = remote.properties().high_voltage.target_volts;
+    remote.set_high_voltage(shown).expect("bias");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![format!("SET_HV {shown:.0}")]
+    );
+
+    log.lock().expect("log").clear();
+    let mut any: mantaray_device::AnyMcb = remote.into();
+    any.set_high_voltage(1200.0).expect("through the pick list");
+    assert_eq!(*log.lock().expect("log"), vec!["SET_HV 1200".to_string()]);
+    assert_eq!(any.properties().high_voltage.target_volts, 1200.0);
+}
+
+#[test]
+fn the_simulator_takes_an_applied_bias_too() {
+    let mut any: AnyMcb = SimulatedMcb::new(1, "SIM-01").into();
+    any.set_high_voltage(1234.0).expect("bias");
+    assert_eq!(any.properties().high_voltage.target_volts, 1234.0);
+}

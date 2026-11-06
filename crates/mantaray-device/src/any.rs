@@ -90,6 +90,10 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.set_properties(properties))
     }
 
+    fn set_high_voltage(&mut self, volts: f64) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.set_high_voltage(volts))
+    }
+
     fn presets_mut(&mut self) -> &mut Presets {
         delegate!(self, mcb => mcb.presets_mut())
     }

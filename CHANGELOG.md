@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+**A network instrument gets only the settings the operator changed
+(2026-11-05).** Every edit in MCB Properties - or the Insight dialog's pole
+zero - sent the instrument `SET_HV`, `SET_GAIN_COARSE` and
+`SET_PRESET_CLEAR` together, built from a mirror that starts from defaults
+rather than from the instrument. Changing the lower discriminator put a
+3000 V bias nobody chose on whatever detector it was, and opening the ADC
+tab was enough: its range clamp on the default upper discriminator counted
+as an edit. The same send cleared the presets of a count in progress. Now
+each command goes out only when its own setting changed, and the upper
+discriminator starts at the instrument's last channel. The high-voltage
+target waits for an Apply button, so a drag or a half-typed number no
+longer sends every voltage it passes through; Apply always sends, even the
+number already shown, and the tab says the instrument's own setting is not
+read back. Switching the bias on or off from here is refused by name: the
+checkbox used to send `SET_HV` with the target - bias left on - while
+showing it off, and no on/off command has been proven against an
+instrument yet.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a

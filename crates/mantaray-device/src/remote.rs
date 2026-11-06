@@ -182,10 +182,17 @@ impl RemoteMcb {
         spectrum.detector_id = number;
         spectrum.detector_name = name.to_string();
         spectrum.detector_description = name.to_string();
+        // The upper discriminator starts at the last channel this instrument
+        // has. Left at the default's u32::MAX, the ADC tab clamped it the
+        // moment it was drawn, and that clamp counted as an edit.
+        let mut properties = McbProperties::default();
+        properties.adc.upper_discriminator = u32::try_from(channels)
+            .unwrap_or(u32::MAX)
+            .saturating_sub(1);
         let mut remote = Self {
             line: Line::Direct(transport),
             identity,
-            properties: McbProperties::default(),
+            properties,
             spectrum,
             status: McbStatus::default(),
             mode: AcquisitionMode::Pha,
@@ -504,17 +511,48 @@ impl Mcb for RemoteMcb {
 
     fn set_properties(&mut self, properties: McbProperties) -> Result<(), DeviceError> {
         self.ensure_unlocked()?;
-        // Push the settings hardware understands; the rest stay in the mirror.
-        self.command(&format!(
-            "SET_HV {:.0}",
-            properties.high_voltage.target_volts
-        ))?;
-        self.command(&format!(
-            "SET_GAIN_COARSE {:.0}",
-            properties.amplifier.coarse_gain
-        ))?;
-        self.set_presets(properties.presets)?;
+        // Only what changed goes on the wire. The mirror starts from defaults,
+        // not from the instrument, so sending everything on every edit put a
+        // 3000 V bias nobody chose on the detector whenever any other setting
+        // moved - opening the ADC tab was enough, through its discriminator
+        // clamp - and cleared the presets of a count in progress. The settings
+        // with no command here live only in the mirror, as before.
+        if properties.high_voltage.enabled != self.properties.high_voltage.enabled {
+            // No on/off command has been proven against an instrument, so the
+            // checkbox must not look as if it worked.
+            return Err(DeviceError::NotSupported {
+                feature: "switching the high voltage on or off from here - \
+                          use the instrument's own control"
+                    .into(),
+            });
+        }
+        if properties.high_voltage.target_volts != self.properties.high_voltage.target_volts {
+            self.command(&format!(
+                "SET_HV {:.0}",
+                properties.high_voltage.target_volts
+            ))?;
+            self.properties.high_voltage.target_volts = properties.high_voltage.target_volts;
+        }
+        if properties.amplifier.coarse_gain != self.properties.amplifier.coarse_gain {
+            self.command(&format!(
+                "SET_GAIN_COARSE {:.0}",
+                properties.amplifier.coarse_gain
+            ))?;
+            self.properties.amplifier.coarse_gain = properties.amplifier.coarse_gain;
+        }
+        if properties.presets != self.properties.presets {
+            self.set_presets(properties.presets)?;
+        }
         self.properties = properties;
+        Ok(())
+    }
+
+    fn set_high_voltage(&mut self, volts: f64) -> Result<(), DeviceError> {
+        self.ensure_unlocked()?;
+        // Sent whatever the mirror says: its 3000 V is a default, not a
+        // reading, so an operator applying 3000 V must still reach the wire.
+        self.command(&format!("SET_HV {volts:.0}"))?;
+        self.properties.high_voltage.target_volts = volts;
         Ok(())
     }
 
