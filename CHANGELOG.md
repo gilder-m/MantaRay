@@ -49,6 +49,13 @@ spectrum with no live time says so instead of reporting zeros. `analyse
 5 %, made every activity a hundred times too small - and the dialog's
 constant efficiency refuses 0.
 
+**A shipped build has no pretend sample changer (2026-11-05).** The
+simulated changer was part of every build, so `CHANGE_SAMPLE` and
+`WAIT_CHANGER` succeeded at once and a batch job could count one sample
+over and over believing the rack had moved. Outside a simulator build there
+is no changer: both commands stop the job by name, the Batch dialog says to
+change each sample by hand, and the queue still runs sample by sample.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a

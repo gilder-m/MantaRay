@@ -618,6 +618,24 @@ fn a_constant_efficiency_of_zero_is_refused() {
     );
 }
 
+#[test]
+fn the_batch_dialog_says_whether_there_is_a_sample_changer() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Batch);
+    let with = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(with.contains("changer at position"), "{with}");
+    assert!(with.contains("Change sample"));
+
+    app.changer = None;
+    let without = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(without.contains("no sample changer"), "{without}");
+    assert!(
+        !without.contains("Change sample"),
+        "no button for a changer that is not there"
+    );
+}
+
 /// Clicks the first piece of painted text that reads exactly `text`, then
 /// draws one more frame so whatever the click queued is applied.
 fn click_text(app: &mut App, ctx: &egui::Context, text: &str) {

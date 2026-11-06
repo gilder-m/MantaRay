@@ -927,6 +927,111 @@ fn a_job_can_run_a_real_program_and_wait_for_it() {
 }
 
 #[test]
+fn a_changer_command_with_no_changer_stops_the_job_by_name() {
+    // A simulated changer answered at once in shipped builds, so a batch job
+    // could count one sample over and over believing the rack had moved.
+    for command in ["CHANGE_SAMPLE", "WAIT_CHANGER"] {
+        let mut app = App::headless();
+        app.changer = None;
+        let job = scratch(&format!("no-changer-{command}.job"));
+        std::fs::write(&job, format!("{command}\nSTART\n")).expect("write");
+        mantaray_gui::jobs::start(&mut app, &job).expect("parse");
+        for _ in 0..10 {
+            mantaray_gui::jobs::step(&mut app);
+            if app.job.is_none() {
+                break;
+            }
+        }
+        assert!(app.job.is_none(), "{command}: the job should stop");
+        assert!(
+            app.status.contains("job stopped")
+                && app.status.contains(command)
+                && app.status.contains("no sample changer"),
+            "{command}: {}",
+            app.status
+        );
+        assert!(
+            !app.detectors.iter().any(|mcb| mcb.is_active()),
+            "{command}: the job went on to count"
+        );
+    }
+}
+
+#[test]
+fn a_batch_without_a_changer_still_runs_sample_by_sample() {
+    let mut app = App::headless();
+    app.changer = None;
+    app.apply_action(Action::OpenDetector(0));
+    app.queue.push(mantaray_device::SampleJob::new("S001", 5.0));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(app.detectors[0].is_active(), "{actions:?}");
+    mantaray_gui::jobs::finish_current_sample(&mut app);
+    assert_eq!(app.queue.completed(), 1);
+}
+
+#[test]
+fn a_batch_with_a_changer_waits_for_it_and_moves_it_on() {
+    // The simulator build's changer: a ready one lets the sample count, and
+    // finishing the sample sets it moving.
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.queue.push(mantaray_device::SampleJob::new("S001", 5.0));
+    app.queue.push(mantaray_device::SampleJob::new("S002", 5.0));
+    assert!(app.changer.as_ref().is_some_and(|c| c.is_ready()));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(app.detectors[0].is_active(), "a ready changer: {actions:?}");
+    mantaray_gui::jobs::finish_current_sample(&mut app);
+    assert!(app.changer.as_ref().is_some_and(|c| !c.is_ready()));
+    let _ = mantaray_device::Mcb::stop(&mut app.detectors[0]);
+    let refused = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(
+        format!("{refused:?}").contains("still moving"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn the_running_application_keeps_a_moving_changer_moving() {
+    let mut app = App::headless();
+    let changer = app.changer.as_mut().expect("simulator build");
+    let before = changer.position();
+    changer.request_change();
+    for _ in 0..10 {
+        app.advance_by(0.5);
+    }
+    let changer = app.changer.as_ref().unwrap();
+    assert!(changer.is_ready(), "five seconds is past a two-second move");
+    assert_eq!(changer.position(), before + 1);
+}
+
+#[test]
+fn a_changer_command_with_a_changer_waits_until_it_has_moved() {
+    for command in ["CHANGE_SAMPLE", "WAIT_CHANGER"] {
+        let mut app = App::headless();
+        if command == "WAIT_CHANGER" {
+            app.changer
+                .as_mut()
+                .expect("simulator build")
+                .request_change();
+        }
+        let before = app.changer.as_ref().unwrap().position();
+        let job = scratch(&format!("with-changer-{command}.job"));
+        std::fs::write(&job, format!("{command}\n")).expect("write");
+        mantaray_gui::jobs::start(&mut app, &job).expect("parse");
+        for _ in 0..10 {
+            mantaray_gui::jobs::step(&mut app);
+            if app.job.is_none() {
+                break;
+            }
+        }
+        assert!(app.status.contains("job finished"), "{}", app.status);
+        let changer = app.changer.as_ref().unwrap();
+        assert!(changer.is_ready(), "{command}: still moving");
+        assert_eq!(changer.position(), before + 1, "{command}: one slot on");
+    }
+}
+
+#[test]
 fn a_job_can_maximise_and_restore_the_window() {
     let mut app = with_spectrum(64);
     let job = scratch("zoom.job");

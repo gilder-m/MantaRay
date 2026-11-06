@@ -912,8 +912,12 @@ pub struct App {
     pub alarms: AlarmMonitor,
     /// Batch queue.
     pub queue: SampleQueue,
-    /// Simulated sample changer.
-    pub changer: SampleChanger,
+    /// Sample changer, when there is one.
+    ///
+    /// Only a simulator build has one: no real changer is driven yet, and the
+    /// simulated one answered CHANGE_SAMPLE at once in shipped builds, so a
+    /// batch could count one sample over and over believing the rack moved.
+    pub changer: Option<SampleChanger>,
     /// Quality-assurance charts.
     pub qa: Vec<QaChart>,
     /// The last analysis.
@@ -1162,7 +1166,7 @@ impl App {
             sample: SampleInfo::default(),
             alarms: AlarmMonitor::default(),
             queue: SampleQueue::default(),
-            changer: SampleChanger::new(8),
+            changer: cfg!(feature = "simulator").then(|| SampleChanger::new(8)),
             qa: Vec::new(),
             analysis: None,
             report_text: None,
@@ -1825,15 +1829,22 @@ impl App {
             {
                 crate::jobs::finish_current_sample(self);
                 self.status = format!(
-                    "{self_status} - sample complete, {} left in the queue",
+                    "{self_status} - sample complete, {} left in the queue{}",
                     self.queue.remaining(),
+                    if self.changer.is_none() && self.queue.remaining() > 0 {
+                        "; change the sample by hand"
+                    } else {
+                        ""
+                    },
                     self_status = self.status
                 );
             }
         }
         // Keep the changer moving.
-        if !self.changer.is_ready() {
-            self.changer.poll(elapsed);
+        if let Some(changer) = &mut self.changer
+            && !changer.is_ready()
+        {
+            changer.poll(elapsed);
         }
         // Watch the detectors against the alarm limits.
         for detector in &self.detectors {

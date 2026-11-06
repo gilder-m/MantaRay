@@ -5200,26 +5200,29 @@ fn batch_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
             )),
         );
         ui.separator();
-        ui.label(format!(
-            "changer at position {} of {}{}",
-            app.changer.position(),
-            app.changer.positions(),
-            if app.changer.is_ready() {
-                ""
-            } else {
-                ", moving"
-            }
-        ));
+        match &app.changer {
+            Some(changer) => ui.label(format!(
+                "changer at position {} of {}{}",
+                changer.position(),
+                changer.positions(),
+                if changer.is_ready() { "" } else { ", moving" }
+            )),
+            None => ui.label("no sample changer: change each sample by hand"),
+        };
         ui.horizontal(|ui| {
             if ui.button("Run next sample").clicked() {
                 actions.extend(crate::jobs::run_next_sample(app));
             }
-            if ui.button("Change sample").clicked() {
-                app.changer.request_change();
+            if let Some(changer) = &mut app.changer
+                && ui.button("Change sample").clicked()
+            {
+                changer.request_change();
             }
             if ui.button("Reset queue").clicked() {
                 app.queue.reset();
-                app.changer.reset();
+                if let Some(changer) = &mut app.changer {
+                    changer.reset();
+                }
             }
         });
     });
