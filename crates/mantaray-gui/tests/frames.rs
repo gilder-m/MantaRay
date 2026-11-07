@@ -1845,3 +1845,232 @@ fn a_saved_scheme_is_kept_and_comes_back() {
         serde_json::from_str(older).expect("settings from before schemes existed");
     assert!(persisted.schemes.is_empty());
 }
+
+#[test]
+fn a_constant_efficiency_of_zero_is_refused() {
+    // Zero passed for a curve and reported every nuclide found at 0 Bq.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Efficiency);
+    app.dialogs.efficiency_constant = 0.0;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(app.efficiency, None);
+    assert!(app.status.contains("efficiency of 0"), "{}", app.status);
+
+    app.dialogs.efficiency_constant = 0.05;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(
+        app.efficiency,
+        Some(mantaray_core::EfficiencyCalibration::constant(0.05))
+    );
+}
+
+/// Clicks the first piece of painted text that reads exactly `text`, then
+/// draws one more frame so whatever the click queued is applied.
+fn click_text(app: &mut App, ctx: &egui::Context, text: &str) {
+    let output = frame(app, ctx, [1400.0, 900.0]);
+    let at = text_rect(&output, text)
+        .unwrap_or_else(|| panic!("no {text:?} on screen"))
+        .center();
+    frame_with_events(
+        app,
+        ctx,
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    frame(app, ctx, [1400.0, 900.0]);
+}
+
+/// A spectrum with one Cs-137 peak, counted 1000 s, and an app that has
+/// analysed it with a curve that is zero at 661.7 keV: Cs-137 is withheld.
+fn app_with_a_withheld_nuclide() -> App {
+    let mut counts = vec![20u64; 2048];
+    for off in -12i64..=12 {
+        counts[(662 + off) as usize] +=
+            (50_000.0 / 7.5 * (-0.5 * (off as f64 / 2.0).powi(2)).exp()) as u64;
+    }
+    let mut spectrum = Spectrum::from_counts(counts);
+    spectrum.live_time = 1000.0;
+    spectrum.real_time = 1010.0;
+    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.0, 1.0));
+    spectrum.rois.mark(mantaray_core::Roi::new(650, 674));
+    let mut app = App::headless();
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.efficiency = Some(mantaray_core::EfficiencyCalibration::interpolated(vec![
+        mantaray_core::EfficiencyPoint::new(100.0, 0.1),
+        mantaray_core::EfficiencyPoint::new(500.0, 0.0),
+    ]));
+    app.open_buffer("withheld.Spe".into(), spectrum, None);
+    app.apply_action(Action::Analyse);
+    app
+}
+
+/// The dialog's text with every run of whitespace, wrapping included, as one
+/// space.
+fn analysis_dialog_text(app: &mut App) -> String {
+    app.apply_action(Action::Show(Dialog::Analysis));
+    let ctx = still_context();
+    let mut text = String::new();
+    for _ in 0..3 {
+        text = painted_text(&frame(app, &ctx, [1400.0, 900.0]));
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn the_analysis_dialog_shows_why_a_nuclide_was_withheld() {
+    // The curve is zero at Cs-137's 661.7 keV line, so the analysis withholds
+    // it. The dialog listed no nuclide and nothing else, as if the peak had
+    // never been identified; now it is a row, with the reason in it.
+    let mut app = app_with_a_withheld_nuclide();
+    let report = app.analysis.clone().expect("the analysis ran");
+    assert!(report.nuclides.is_empty());
+    assert_eq!(report.withheld.len(), 1, "{:?}", report.withheld);
+    let flat = analysis_dialog_text(&mut app);
+    let withheld = &report.withheld[0];
+    assert!(flat.contains(&withheld.nuclide), "{flat}");
+    assert!(flat.contains("not reported"), "{flat}");
+    let head: String = withheld.reason.chars().take(40).collect();
+    assert!(
+        flat.contains(&head),
+        "{head:?} is not in the dialog:\n{flat}"
+    );
+}
+
+#[test]
+fn a_failed_csv_export_is_reported_in_the_analysis_dialog() {
+    let mut app = app_with_a_withheld_nuclide();
+    let missing = std::env::temp_dir()
+        .join("mantaray-no-such-folder-for-the-csv-test")
+        .join("results.csv");
+    assert!(!missing.exists());
+    mantaray_gui::dialogs::export_analysis_csv(&mut app, &missing);
+    let flat = analysis_dialog_text(&mut app);
+    assert!(flat.contains("could not write"), "{flat}");
+    assert!(app.status.contains("could not write"), "{}", app.status);
+    // A good write says so instead, and the error goes away.
+    let good = std::env::temp_dir().join(format!("mantaray-csv-{}.csv", std::process::id()));
+    mantaray_gui::dialogs::export_analysis_csv(&mut app, &good);
+    let flat = analysis_dialog_text(&mut app);
+    assert!(!flat.contains("could not write"), "{flat}");
+    assert!(flat.contains("wrote"), "{flat}");
+    let written = std::fs::read_to_string(&good).expect("the CSV was written");
+    std::fs::remove_file(&good).ok();
+    assert!(written.starts_with("nuclide,"), "{written}");
+}
+
+#[test]
+fn an_analysis_saved_before_nuclides_were_withheld_by_name_still_loads() {
+    let app = app_with_a_withheld_nuclide();
+    let report = app.analysis.clone().expect("the analysis ran");
+    let mut json = serde_json::to_value(&report).expect("write");
+    json.as_object_mut().unwrap().remove("withheld");
+    let loaded: mantaray_core::QuantitativeReport = serde_json::from_value(json).expect("read");
+    assert!(loaded.withheld.is_empty());
+    assert_eq!(loaded.notes, report.notes);
+}
+
+/// The number of lines each painted text takes, for the texts that contain
+/// `needle`: one for a label cut to its column, several for one that wraps.
+fn lines_of_text_containing(output: &egui::FullOutput, needle: &str) -> Vec<usize> {
+    fn collect(shape: &egui::Shape, needle: &str, into: &mut Vec<usize>) {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text().contains(needle) => {
+                into.push(text.galley.rows.len());
+            }
+            egui::Shape::Vec(inner) => {
+                for shape in inner {
+                    collect(shape, needle, into);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut lines = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, needle, &mut lines);
+    }
+    lines
+}
+
+#[test]
+fn a_long_withheld_reason_is_cut_to_one_line_in_the_dialog() {
+    let mut app = app_with_a_withheld_nuclide();
+    let long = format!("no activity: {}", "the curve is zero here ".repeat(60));
+    app.analysis.as_mut().unwrap().withheld[0] = mantaray_core::Withheld::new("Cs-137", &long);
+    app.apply_action(Action::Show(Dialog::Analysis));
+    let ctx = still_context();
+    let mut output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    for _ in 0..2 {
+        output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    }
+    let lines = lines_of_text_containing(&output, "the curve is zero here");
+    assert_eq!(lines, [1], "the reason must not wrap inside the table");
+}
+
+#[test]
+fn nuclides_withheld_for_one_reason_are_one_row_in_the_dialog() {
+    let mut app = app_with_a_withheld_nuclide();
+    // Two found nuclides withheld for the same reason: one row.
+    let report = app.analysis.as_mut().unwrap();
+    report.withheld = vec![
+        mantaray_core::Withheld::new("Co-60", "no activity: the spectrum has no live time"),
+        mantaray_core::Withheld::new("Cs-137", "no activity: the spectrum has no live time"),
+    ];
+    let flat = analysis_dialog_text(&mut app);
+    assert_eq!(flat.matches("Co-60, Cs-137").count(), 1, "{flat}");
+    assert_eq!(
+        flat.matches("no activity: the spectrum has no live time")
+            .count(),
+        1,
+        "{flat}"
+    );
+}
+
+#[test]
+fn the_status_line_after_an_analysis_counts_the_nuclides_it_did_not_report() {
+    let app = app_with_a_withheld_nuclide();
+    assert!(
+        app.status.contains("0 nuclide(s) reported")
+            && app.status.contains("1 not reported")
+            && app.status.contains("Nuclide analysis"),
+        "{}",
+        app.status
+    );
+}
+
+#[test]
+fn the_status_line_says_nothing_of_withheld_nuclides_when_there_are_none() {
+    let mut app = app_with_a_withheld_nuclide();
+    app.efficiency = Some(mantaray_core::EfficiencyCalibration::constant(0.05));
+    app.apply_action(Action::Analyse);
+    assert!(app.status.contains("reported"), "{}", app.status);
+    assert!(!app.status.contains("not reported"), "{}", app.status);
+}
+
+#[test]
+fn a_new_analysis_clears_the_last_export_message() {
+    let mut app = app_with_a_withheld_nuclide();
+    let missing = std::env::temp_dir()
+        .join("mantaray-no-such-folder-for-the-csv-test")
+        .join("results.csv");
+    mantaray_gui::dialogs::export_analysis_csv(&mut app, &missing);
+    assert!(matches!(app.dialogs.csv_export, Some(Err(_))));
+    app.apply_action(Action::Analyse);
+    assert!(app.dialogs.csv_export.is_none());
+    let flat = analysis_dialog_text(&mut app);
+    assert!(!flat.contains("could not write"), "{flat}");
+}

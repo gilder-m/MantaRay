@@ -2,8 +2,8 @@
 
 use chrono::NaiveDate;
 use mantaray_core::{
-    AnalysisOptions, EfficiencyCalibration, EnergyCalibration, NuclideLibrary, Roi, Spectrum,
-    analyse,
+    AnalysisOptions, EfficiencyCalibration, EfficiencyPoint, EnergyCalibration, LibraryPeak,
+    Nuclide, NuclideLibrary, Roi, SampleInfo, Spectrum, Withheld, analyse,
 };
 use mantaray_report::{ReportOptions, nuclide_report, print_spectrum, results_csv, roi_report};
 
@@ -242,4 +242,301 @@ fn a_comma_in_a_nuclide_name_does_not_shift_the_csv_columns() {
         }
     }
     assert_eq!(fields, header.split(',').count(), "{row}");
+}
+
+#[test]
+fn a_detection_limit_that_is_not_a_number_is_a_dash_in_the_text_and_empty_in_the_csv() {
+    // A weak peak on a huge background, for a tiny sample: the activity is
+    // large but fits a double, the detection limit (about 60 times the
+    // activity here) does not. Shown as 0 it would read as a limit of
+    // nothing; it must read as missing.
+    let mut s = spectrum();
+    for count in s.channels.iter_mut() {
+        *count += 10_000_000_000;
+    }
+    let mut library = NuclideLibrary::new("hot");
+    library.push(Nuclide::new(
+        "Hot-1",
+        86_400.0,
+        vec![LibraryPeak::new(661.657, 85.1).key()],
+    ));
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        sample: SampleInfo {
+            quantity: 8.7e-305,
+            ..SampleInfo::default()
+        },
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&s, &library, &options);
+    assert_eq!(
+        analysis.nuclides.len(),
+        1,
+        "{:?} {:?}",
+        analysis.notes,
+        analysis.withheld
+    );
+    assert_eq!(analysis.nuclides[0].mda, None, "{:?}", analysis.nuclides);
+
+    let text = nuclide_report(&analysis);
+    let row = text
+        .lines()
+        .find(|line| line.starts_with("Hot-1"))
+        .expect("a Hot-1 row");
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(cells[3], "\u{2014}", "{row}");
+
+    let csv = results_csv(&analysis);
+    let mut lines = csv.lines();
+    let columns = lines.next().unwrap().split(',').count();
+    let row = lines.next().expect("a data row");
+    let fields: Vec<&str> = row.split(',').collect();
+    assert_eq!(fields.len(), columns, "{row}");
+    assert_eq!(fields[3], "", "{row}");
+}
+
+/// The analysis of the standard spectrum with a curve that is zero at Cs-137's
+/// 661.7 keV line: Cs-137 is withheld.
+fn analysis_with_a_withheld_nuclide() -> mantaray_core::QuantitativeReport {
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::interpolated(vec![
+            EfficiencyPoint::new(100.0, 0.1),
+            EfficiencyPoint::new(500.0, 0.0),
+        ])),
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&spectrum(), &NuclideLibrary::sample_for_tests(), &options);
+    assert!(analysis.nuclides.is_empty());
+    assert_eq!(
+        analysis.withheld.len(),
+        1,
+        "precondition: Cs-137 is withheld"
+    );
+    analysis
+}
+
+/// Reads CSV the way a spreadsheet or Python's csv module does: a field in
+/// quotes may hold commas, doubled quotes and line breaks. A line that starts
+/// with `#` is not special to those readers, so it is a row here too.
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, quoted) {
+            ('"', true) if chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            ('"', _) => quoted = !quoted,
+            (',', false) => row.push(std::mem::take(&mut field)),
+            ('\n', false) => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            (c, _) => field.push(c),
+        }
+    }
+    assert!(!quoted, "a quote was never closed");
+    rows
+}
+#[test]
+fn a_withheld_nuclide_has_its_own_csv_row_and_the_table_stays_rectangular() {
+    let mut analysis = analysis_with_a_withheld_nuclide();
+    // A reason with the three things that break a CSV row, and a nuclide whose
+    // name has a comma.
+    analysis.withheld[0] = Withheld::new(
+        "Cs-137, fresh",
+        "no activity: the curve says \"zero\",\nsee it",
+    );
+    let rows = parse_csv(&results_csv(&analysis));
+    let header = &rows[0];
+    assert_eq!(header.len(), 13);
+    // The twelve columns scripts already read, in their order, then `note`.
+    assert_eq!(
+        header.join(","),
+        "nuclide,activity,uncertainty,mda,unit,detected,energy_kev,net_area,net_uncertainty,count_rate,efficiency,yield_percent,note"
+    );
+    for row in &rows {
+        assert_eq!(row.len(), 13, "{row:?}");
+    }
+    let row = rows.last().unwrap();
+    assert_eq!(row[0], "Cs-137, fresh");
+    // The numbers are empty; the text and boolean columns keep their types.
+    for number in [1, 2, 3, 6, 7, 8, 9, 10, 11] {
+        assert_eq!(row[number], "", "column {number} of {row:?}");
+    }
+    assert_eq!(row[4], analysis.activity_unit(), "{row:?}");
+    assert_eq!(row[5], "false", "{row:?}");
+    assert_eq!(row[12], "no activity: the curve says \"zero\", see it");
+}
+
+#[test]
+fn an_ordinary_csv_row_has_an_empty_note() {
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&spectrum(), &NuclideLibrary::sample_for_tests(), &options);
+    assert!(analysis.withheld.is_empty() && !analysis.nuclides.is_empty());
+    let rows = parse_csv(&results_csv(&analysis));
+    assert!(rows.len() > 1);
+    for row in &rows {
+        assert_eq!(row.len(), 13, "{row:?}");
+    }
+    assert!(rows[1..].iter().all(|row| row[12].is_empty()));
+    // The columns before `note` are what they were: same values as ever.
+    assert_eq!(rows[1][0], "Cs-137");
+    assert!(rows[1][1].parse::<f64>().unwrap() > 0.0);
+}
+
+#[test]
+fn the_text_report_and_the_csv_say_a_withheld_reason_the_same_way() {
+    let mut analysis = analysis_with_a_withheld_nuclide();
+    analysis.withheld[0] = Withheld::new(
+        "Cs-137",
+        "no activity: line one\r\n  line   two\nline three",
+    );
+    let said = "no activity: line one line two line three";
+    assert_eq!(analysis.withheld[0].reason, said);
+    let text = nuclide_report(&analysis);
+    assert!(
+        text.lines()
+            .any(|line| line == format!("Note: Cs-137: {said}")),
+        "{text}"
+    );
+    let rows = parse_csv(&results_csv(&analysis));
+    assert_eq!(rows.last().unwrap()[12], said);
+}
+
+/// The standard spectrum with Co-60 peaks as well, counted for no time: both
+/// Cs-137 and Co-60 are found, and both are withheld for the same reason.
+fn analysis_with_two_nuclides_withheld_for_one_reason() -> mantaray_core::QuantitativeReport {
+    let mut counts = vec![25u64; 2048];
+    for (energy, area) in [
+        (661.657, 40_000.0),
+        (1173.228, 30_000.0),
+        (1332.492, 27_000.0),
+    ] {
+        let amplitude = area / (2.0 * (2.0 * std::f64::consts::PI).sqrt());
+        for (channel, count) in counts.iter_mut().enumerate() {
+            let x = (channel as f64 - energy) / 2.0;
+            *count += (amplitude * (-0.5 * x * x).exp()).round() as u64;
+        }
+    }
+    let mut s = Spectrum::from_counts(counts);
+    s.live_time = 0.0;
+    s.energy_calibration = Some(EnergyCalibration::linear(0.0, 1.0));
+    for (low, high) in [(650, 674), (1161, 1185), (1320, 1344)] {
+        s.rois.mark(Roi::new(low, high));
+    }
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&s, &NuclideLibrary::sample_for_tests(), &options);
+    assert_eq!(analysis.withheld.len(), 2, "{:?}", analysis.withheld);
+    analysis
+}
+
+#[test]
+fn a_cause_every_found_nuclide_shares_is_said_once_in_the_text_and_per_nuclide_in_the_csv() {
+    let analysis = analysis_with_two_nuclides_withheld_for_one_reason();
+    let text = nuclide_report(&analysis);
+    let said: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("Co-60") || line.contains("Cs-137"))
+        .collect();
+    assert_eq!(
+        said,
+        ["Note: not reported (no activity: the spectrum has no live time): Co-60, Cs-137"],
+        "{text}"
+    );
+    // The CSV is for programs: a row for each, each with its reason.
+    let rows = parse_csv(&results_csv(&analysis));
+    let reasons: Vec<(&str, &str)> = rows[1..]
+        .iter()
+        .map(|row| (row[0].as_str(), row[12].as_str()))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            ("Co-60", "no activity: the spectrum has no live time"),
+            ("Cs-137", "no activity: the spectrum has no live time"),
+        ]
+    );
+}
+
+#[test]
+fn a_missing_live_time_is_named_on_one_line_of_the_text_report() {
+    // A found nuclide, a live time of 0 and MDA rows asked for too: the
+    // withheld line says it, and no second note repeats it.
+    let mut s = spectrum();
+    s.live_time = 0.0;
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        report_mda_for_absent_nuclides: true,
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&s, &NuclideLibrary::sample_for_tests(), &options);
+    let text = nuclide_report(&analysis);
+    let naming: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("live time"))
+        .collect();
+    assert_eq!(naming.len(), 1, "{text}");
+}
+
+#[test]
+fn nuclides_that_were_not_found_do_not_flood_the_csv_or_the_text_report() {
+    // 1500 nuclides, none found, none with a detection limit: no rows.
+    let mut library = NuclideLibrary::new("big");
+    for n in 0..1500 {
+        library.push(mantaray_core::Nuclide::new(
+            &format!("Ac-{n}"),
+            1.0e9,
+            vec![mantaray_core::LibraryPeak::new(5000.0 + n as f64, 50.0).key()],
+        ));
+    }
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        report_mda_for_absent_nuclides: true,
+        ..AnalysisOptions::default()
+    };
+    let analysis = analyse(&spectrum(), &library, &options);
+    assert_eq!(parse_csv(&results_csv(&analysis)).len(), 1, "header only");
+    let text = nuclide_report(&analysis);
+    assert!(text.lines().count() < 20, "{}", text.lines().count());
+    assert!(text.contains("no detection limit for 1,500 library nuclides"));
+}
+
+#[test]
+fn a_curve_that_gives_no_efficiency_prints_no_efficiency_and_no_nan() {
+    let s = spectrum();
+    let library = NuclideLibrary::sample_for_tests();
+    for curve in [
+        EfficiencyCalibration::constant(f64::NAN),
+        EfficiencyCalibration::constant(-0.1),
+    ] {
+        let options = AnalysisOptions {
+            efficiency: Some(curve.clone()),
+            ..AnalysisOptions::default()
+        };
+        let analysis = analyse(&s, &library, &options);
+        let csv = results_csv(&analysis);
+        let text = nuclide_report(&analysis);
+        for out in [&csv, &text] {
+            assert!(
+                !out.to_lowercase().contains("nan") && !out.contains("-0.1"),
+                "{curve:?}: {out}"
+            );
+        }
+        let columns: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+        let at = columns.iter().position(|c| *c == "efficiency").unwrap();
+        let row: Vec<&str> = csv.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(row.len(), columns.len(), "{csv}");
+        assert_eq!(row[at], "", "{curve:?}: {csv}");
+    }
 }

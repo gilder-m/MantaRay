@@ -89,7 +89,31 @@ impl EnergyCalibration {
         let r1 = (-b + root) / (2.0 * c);
         let r2 = (-b - root) / (2.0 * c);
         // Pick the branch on which energy increases with channel.
-        let chosen = if c > 0.0 { r1.max(r2) } else { r1.min(r2) };
+        let textbook = if c > 0.0 { r1.max(r2) } else { r1.min(r2) };
+        if b == 0.0 {
+            // No cancellation without a linear term.
+            return textbook.is_finite().then_some(textbook);
+        }
+        // The textbook formula subtracts two nearly equal numbers for the
+        // root near zero when the quadratic term is small ((-b + root) is 0
+        // for a c of 1e-40 against a gain of 0.37), so that root is computed
+        // from the other one instead: with q = -(b + sign(b) root) / 2 the
+        // roots are q / c and (a - energy) / q, and neither subtracts.
+        let q = -0.5 * (b + b.signum() * root);
+        let (far, near) = (q / c, (a - energy) / q);
+        let stable = if c > 0.0 {
+            far.max(near)
+        } else {
+            far.min(near)
+        };
+        // Where the textbook value is already as accurate as the stable one it
+        // stands, so ordinary calibrations give the same numbers they always
+        // have, bit for bit.
+        let chosen = if (textbook - stable).abs() <= 8.0 * f64::EPSILON * stable.abs() {
+            textbook
+        } else {
+            stable
+        };
         chosen.is_finite().then_some(chosen)
     }
 
@@ -670,6 +694,88 @@ pub(crate) fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The root as the textbook formula gives it, for comparing against.
+    fn textbook_channel(coefficients: [f64; 3], energy: f64) -> f64 {
+        let [a, b, c] = coefficients;
+        let root = (b * b - 4.0 * c * (a - energy)).sqrt();
+        let r1 = (-b + root) / (2.0 * c);
+        let r2 = (-b - root) / (2.0 * c);
+        if c > 0.0 { r1.max(r2) } else { r1.min(r2) }
+    }
+
+    #[test]
+    fn a_tiny_quadratic_term_does_not_collapse_the_root() {
+        // (-b + sqrt(b^2 + 4 c E)) is exactly 0 in doubles for these, so the
+        // textbook root was channel 0 at every energy.
+        for c in [1e-40, -1e-42, 1e-20, -1e-25] {
+            let calibration = EnergyCalibration::new([0.0, 0.37, c], "keV");
+            if c.abs() < 1e-30 {
+                assert_eq!(textbook_channel([0.0, 0.37, c], 661.657), 0.0, "{c}");
+            }
+            for energy in [10.0, 661.657, 1332.5, 2614.5] {
+                let channel = calibration.channel(energy).expect("invertible");
+                let expected = energy / 0.37;
+                assert!(
+                    (channel - expected).abs() < 1e-9 * expected,
+                    "c={c}: channel {channel} for {energy} keV, expected {expected}"
+                );
+                let back = calibration.energy(channel);
+                assert!((back - energy).abs() < 1e-9 * energy, "{c}: {back}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordinary_quadratic_inverts_as_before_and_better_where_before_lost_digits() {
+        // Where the textbook root is already accurate it is returned as it
+        // was, to the last bit (a quadratic strong enough that nothing
+        // cancels).
+        let strong = [0.5, 0.3, 1e-3];
+        let calibration = EnergyCalibration::new(strong, "keV");
+        for energy in [20.0, 100.0, 500.0] {
+            let channel = calibration.channel(energy).expect("invertible");
+            assert_eq!(
+                channel.to_bits(),
+                textbook_channel(strong, energy).to_bits(),
+                "{energy} keV"
+            );
+        }
+        // A typical HPGe calibration: the textbook root subtracts two numbers
+        // that agree to 3-4 digits, so it is good to about 1e-12 of a channel
+        // and the stable one is better. The two agree to that.
+        let coefficients = [0.5783, 0.374436, 2.985859e-7];
+        let calibration = EnergyCalibration::new(coefficients, "keV");
+        for energy in [30.0, 661.657, 1332.5, 2614.5] {
+            let channel = calibration.channel(energy).expect("invertible");
+            let old = textbook_channel(coefficients, energy);
+            assert!((channel - old).abs() < 1e-11 * old, "{energy} keV");
+            assert!(
+                (calibration.energy(channel) - energy).abs()
+                    <= (calibration.energy(old) - energy).abs(),
+                "{energy} keV"
+            );
+        }
+        // A falling parabola, the other branch.
+        let falling = [5.0, 0.3, -2.0e-6];
+        let calibration = EnergyCalibration::new(falling, "keV");
+        let channel = calibration.channel(500.0).expect("invertible");
+        assert!((calibration.energy(channel) - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_linear_limit_is_exact_and_a_missing_gain_cannot_invert() {
+        let calibration = EnergyCalibration::new([2.0, 0.5, 0.0], "keV");
+        assert_eq!(calibration.channel(102.0), Some(200.0));
+        let pure = EnergyCalibration::new([2.0, 0.0, 1e-3], "keV")
+            .channel(5.0)
+            .expect("invertible");
+        assert!((pure - ((5.0 - 2.0) / 1e-3_f64).sqrt()).abs() < 1e-9);
+        assert_eq!(
+            EnergyCalibration::new([2.0, 0.0, 0.0], "keV").channel(5.0),
+            None
+        );
+    }
 
     #[test]
     fn solve3_handles_a_known_system() {

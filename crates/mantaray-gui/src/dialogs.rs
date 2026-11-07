@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use mantaray_core::{
     CalculationSettings, EfficiencyCalibration, EfficiencyPoint, LibraryPeak, Nuclide, QaStatus,
+    Withheld,
 };
 use mantaray_device::{
     DetectorEntry, DetectorKind, JobState, Mcb, MdaPreset, Presets, SampleJob, UncertaintyPreset,
@@ -126,6 +127,10 @@ pub struct Dialogs {
     pub report_displayed_only: bool,
     /// Whether analysis reports detection limits for absent nuclides.
     pub report_mda: bool,
+    /// How the last "Export CSV" of the current analysis ended, shown under
+    /// the buttons: the file it wrote, or why it could not. `None` before any
+    /// export, and again once a new analysis runs.
+    pub csv_export: Option<Result<String, String>>,
     /// Constant efficiency being entered.
     pub efficiency_constant: f64,
     /// Efficiency points being entered, as text.
@@ -236,6 +241,7 @@ impl Default for Dialogs {
             report_columns: false,
             report_displayed_only: false,
             report_mda: false,
+            csv_export: None,
             efficiency_constant: 0.05,
             efficiency_points: vec![
                 ("59.5".into(), "0.08".into()),
@@ -2958,6 +2964,23 @@ pub(crate) fn strongest_centroid(nuclide: &mantaray_core::NuclideResult) -> Opti
         .map(|line| line.centroid)
 }
 
+/// Writes the analysis as CSV to `path` and says in the dialog, and in the
+/// status line, whether that worked. A failed write (a full disk, a read-only
+/// folder, a file open in a spreadsheet) must not look like a saved file.
+pub fn export_analysis_csv(app: &mut App, path: &std::path::Path) {
+    let Some(report) = app.analysis.as_ref() else {
+        return;
+    };
+    let outcome = match std::fs::write(path, mantaray_report::results_csv(report)) {
+        Ok(()) => Ok(format!("wrote {}", path.display())),
+        Err(error) => Err(format!("could not write {} - {error}", path.display())),
+    };
+    app.status = match &outcome {
+        Ok(text) | Err(text) => text.clone(),
+    };
+    app.dialogs.csv_export = Some(outcome);
+}
+
 fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(app, ctx, Dialog::Analysis, "Nuclide analysis", |app, ui| {
         ui.horizontal(|ui| {
@@ -2992,12 +3015,21 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                 actions.push(Action::Show(Dialog::Efficiency));
             }
             if ui.button("Export CSV...").clicked()
-                && let (Some(report), Some(path)) =
-                    (app.analysis.as_ref(), pick_save_file(&[("CSV", &["csv"])]))
+                && app.analysis.is_some()
+                && let Some(path) = pick_save_file(&[("CSV", &["csv"])])
             {
-                let _ = std::fs::write(path, mantaray_report::results_csv(report));
+                export_analysis_csv(app, &path);
             }
         });
+        match &app.dialogs.csv_export {
+            None => {}
+            Some(Ok(text)) => {
+                ui.label(egui::RichText::new(text).weak());
+            }
+            Some(Err(text)) => {
+                ui.colored_label(ui.visuals().error_fg_color, text);
+            }
+        }
         ui.separator();
         match &app.analysis {
             Some(report) => {
@@ -3010,10 +3042,12 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                     .max_height(320.0)
                     .show(ui, |ui| {
                         egui::Grid::new("nuclides")
-                            .num_columns(5)
+                            .num_columns(6)
                             .striped(true)
                             .show(ui, |ui| {
-                                for header in ["nuclide", "activity", "+/-", "MDA", "status"] {
+                                for header in
+                                    ["nuclide", "activity", "+/-", "MDA", "status", "note"]
+                                {
                                     ui.label(egui::RichText::new(header).strong());
                                 }
                                 ui.end_row();
@@ -3064,10 +3098,9 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                                     ui.label(number(mantaray_core::significant(
                                         nuclide.uncertainty,
                                     )));
-                                    ui.label(if nuclide.mda > 0.0 {
-                                        number(mantaray_core::significant(nuclide.mda))
-                                    } else {
-                                        egui::RichText::new("\u{2014}").weak()
+                                    ui.label(match nuclide.mda {
+                                        Some(mda) => number(mantaray_core::significant(mda)),
+                                        None => egui::RichText::new("\u{2014}").weak(),
                                     });
                                     ui.label(if nuclide.detected {
                                         egui::RichText::new("detected")
@@ -3075,9 +3108,61 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                                     } else {
                                         egui::RichText::new("not detected").weak()
                                     });
+                                    ui.label("");
+                                    ui.end_row();
+                                }
+                                // A nuclide the analysis found and could not
+                                // report: a greyed row with the reason in it,
+                                // where the numbers would be. Nuclides that
+                                // share one reason (no live time) are one row.
+                                // The texts are already one line; the reason
+                                // is cut to the column and whole on hover, so
+                                // a long one never makes the row tall.
+                                for group in report.withheld_groups() {
+                                    let (names, reason) = match group {
+                                        [one] => {
+                                            (std::borrow::Cow::Borrowed(&*one.nuclide), &one.reason)
+                                        }
+                                        [first, ..] => (
+                                            std::borrow::Cow::Owned(Withheld::names(group)),
+                                            &first.reason,
+                                        ),
+                                        [] => continue,
+                                    };
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&*names).weak())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(&*names);
+                                    for _ in 0..3 {
+                                        ui.label(egui::RichText::new("\u{2014}").weak());
+                                    }
+                                    ui.label(egui::RichText::new("not reported").weak());
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(reason).weak())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(reason);
                                     ui.end_row();
                                 }
                             });
+                        // General caveats - something asked for that could not
+                        // be done, not a nuclide dropped. A few, as plain text,
+                        // inside the scroll area; the rest are in the nuclide
+                        // report.
+                        const SHOWN: usize = 5;
+                        for note in report.notes.iter().take(SHOWN) {
+                            ui.add(egui::Label::new(egui::RichText::new(note).weak()));
+                        }
+                        if report.notes.len() > SHOWN {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "and {} more in the nuclide report",
+                                    report.notes.len() - SHOWN
+                                ))
+                                .weak(),
+                            );
+                        }
                     });
             }
             None => {
@@ -3105,10 +3190,20 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                         .range(0.0..=1.0),
                 );
                 if ui.button("Use").clicked() {
-                    app.efficiency = Some(EfficiencyCalibration::constant(
-                        app.dialogs.efficiency_constant,
-                    ));
-                    actions.push(Action::Status("constant efficiency in force".into()));
+                    // Zero is no efficiency: it reported every nuclide found
+                    // at 0 Bq.
+                    if app.dialogs.efficiency_constant > 0.0 {
+                        app.efficiency = Some(EfficiencyCalibration::constant(
+                            app.dialogs.efficiency_constant,
+                        ));
+                        actions.push(Action::Status("constant efficiency in force".into()));
+                    } else {
+                        actions.push(Action::Status(
+                            "an efficiency of 0 gives no activities - enter the fraction, \
+                             e.g. 0.05 for 5 %"
+                                .into(),
+                        ));
+                    }
                 }
             });
             ui.separator();
@@ -3280,7 +3375,15 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 let samples: Vec<(f64, f64)> = (0..=120)
                     .map(|step| {
                         let energy = e_low * (e_high / e_low).powf(step as f64 / 120.0);
-                        (energy, curve.efficiency(energy).max(1e-9))
+                        // A curve may overflow; the plot floors that, as it
+                        // floors a zero, so the log scale stays finite.
+                        let efficiency = curve.efficiency(energy);
+                        let efficiency = if efficiency.is_finite() {
+                            efficiency.max(1e-9)
+                        } else {
+                            1e-9
+                        };
+                        (energy, efficiency)
                     })
                     .collect();
                 let (eff_low, eff_high) = samples
@@ -5686,8 +5789,8 @@ mod tests {
             count_rate: 0.0,
             activity: 0.0,
             activity_uncertainty: 0.0,
-            mda: 0.0,
-            efficiency: 0.0,
+            mda: None,
+            efficiency: Some(0.0),
             yield_percent: 0.0,
             used_in_average: true,
         }
@@ -5698,7 +5801,7 @@ mod tests {
             nuclide: "Eu-152".into(),
             activity: 0.0,
             uncertainty: 0.0,
-            mda: 0.0,
+            mda: None,
             detected: true,
             half_life_seconds: 1.0,
             lines,

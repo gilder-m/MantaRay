@@ -2581,8 +2581,18 @@ impl App {
             report.nuclides.len(),
             report.detected().count()
         );
+        // Found but not reportable: said here, because the table's rows alone
+        // would read as if the analysis had found nothing else.
+        if !report.withheld.is_empty() {
+            self.status.push_str(&format!(
+                ", {} not reported - see Nuclide analysis",
+                report.withheld.len()
+            ));
+        }
         self.report_text = Some(nuclide_report(&report));
         self.analysis = Some(report);
+        // The last export was of the previous analysis.
+        self.dialogs.csv_export = None;
         self.dialogs.open(Dialog::Analysis);
     }
 

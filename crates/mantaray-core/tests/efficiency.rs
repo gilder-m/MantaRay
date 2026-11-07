@@ -1,8 +1,8 @@
 //! Efficiency calibration, the basis of quantitative results.
 
 use mantaray_core::{
-    CalibrationError, EfficiencyCalibration, EfficiencyPoint, decay_factor, efficiency_from_source,
-    source_activity_at,
+    CalibrationError, EfficiencyCalibration, EfficiencyModel, EfficiencyPoint, decay_factor,
+    efficiency_from_source, source_activity_at,
 };
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
@@ -94,6 +94,61 @@ fn a_constant_efficiency_is_available_for_quick_work() {
     assert!(!cal.is_empty());
     assert!(EfficiencyCalibration::default().is_empty());
     assert_eq!(EfficiencyCalibration::default().efficiency(661.7), 0.0);
+}
+
+#[test]
+fn a_log_log_curve_that_overflows_gives_infinity_not_zero() {
+    // exp(800) is infinity. Read back as 0.0 it was "no efficiency" - a line
+    // the curve never covered - when the curve in fact gave a number that is
+    // no number. The caller (the quantifier) names it; efficiency() does not
+    // hide it.
+    let curve = EfficiencyCalibration {
+        model: EfficiencyModel::LogLogPolynomial(vec![800.0]),
+        points: vec![],
+    };
+    assert!(!curve.is_empty(), "the coefficients are finite numbers");
+    assert_eq!(curve.efficiency(661.7), f64::INFINITY);
+    // Not a number stays not a number.
+    let curve = EfficiencyCalibration {
+        model: EfficiencyModel::LogLogPolynomial(vec![0.0, f64::NAN]),
+        points: vec![],
+    };
+    assert!(curve.efficiency(661.7).is_nan());
+}
+
+#[test]
+fn a_curve_that_gives_no_efficiency_anywhere_counts_as_empty() {
+    // These passed for curves, and every nuclide found came out as 0 Bq.
+    for curve in [
+        EfficiencyCalibration::constant(0.0),
+        EfficiencyCalibration::constant(-0.05),
+        EfficiencyCalibration::constant(f64::NAN),
+        EfficiencyCalibration::interpolated(vec![]),
+        EfficiencyCalibration::interpolated(vec![EfficiencyPoint::new(661.7, 0.0)]),
+        EfficiencyCalibration {
+            model: EfficiencyModel::LogLogPolynomial(vec![]),
+            points: vec![],
+        },
+        EfficiencyCalibration {
+            model: EfficiencyModel::LogLogPolynomial(vec![-3.0, f64::NAN]),
+            points: vec![],
+        },
+    ] {
+        assert!(curve.is_empty(), "{curve:?}");
+    }
+    let partly = EfficiencyCalibration::interpolated(vec![
+        EfficiencyPoint::new(100.0, 0.1),
+        EfficiencyPoint::new(500.0, 0.0),
+    ]);
+    assert!(
+        !partly.is_empty(),
+        "a curve with one usable point is a curve"
+    );
+    let fitted = EfficiencyCalibration {
+        model: EfficiencyModel::LogLogPolynomial(vec![-3.0, 0.1]),
+        points: vec![],
+    };
+    assert!(!fitted.is_empty(), "a fitted curve is a curve");
 }
 
 #[test]

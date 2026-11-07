@@ -24,6 +24,7 @@ pub mod efficiency;
 pub mod elements;
 pub mod error;
 pub mod library;
+pub mod numbers;
 pub mod qa;
 pub mod quant;
 pub mod roi;
@@ -48,10 +49,12 @@ pub use library::{
     EnergyIndex, LibraryHit, LibraryMatch, LibraryPeak, Nuclide, NuclideFlags, NuclideLibrary,
     PhotonKind, parse_nuclide_name, significant,
 };
+pub use numbers::{differs, plain_zero};
 pub use qa::{ControlLimits, QaChart, QaMetric, QaRecord, QaStatistics, QaStatus};
 pub use quant::{
     AnalysisOptions, Identification, LineResult, NuclideResult, PeakResult, QuantitativeReport,
-    SampleInfo, analyse, bq_to_uci, decay_during_acquisition, decay_to_reference,
+    SampleInfo, Withheld, analyse, bq_to_uci, decay_during_acquisition, decay_to_reference,
+    one_line,
 };
 pub use roi::{Roi, RoiSet};
 pub use settings::CalculationSettings;

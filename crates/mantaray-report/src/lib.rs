@@ -10,7 +10,7 @@
 
 use mantaray_core::{
     CalculationSettings, EnergyCalibration, NuclideLibrary, PeakInfo, QuantitativeReport, Roi,
-    Spectrum, peak_info,
+    Spectrum, Withheld, peak_info,
 };
 
 /// Which ROI report layout to produce.
@@ -337,7 +337,10 @@ pub fn nuclide_report(analysis: &QuantitativeReport) -> String {
             nuclide.nuclide,
             mantaray_core::significant(nuclide.activity),
             mantaray_core::significant(nuclide.uncertainty),
-            mantaray_core::significant(nuclide.mda),
+            // No detection limit is a dash, never a 0 that reads as a limit.
+            nuclide
+                .mda
+                .map_or_else(|| "\u{2014}".to_string(), mantaray_core::significant),
             if nuclide.detected {
                 "detected"
             } else {
@@ -362,15 +365,30 @@ pub fn nuclide_report(analysis: &QuantitativeReport) -> String {
             ));
         }
     }
-    let total = analysis.total_activity();
-    if total > 0.0 {
+    if let Some(total) = analysis.total_activity()
+        && total > 0.0
+    {
         out.push_str(&format!(
             "\nTotal detected activity: {} {unit}\n",
             mantaray_core::significant(total)
         ));
     }
-    if !analysis.notes.is_empty() {
+    if !analysis.notes.is_empty() || !analysis.withheld.is_empty() {
         out.push('\n');
+        // Said once when several share a reason (no live time hits every
+        // nuclide the same way), once each otherwise. The texts were made one
+        // line when the analysis built them.
+        for group in analysis.withheld_groups() {
+            match group {
+                [one] => out.push_str(&format!("Note: {}: {}\n", one.nuclide, one.reason)),
+                [first, ..] => out.push_str(&format!(
+                    "Note: not reported ({}): {}\n",
+                    first.reason,
+                    Withheld::names(group)
+                )),
+                [] => {}
+            }
+        }
         for note in &analysis.notes {
             out.push_str(&format!("Note: {note}\n"));
         }
@@ -389,35 +407,60 @@ fn csv_field(value: &str) -> String {
 }
 
 /// Exports the per-nuclide results as CSV.
+///
+/// The columns are the same twelve as always, in the same order, with `note`
+/// appended; it is empty for an ordinary row. A nuclide that was withheld has a
+/// row of its own after the others - its name, its unit, `detected` false,
+/// nothing in the numeric columns and the reason in `note` - so the table has
+/// the same width and the same column types throughout, and
+/// no comment lines for a reader to trip on.
 pub fn results_csv(analysis: &QuantitativeReport) -> String {
     let mut out = String::from(
-        "nuclide,activity,uncertainty,mda,unit,detected,energy_kev,net_area,net_uncertainty,count_rate,efficiency,yield_percent\n",
+        "nuclide,activity,uncertainty,mda,unit,detected,energy_kev,net_area,net_uncertainty,count_rate,efficiency,yield_percent,note\n",
     );
     let unit = csv_field(&analysis.activity_unit());
     for nuclide in &analysis.nuclides {
         let name = csv_field(&nuclide.nuclide);
+        // No detection limit is an empty field, never a 0.000000 that a script
+        // would read as a limit.
+        let mda = nuclide
+            .mda
+            .map_or_else(String::new, |mda| format!("{mda:.6}"));
         if nuclide.lines.is_empty() {
             out.push_str(&format!(
-                "{name},{:.6},{:.6},{:.6},{unit},{},,,,,,\n",
-                nuclide.activity, nuclide.uncertainty, nuclide.mda, nuclide.detected
+                "{name},{:.6},{:.6},{mda},{unit},{},,,,,,,\n",
+                nuclide.activity, nuclide.uncertainty, nuclide.detected
             ));
             continue;
         }
         for line in &nuclide.lines {
+            // No efficiency (count rates, or a curve that gives none here) is
+            // an empty field, never a 0.000000 or a NaN a script would read.
+            let efficiency = line
+                .efficiency
+                .map_or_else(String::new, |value| format!("{value:.6}"));
             out.push_str(&format!(
-                "{name},{:.6},{:.6},{:.6},{unit},{},{:.3},{:.1},{:.1},{:.4},{:.6},{:.4}\n",
+                "{name},{:.6},{:.6},{mda},{unit},{},{:.3},{:.1},{:.1},{:.4},{efficiency},{:.4},\n",
                 nuclide.activity,
                 nuclide.uncertainty,
-                nuclide.mda,
                 nuclide.detected,
                 line.energy,
                 line.net_area,
                 line.net_uncertainty,
                 line.count_rate,
-                line.efficiency,
                 line.yield_percent,
             ));
         }
+    }
+    for withheld in &analysis.withheld {
+        // The columns keep their types: `unit` is filled and `detected` is
+        // false (a reader that makes the column boolean must not meet an
+        // empty cell); only the numbers are empty.
+        out.push_str(&format!(
+            "{},,,,{unit},false,,,,,,,{}\n",
+            csv_field(&withheld.nuclide),
+            csv_field(&withheld.reason)
+        ));
     }
     out
 }
