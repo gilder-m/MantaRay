@@ -123,7 +123,28 @@ pub fn start(app: &mut App, path: &Path) -> Result<(), String> {
     // A fresh job must not inherit a dead one's pending wait, or its count.
     app.job_wait = None;
     app.job_count = None;
+    app.job_started_on = None;
     Ok(())
+}
+
+impl App {
+    /// What a job's START, STOP, CLEAR and WAIT act on: the job's detector
+    /// ([`App::job_detector`]), except that with a buffer window active it
+    /// is the detector the job's last START counted on, when there was one.
+    /// One target for all four, so a job never leaves a detector counting
+    /// and never stops or clears one its START did not count on.
+    fn job_target(&self) -> Option<usize> {
+        if self.active_is_buffer()
+            && let Some(number) = self.job_started_on
+            && let Some(index) = self
+                .detectors
+                .iter()
+                .position(|mcb| mcb.identity().number == number)
+        {
+            return Some(index);
+        }
+        self.job_detector()
+    }
 }
 
 /// Carries out the next few commands of a running job.
@@ -461,15 +482,14 @@ impl JobHost for App {
         // On the job's detector, and a refusal stops the job, as on the
         // command line: a job that went on to WAIT and SAVE after a START
         // that never happened would save an empty count as a measurement.
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("START: there is no detector"));
         };
         let mcb = &mut self.detectors[detector];
         mcb.start().map_err(device)?;
-        self.job_count = Some((
-            mcb.identity().number,
-            mantaray_device::CountWatch::started(&*mcb),
-        ));
+        let number = mcb.identity().number;
+        self.job_count = Some((number, mantaray_device::CountWatch::started(&*mcb)));
+        self.job_started_on = Some(number);
         self.status = "acquisition started".into();
         Ok(())
     }
@@ -478,9 +498,10 @@ impl JobHost for App {
         // On the job's detector, like START, and a STOP that did not take
         // stops the job: going on would CLEAR or SAVE a count still running.
         // The START it ends is over, so a later WAIT does not watch it.
-        // With a buffer active this is still the job's detector, the one
-        // START counts on, so a START/STOP job never leaves a count running.
-        let Some(detector) = self.job_detector() else {
+        // With a buffer active this is the detector START counted on
+        // ([`App::job_target`]), so a START/STOP job never leaves a count
+        // running.
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("STOP: there is no detector"));
         };
         self.detectors[detector].stop().map_err(device)?;
@@ -490,11 +511,11 @@ impl JobHost for App {
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
-        // On the job's detector, what START counted on, even with a buffer
+        // On what START counts on ([`App::job_target`]), even with a buffer
         // active (a buffer is cleared from the menu, not by a job).
         // A detector that refused CLEAR still holds its counts; a START after
         // it would count on top of them, so the job stops here.
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("CLEAR: there is no detector"));
         };
         self.clear_detector_for_job(detector).map_err(device)?;
@@ -503,7 +524,7 @@ impl JobHost for App {
     }
 
     fn wait_for_stop(&mut self) -> Result<(), JobError> {
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Ok(());
         };
         if self.detectors[detector].presets().is_empty() {

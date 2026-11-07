@@ -938,6 +938,10 @@ pub struct App {
     /// The count a job's START began (detector number and the watch on it),
     /// for the WAIT that follows.
     pub job_count: Option<(u16, mantaray_device::CountWatch)>,
+    /// The detector (by number) the running job's last START counted on:
+    /// with a buffer window active, the job's START, STOP, CLEAR and WAIT
+    /// act on it, so a STOP never lands on another detector than its START.
+    pub job_started_on: Option<u16>,
     /// Variables a job can read.
     pub job_variables: mantaray_jobs::JobVariables,
     /// Directory a job's relative file names resolve against.
@@ -1185,6 +1189,7 @@ impl App {
             job: None,
             job_wait: None,
             job_count: None,
+            job_started_on: None,
             job_variables: mantaray_jobs::JobVariables::new(),
             job_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             strip_name: None,

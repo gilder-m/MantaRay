@@ -39,9 +39,11 @@ pub fn whole_count(text: &str) -> Option<u64> {
             if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
-            (mantissa, exponent.parse::<i64>().ok()?)
+            // Too long for an i64 is too large or too small to be a count,
+            // unless the digits are zero (zero at any exponent is zero).
+            (mantissa, exponent.parse::<i64>().ok())
         }
-        None => (text, 0),
+        None => (text, Some(0)),
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let all_digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
@@ -59,7 +61,7 @@ pub fn whole_count(text: &str) -> Option<u64> {
     }
     let fraction_len = i64::try_from(fraction.len()).ok()?;
     let trailing = i64::try_from(digits.len() - significant.len()).ok()?;
-    let scale = exponent.checked_sub(fraction_len)?.checked_add(trailing)?;
+    let scale = exponent?.checked_sub(fraction_len)?.checked_add(trailing)?;
     if scale < 0 {
         return None;
     }
@@ -126,6 +128,8 @@ mod tests {
         assert_eq!(whole_count("1500e-1"), Some(150));
         assert_eq!(whole_count("0.0"), Some(0));
         assert_eq!(whole_count("0e-5"), Some(0));
+        assert_eq!(whole_count("0e99999999999999999999"), Some(0));
+        assert_eq!(whole_count("1e-99999999999999999999"), None);
         assert_eq!(whole_count("1E3"), Some(1000));
         assert_eq!(whole_count("1."), Some(1));
         assert_eq!(whole_count("1.8446744073709551615e19"), Some(u64::MAX));

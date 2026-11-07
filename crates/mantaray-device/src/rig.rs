@@ -422,7 +422,9 @@ impl Instrument {
     fn start(&mut self) {
         // A held preset already satisfied: the 926 accepts START and does
         // not count (ortec-hardware.md). The rig does the same.
-        if self.reached() {
+        // A START on a count already running, or already about to begin,
+        // changes nothing and spends no fault.
+        if self.reached() || self.counting || self.starting > 0 {
             return;
         }
         if let Some(at) = self

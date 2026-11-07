@@ -87,6 +87,10 @@ pub struct RemoteMcb {
     readings: u64,
     /// An accepted START that no reading has yet shown counting.
     start_unseen: Option<StartUnseen>,
+    /// Whether the spectrum's start date is the provisional one set when
+    /// START was sent on a fresh count, to be replaced by the first reading
+    /// that shows it counting ([`Self::date_start`]).
+    provisional_start: bool,
 }
 
 /// An accepted START waiting for a reading to show the count begin.
@@ -94,21 +98,17 @@ pub struct RemoteMcb {
 /// The detector may take a while to raise ACTIVE after it accepts START
 /// (nobody has measured the 926's lag). Until a reading shows the count
 /// begin, it is treated as counting for the preset rule, so no preset write
-/// (and the CLEAR it carries) can land on a count that is about to begin;
-/// and the first reading that shows it counting dates the start, since its
-/// real-time clock has run only since the count really began. A START the
-/// detector never acts on stops being waited for after
+/// (and the CLEAR it carries) can land on a count that is about to begin. A
+/// START the detector never acts on stops being waited for after
 /// [`crate::NEVER_STARTED_READINGS`] believed fetches, the bound a job's WAIT
 /// and the batch use to call it never started.
 #[derive(Clone, Copy, Debug)]
 struct StartUnseen {
-    /// The real time the mirror read when START was accepted.
+    /// The real time the instrument read just before START (the gate's
+    /// fresh status read).
     real_time: f64,
     /// Believed fetches since then that said idle with the clocks unmoved.
     idle_fetches: u64,
-    /// Whether the start date is the provisional one set when START was
-    /// sent, to be replaced by the real start.
-    date: bool,
 }
 
 /// The most status reads that confirm a STOP before it is called failed.
@@ -276,6 +276,7 @@ impl RemoteMcb {
             untrusted: None,
             readings: 0,
             start_unseen: None,
+            provisional_start: false,
         };
         remote.refresh()?;
         // A first status that is not a status line leaves nothing to show
@@ -448,23 +449,18 @@ impl RemoteMcb {
         })
     }
 
-    /// Works a believed reading, taken at `read_at`, into an accepted START
-    /// still waiting to be seen ([`StartUnseen`]). Only a fetch (`fetch`)
-    /// counts towards giving up on it, never the gate's own status reads.
+    /// Works a believed reading, taken at `read_at`, into the start date and
+    /// an accepted START still waiting to be seen ([`StartUnseen`]). Only a
+    /// fetch (`fetch`) counts towards giving up on it, never the gate's own
+    /// status reads.
     fn see_start(&mut self, reading: Status, read_at: chrono::NaiveDateTime, fetch: bool) {
+        if reading.active {
+            self.date_start(reading.real_time, read_at);
+        }
         let Some(unseen) = self.start_unseen.as_mut() else {
             return;
         };
         if reading.active {
-            // The real-time clock runs only while it counts, so the count
-            // began that long before this reading: the real start, however
-            // late after START the detector raised its flag.
-            if unseen.date {
-                let counted = chrono::Duration::milliseconds((reading.real_time * 1000.0) as i64);
-                if let Some(start) = read_at.checked_sub_signed(counted) {
-                    self.spectrum.start_time = Some(start);
-                }
-            }
             self.start_unseen = None;
         } else if reading.real_time > unseen.real_time {
             // Counted and over between two readings: it began, but when
@@ -475,6 +471,29 @@ impl RemoteMcb {
             if unseen.idle_fetches >= crate::NEVER_STARTED_READINGS {
                 self.start_unseen = None;
             }
+        }
+    }
+
+    /// Dates the count from a reading that shows it counting, `real_time`
+    /// into it at `read_at`, when its date is missing or only provisional.
+    /// The real-time clock runs only while it counts, so the count began
+    /// that long before the reading: the real start, however late after
+    /// START the detector raised its flag. A date this process saw happen
+    /// otherwise is never overwritten.
+    fn date_start(&mut self, real_time: f64, read_at: chrono::NaiveDateTime) {
+        if self.spectrum.start_time.is_some() && !self.provisional_start {
+            return;
+        }
+        let counted = chrono::Duration::milliseconds((real_time.max(0.0) * 1000.0) as i64);
+        if let Some(start) = read_at.checked_sub_signed(counted) {
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "d{}: mirror: start dated {real_time:.2}s back",
+                    self.identity.number
+                ));
+            }
+            self.spectrum.start_time = Some(start);
+            self.provisional_start = false;
         }
     }
 
@@ -634,16 +653,11 @@ impl RemoteMcb {
         // overwritten. A run stopped and resumed reads late by however long it
         // stood paused, which is the residual error and is the reason this is
         // a reconstruction rather than a reading.
-        if self.spectrum.start_time.is_none() && self.status.active && self.status.real_time > 0.0 {
-            if crate::journal::on() {
-                crate::journal::line(&format!(
-                    "d{}: mirror: start reconstructed {:.2}s back",
-                    self.identity.number, self.status.real_time
-                ));
-            }
-            let counted = chrono::Duration::milliseconds((self.status.real_time * 1000.0) as i64);
-            self.spectrum.start_time = fetched.read_at.checked_sub_signed(counted);
-        }
+        //
+        // The same rule dates a count this process started: START gives a
+        // provisional date, and the first reading that shows it counting
+        // replaces it, so a detector slow to begin is dated when it began.
+        // Both are [`Self::date_start`], called on the believed status above.
         self.freshened = true;
         Ok(())
     }
@@ -1040,16 +1054,21 @@ impl Mcb for RemoteMcb {
         // was accepted is a provisional date, replaced by the real start -
         // the first reading that shows it counting, less its real time - so
         // a detector slow to begin is dated when it began. A resumed count
-        // keeps the original date; Clear resets it.
-        let date = self.spectrum.start_time.is_none()
-            || self.start_unseen.is_some_and(|unseen| unseen.date);
+        // keeps the original date (a provisional one stays provisional, so a
+        // START stopped before it was seen counting is dated by the count
+        // that follows); Clear resets it.
         if self.spectrum.start_time.is_none() {
             self.spectrum.start_time = Some(chrono::Local::now().naive_local());
+            // Provisional only on a fresh count: the clocks read zero on the
+            // gate's status read just before START. An undated count resumed
+            // without Clear (one held when this connected) cannot be dated
+            // from a clock that includes the earlier run, so it keeps the
+            // moment START was sent, as before.
+            self.provisional_start = self.status.real_time == 0.0;
         }
         self.start_unseen = Some(StartUnseen {
             real_time: self.status.real_time,
             idle_fetches: 0,
-            date,
         });
         Ok(())
     }
@@ -1091,11 +1110,12 @@ impl Mcb for RemoteMcb {
         self.status.real_time = 0.0;
         self.status.live_time = 0.0;
         // A START still waiting to be seen now waits from zeroed clocks, and
-        // the first reading that shows it counting dates the count afresh.
+        // the first reading that shows it counting dates the count afresh
+        // (the date went with the spectrum).
         if let Some(unseen) = self.start_unseen.as_mut() {
             unseen.real_time = 0.0;
-            unseen.date = true;
         }
+        self.provisional_start = false;
         self.freshened = true;
         Ok(())
     }

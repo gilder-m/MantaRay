@@ -642,3 +642,28 @@ fn gilder_a_saved_spectrum_is_dated_when_a_slow_count_began() {
         "the file says {dated}; the count began {began}; START was sent {sent}"
     );
 }
+
+#[test]
+fn high_review_a_stop_after_selecting_a_buffer_stops_what_start_counted_on() {
+    // START on the rig, then SET_DETECTOR 0 makes a buffer active: the
+    // job's STOP and CLEAR still act on the rig, never on the first
+    // detector (the simulator here), which START did not count on.
+    let (mut app, rig, index) = rig_app();
+    let status = run_job(
+        &mut app,
+        &rig,
+        index,
+        "START\nSET_DETECTOR 0\nSTOP\nCLEAR\n",
+        8,
+    );
+    assert!(app.job.is_none(), "the job did not finish: {status}");
+    assert!(!rig.counting(), "the job left the rig counting: {status}");
+    assert!(!app.detectors[0].is_active(), "{status}");
+    let sent = commands(&rig);
+    for verb in ["START", "STOP", "CLEAR"] {
+        assert!(
+            sent.iter().any(|command| command == verb),
+            "{verb} did not reach the rig: {sent:?}"
+        );
+    }
+}

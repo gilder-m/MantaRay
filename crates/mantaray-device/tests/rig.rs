@@ -1012,3 +1012,28 @@ fn gilder_a_start_that_never_counts_stops_holding_the_presets() {
         apply(&mut mcb, Presets::live(60.0)).expect("presets free again");
     });
 }
+
+/// A START stopped before any reading saw it count leaves its date
+/// provisional: the START that does count is the one the spectrum is dated
+/// by (medium review of 578a035).
+#[test]
+fn gilder_a_start_stopped_before_it_counted_does_not_date_the_count() {
+    both(|rig, mut mcb, line| {
+        mcb.set_confirm_step(std::time::Duration::ZERO);
+        apply(&mut mcb, Presets::live(30.0)).expect("preset");
+        rig.fault(Fault::StartLag { reads: 1000 });
+        let first = chrono::Local::now().naive_local();
+        mcb.start().expect("START is accepted");
+        mcb.stop().expect("STOP");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        mcb.start().expect("the second START");
+        until_counting(&mut mcb, line);
+        let began = rig.began_at().expect("the rig began counting");
+        assert!((began - first).num_milliseconds() >= 350, "{line}");
+        let dated = mcb.spectrum().start_time.expect("a start date");
+        assert!(
+            (dated - began).num_milliseconds().abs() < 150,
+            "{line}: dated {dated}, began {began}, first START {first}"
+        );
+    });
+}
