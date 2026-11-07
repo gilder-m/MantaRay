@@ -107,8 +107,9 @@ withheld because its detection limit is not a number. The note about the
 reference date now reads "so any of these that is reported is at the time of
 the count". The plain average of the lines, used when none is eligible for the
 weighted mean, no longer counts a line the efficiency curve or the yield gives
-nothing at as a zero activity. For ordinary spectra every figure is identical
-bit for bit.
+nothing at as a zero activity. For ordinary spectra the figures agree with
+0.2.4 to the last digit or so: the weighted mean now uses relative weights and
+the uncertainty is summed with `hypot`, which can move the final bits.
 
 `LineResult::efficiency` is now `Option<f64>` (a report saved before reads its
 number as a value). When the report is of count rates - no curve, or a curve
@@ -181,7 +182,9 @@ as they are finite and energy changes with the channel; a record of zeros is
 no calibration. Any other file gets a plausibility check on every place a
 calibration might be, in the order earlier versions looked: byte 20 of the
 first calibration record, byte 0 of the last record, then byte 0 of each
-calibration record. The check is the one the released reader applied: every
+calibration record. The check is stricter than 0.2.4's, which asked only for
+finite coefficients and a gain between 0 and 10,000, so a file whose only
+calibration passed just the old check now opens uncalibrated. It asks for every
 coefficient zero or a normal float (counts and text read as floats are mostly
 subnormal), a gain between 0.0001 and 1000 keV per channel, an offset within
 10 MeV of zero, and energy still rising at the last channel. Junk in one place
