@@ -1,5 +1,215 @@
 # Changelog
 
+## Unreleased
+
+The analysis, report and file-format fixes of the November audit, without
+the instrument-control changes, which come later. Two of them change what
+other programs read. **CSV:** the results CSV gains a thirteenth column,
+`note`, after the twelve it had (unchanged, in their order), and a row for
+each nuclide that was found and withheld; `mda` and `efficiency` are left
+empty where there is no number instead of showing 0. **`.Spc`:** the reader
+takes the energy calibration from the first calibration record (byte 20),
+believes any finite calibration whose two copies are bit-identical (one this
+program wrote), and checks every other one for plausibility; the writer puts
+the calibration in both the first calibration record and the last record,
+and refuses a coefficient a 32-bit float cannot hold. Both are described in
+full below.
+
+Library half-lives quoted in analysis notes read plainly from a millisecond to
+a billion seconds and in scientific notation outside that (`-1e300 s`); a
+half-life that is not a number says so in words. A library nuclide that was not
+found, whose detection limit could not be built and whose half-life is
+negative or not a number is counted in the grouped half-life note, which says
+the value once.
+Analysis notes for several library nuclides with a bad half-life say the value
+once, in the grouped note, so their equal reasons group again.
+
+**A tiny quadratic term no longer sends every energy to channel 0
+(2026-11-06).** Converting an energy to a channel took the textbook root of the
+quadratic, which subtracts two numbers that agree to every digit when the
+quadratic term is small: with a gain of 0.37 keV per channel and a quadratic
+term of 1e-40 the answer was channel 0 for every energy. The root near zero is
+now computed from the other one, so it never subtracts. Where the textbook
+value was already as accurate (within a few units in the last place of the
+stable one) it is returned unchanged, bit for bit; for a typical HPGe
+calibration (a quadratic term near 3e-7) the textbook root lost about three
+digits, so the channel for an energy now differs from before in the twelfth
+significant digit or beyond, toward the more accurate value.
+
+**Count-rate reports keep count-rate detection limits, and a bad half-life is
+blamed on the library (2026-11-06).** With no efficiency curve the activity
+column is the raw count rate, and the detection limit beside it is now the
+count rate's too: the Currie limit over the live time, with no decay
+correction and no division by the sample quantity (it used to be multiplied by
+the one and divided by the other, a figure in no unit the column has, and a
+large correction could make it infinite and drop it). When a decay correction
+is asked for and the library gives a nuclide a half-life that is negative or
+NaN, no correction is made for it and the note (or, if the nuclide is
+withheld, the reason) says "the library gives Hot-1 a half-life of -1 s", for a
+nuclide that was found and one that was not alike; it used to be silent, or
+for NaN blamed on "too many half-lives". A half-life of zero or infinity is
+the library's own "stable or unspecified": no decay and a correction of exactly
+1; when a decay correction was asked for, a nuclide that was found says once
+"not decay-corrected: the library gives no half-life for Hot-1" (zero) or
+"not decay-corrected: the library lists Hot-1 as stable" (infinity); the figure
+is unchanged, and nothing is said if no decay correction was asked for or the
+nuclide was not found. A large library with many bad entries among the
+nuclides not found says so in one note with the count and the first three
+names, each with its value (up to three names are all listed), not once
+each; a found nuclide keeps its own note. One helper decides which a
+half-life is. A figure that a decay
+correction ruins is blamed on the right one: the correction for the count, the
+one to the reference date, "each" when each alone breaks it, and "together"
+only when each alone is fine. The count-rate rule for the detection limit is
+one function used for every nuclide, found or not, so the limit of a nuclide
+that was not found is a count rate too.
+
+**No number that is not a measurement is reported as an activity
+(2026-11-06).** One check decides, for every figure the analysis shows,
+whether it is a measurement: not NaN, not infinite, not a subnormal that has
+lost its digits, and not a zero made by underflow from inputs that were not
+zero (of either sign; a negative zero is shown as zero). A zero that real
+cancellation made is a measurement: lines of +3 and -3 counts per second sum to
+0 cps, equal-uncertainty lines of +a and -a average to 0, and detected
+nuclides of +x and -x total 0. A zero is cancellation only when the lines
+include ordinary numbers of both signs; a single line, lines of one sign, or
+lines that are all below the normal range (the decay-correction underflow)
+cannot make one. An uncertainty cannot cancel, so its zero stands only when
+every line's was zero. A live time that is NaN, infinite or negative is "no
+live time", said once: by the withheld list when it carries that reason, by
+one note otherwise (the note about detection limits needing a live time stays
+quiet in both cases). A reference date more
+than about a thousand half-lives from the count, which reported a nuclide
+detected at exactly 0 Bq, and a correction just inside what a double can hold,
+which gave infinity and NaN, are both caught by it.
+
+One rule says which lines make up a nuclide's figure: those that can measure
+(an efficiency and a yield), and, when any is in the library's average with an
+uncertainty, only those. The weighted mean, the decision to withhold, and the
+zero check all use it, so a line outside the figure can no longer withhold a
+nuclide or decide whether a zero is allowed; it is left out with its own note.
+Each nuclide is worked out in one place and returns either its row with its
+notes or the one reason it has none (in the list of withheld nuclides below),
+so a nuclide without a row never leaves notes about one. Whether a peak is
+detected asks every matched line, not only the ones reported. The reason blames
+the decay correction for the count or the
+correction to the reference date, whichever is the bad one, and a nuclide
+withheld for another reason says when its reference-date correction was left
+out too and is named in the note about the reference date.
+
+**Output that scripts read.** A detection limit that is not a number is now
+missing instead of 0: the text report prints a dash, the CSV leaves the `mda`
+field empty (the columns are unchanged), and `NuclideResult::mda` and
+`LineResult::mda` are `Option<f64>`. `QuantitativeReport::total_activity()`
+returns `Option<f64>`: `None` when the total is not a number a report can show
+(a note says so), `Some(0.0)` when nothing was detected. A count rate is never
+withheld because its detection limit is not a number. The note about the
+reference date now reads "so any of these that is reported is at the time of
+the count". The plain average of the lines, used when none is eligible for the
+weighted mean, no longer counts a line the efficiency curve or the yield gives
+nothing at as a zero activity. For ordinary spectra every figure is identical
+bit for bit.
+
+`LineResult::efficiency` is now `Option<f64>` (a report saved before reads its
+number as a value). When the report is of count rates - no curve, or a curve
+that gives no efficiency at any energy - there is none: the CSV leaves the
+`efficiency` field empty (the columns are unchanged; a count-rate report used
+to show 0.000000 there, and a curve of NaN showed NaN). A curve that does give
+numbers but gives infinity, NaN or a negative number at one line is not "no
+efficiency": that line is left out with a note naming the energy and what the
+curve gave ("the efficiency curve gives infinity at 1332.5 keV"), the nuclide's
+other lines report, and a nuclide left with no line to quantify is withheld
+with that reason, not the "curve or yield is zero" one. A detection limit for
+a nuclide that was not found is likewise refused when the curve gives such a
+number at the line used for it. A log-log polynomial curve that overflows now
+gives infinity, as it computes, where it used to hand back 0 (read as "no
+efficiency"). The note about a curve that
+gives no efficiency now says why for its model (a constant that is not a
+positive number, no point above zero, a polynomial with no coefficients or a
+coefficient that is not finite). Lists of names in the notes and the withheld
+groups are cut and counted the same way, with thousands separators.
+
+**The analysis says why a nuclide was left out (2026-11-06).** When the
+analysis found a nuclide (a peak matched one of its lines) and withheld it - no
+live time, or an efficiency curve that is zero at its lines - it wrote the
+reason into the report's notes, but only the text report showed them. The
+Nuclide analysis dialog listed no row and no reason, and the CSV export just
+lacked the row. The report now keeps a list of the withheld nuclides, each with
+its reason, apart from the general notes. Only nuclides that were found are in
+it. A library nuclide that was not found and whose detection limit could not be
+built (its line is outside the spectrum or the efficiency curve) is not a row:
+one general note counts them, grouped by reason, with the first few names ("no
+detection limit for 1,284 library nuclides: the line used for the limit falls
+outside the spectrum (Ac-225, Ac-227, Ag-108m and 1,281 more)"), so a large
+library does not flood the table or the CSV.
+
+The dialog shows each withheld nuclide as a greyed row in the results table
+with the reason cut to one line (the whole reason on hover), and the few
+general notes under the table in plain text. Nuclides withheld for the same
+reason, as when the spectrum has no live time, are one row in the dialog and
+one line in the text report (`Note: not reported (no activity: the spectrum has
+no live time): Cs-137, Co-60`); the CSV still has a row for each. After an
+analysis the status line counts them ("3 nuclide(s) reported, 2 detected, 2 not
+reported - see Nuclide analysis").
+
+The CSV export keeps its twelve columns in their order and gains a last
+column, `note`, empty for an ordinary row. A withheld nuclide gets a row of its
+own: its name, the unit, `detected` false, nothing in the numeric columns, the
+reason in `note`, so a column that is text or true/false for every other row is
+still that for this one. Nothing in the CSV is a comment line, so spreadsheets,
+pandas and Python's csv module read it as before, with one extra column.
+Reasons, nuclide names in them and every general note are made one line once,
+when the analysis builds them, so the dialog, the CSV and the text report print
+the same string. Export CSV also tells you in the dialog and the status line
+when the file could not be written, which it used to ignore; the message is
+cleared when a new analysis runs. The text report prints a single withheld
+nuclide as `Note: Cs-137: no activity: ...`. A report saved before the list
+existed still loads, with none.
+
+**A GammaVision `.Spc` reads its own energy calibration (2026-11-05).** The
+reader looked first in the last record, which in a GammaVision file is
+channel data, and its counts passed for coefficients of 1e-43 - every peak
+below a thousandth of a keV. The calibration is read from the first
+calibration record, byte 20, where a GammaVision 6.09 file keeps it
+(checked against the `.Clb` it was calibrated with); a record inside the
+channel data is never read as one. Written files carry the calibration in
+that record and in the last record (where earlier versions kept it). When the
+two copies are bit-identical the file was written by this program and the
+calibration is believed whatever the numbers - a gain of 20000 keV per channel,
+an offset beyond 10 MeV, a falling energy all read back as written - as long
+as they are finite and energy changes with the channel; a record of zeros is
+no calibration. Any other file gets a plausibility check on every place a
+calibration might be, in the order earlier versions looked: byte 20 of the
+first calibration record, byte 0 of the last record, then byte 0 of each
+calibration record. The check is the one the released reader applied: every
+coefficient zero or a normal float (counts and text read as floats are mostly
+subnormal), a gain between 0.0001 and 1000 keV per channel, an offset within
+10 MeV of zero, and energy still rising at the last channel. Junk in one place
+does not hide a real calibration in another. A `.Spc` stores
+32-bit floats: saving a calibration with a non-zero coefficient that does not
+come out as a normal 32-bit float (it underflows to zero, becomes a subnormal
+that keeps few digits, overflows, or is NaN) is refused, naming the
+coefficient, instead of writing a different calibration or none.
+
+**A decay correction too large to compute is left out by name
+(2026-11-05).** A nuclide more than about a thousand half-lives from its
+reference date - Tl-208 three days on - had a correction of infinity, and
+its activity, its uncertainty and the report's total came out NaN. The
+reference-date correction is left out for that nuclide, which is reported
+at the time of the count, and a note names it. The weighted mean of a
+nuclide's lines no longer overflows to 0/0 for large but finite activities.
+
+**A curve that gives no efficiency is not taken for one (2026-11-05).** An
+efficiency curve with no points, or a constant of zero, passed for a curve,
+and every nuclide found came out "detected, 0 Bq" with no note. Such a
+curve now leaves the results in count rates with a note saying why; a
+nuclide whose found lines all get no efficiency or no yield is withheld
+from the activity table with a note, its peaks still identified; and a
+spectrum with no live time says so instead of reporting zeros. `analyse
+--efficiency` takes only a fraction above 0 and at most 1 - 5, meant as
+5 %, made every activity a hundred times too small - and the dialog's
+constant efficiency refuses 0.
+
 ## 0.2.4-alpha (2026-08-13)
 
 **A detector's calibration survives the session (2026-08-13).** Calibrating a
