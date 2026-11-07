@@ -27,6 +27,8 @@ pub mod journal;
 pub mod mcb;
 pub mod presets;
 pub mod remote;
+#[cfg(feature = "rig")]
+pub mod rig;
 pub mod rng;
 pub mod server;
 pub mod simulator;

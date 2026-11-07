@@ -38,6 +38,8 @@ simulator = []
 # Depending on ourselves with `simulator` on enables it when building tests
 # and never when building the shipped binary.
 mantaray-gui = { path = ".", features = ["simulator"] }
+# The scripted end-to-end instrument, for tests only.
+mantaray-device = { workspace = true, features = ["rig"] }
 
 [build-dependencies]
 # Embeds the icon into the Windows executable; a no-op elsewhere.

@@ -16,3 +16,14 @@ mantaray-formats = { version = "0.2.0", path = "../mantaray-formats" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 thiserror = "2.0.19"
+
+[features]
+default = []
+# The scripted end-to-end instrument (src/rig.rs). Test builds only: its
+# numbers are invented, so no shipped binary may carry it.
+rig = []
+
+[dev-dependencies]
+# Depending on ourselves with `rig` on enables it for this crate's tests and
+# never for a normal build.
+mantaray-device = { path = ".", features = ["rig"] }

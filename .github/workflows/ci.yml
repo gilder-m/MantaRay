@@ -61,6 +61,10 @@ jobs:
           cargo build -p mantaray-gui -p mantaray-cli
           ! cargo tree -p mantaray-gui -e features | grep -q 'mantaray-gui feature "simulator"'
           ! cargo tree -p mantaray-cli -e features | grep -q 'mantaray-cli feature "simulator"'
+          # Nor the test rig: it is a dev-dependency feature, so the dev
+          # edges are left out of the tree that is checked.
+          ! cargo tree -p mantaray-gui -e normal,build,features | grep -q 'mantaray-device feature "rig"'
+          ! cargo tree -p mantaray-cli -e normal,build,features | grep -q 'mantaray-device feature "rig"'
 
       # The libraries and the command-line tool must build with no system
       # libraries at all, so they work in containers and on servers.

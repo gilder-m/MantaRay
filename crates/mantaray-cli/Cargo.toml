@@ -34,3 +34,5 @@ path = "src/main.rs"
 [dev-dependencies]
 mantaray-core = { path = "../mantaray-core" }
 mantaray-formats = { path = "../mantaray-formats" }
+# The scripted end-to-end instrument, for tests only.
+mantaray-device = { workspace = true, features = ["rig"] }

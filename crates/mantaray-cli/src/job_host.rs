@@ -619,6 +619,92 @@ mod tests {
         session.set_preset_peak(5000).expect("peak preset");
     }
 
+    /// A session on the scripted rig instrument (direct line, as the command
+    /// line holds it). Each status read moves the rig's clock half a second,
+    /// so WAIT's polling sees time pass on the instrument's own terms.
+    fn rig_session() -> (CliSession, mantaray_device::rig::Rig) {
+        let rig = mantaray_device::rig::Rig::new(16);
+        rig.tick_per_status(0.5);
+        let remote = RemoteMcb::connect(rig.transport(), 1, "RIG").expect("connect");
+        rig.take_sent();
+        let session = CliSession::new(std::env::temp_dir(), false, Some(AnyMcb::Remote(remote)));
+        (session, rig)
+    }
+
+    /// Runs `body` on its own thread and fails, rather than hangs, if it
+    /// has not finished in `seconds`.
+    fn within<T: Send + 'static>(
+        seconds: u64,
+        what: &str,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(body());
+        });
+        outcome
+            .recv_timeout(std::time::Duration::from_secs(seconds))
+            .unwrap_or_else(|_| panic!("{what} did not finish in {seconds} s"))
+    }
+
+    #[test]
+    fn rig_t16_start_then_wait_waits_for_the_instruments_own_stop() {
+        let (mut session, rig) = rig_session();
+        session.set_preset_live(2.0).expect("preset");
+        session.start().expect("start");
+        let (mut session, rig) = within(30, "WAIT", move || {
+            session.wait_for_stop().map(|()| (session, rig))
+        })
+        .expect("wait");
+        assert!(!rig.counting());
+        assert!(rig.clocks().1 >= 2.0 - 1e-9, "{:?}", rig.clocks());
+        let mirror = session.instrument().expect("instrument").status().live_time;
+        assert!(
+            mirror >= 2.0 - 0.02,
+            "WAIT ended before the mirror saw the stop: {mirror}"
+        );
+    }
+
+    #[test]
+    fn rig_finding6_wait_on_an_idle_detector_returns_at_once() {
+        let (mut session, _rig) = rig_session();
+        session.set_preset_live(2.0).expect("preset");
+        let began = std::time::Instant::now();
+        within(30, "WAIT", move || session.wait_for_stop()).expect("wait");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(3),
+            "WAIT on an idle detector sat {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[test]
+    fn rig_finding2_wait_over_a_status_that_stays_unreadable_ends_with_an_error() {
+        let (mut session, rig) = rig_session();
+        session.set_preset_live(200.0).expect("preset");
+        session.start().expect("start");
+        rig.fault(mantaray_device::rig::Fault::StatusWithout {
+            key: "ACTIVE".into(),
+            count: usize::MAX,
+        });
+        let outcome = within(60, "WAIT", move || session.wait_for_stop());
+        assert!(outcome.is_err(), "WAIT ended as if the count had finished");
+    }
+
+    #[test]
+    fn rig_a_job_preset_on_a_front_panel_count_is_refused() {
+        let (mut session, rig) = rig_session();
+        rig.front_panel_start();
+        let error = session.set_preset_live(5.0).expect_err("counting");
+        assert!(
+            error
+                .to_string()
+                .contains("Presets can't be changed during acquisition."),
+            "{error}"
+        );
+        assert!(rig.violations().is_empty(), "{:?}", rig.violations());
+    }
+
     #[test]
     fn wait_on_a_real_instrument_passes_real_time() {
         // The manual's own START / WAIT 300 / STOP pattern used to stop
