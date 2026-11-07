@@ -31,6 +31,10 @@ const EXACT_F64: f64 = 9_007_199_254_740_992.0;
 /// saturated.
 pub fn whole_count(text: &str) -> Option<u64> {
     let text = text.trim();
+    // A sign is refused even where it changes nothing (`+5`, `-0`).
+    if text.starts_with(['+', '-']) {
+        return None;
+    }
     if let Ok(count) = text.parse::<u64>() {
         return Some(count);
     }
@@ -59,6 +63,8 @@ mod tests {
             "1500.7",
             "-1",
             "-0.5",
+            "+5",
+            "-0",
             "NaN",
             "inf",
             "1e30",

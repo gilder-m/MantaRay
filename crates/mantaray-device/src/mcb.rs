@@ -427,12 +427,6 @@ fn not_already_reached<M: Mcb + ?Sized>(mcb: &mut M) -> Result<(), DeviceError> 
     }
 }
 
-/// A raw message's verb, upper case, as [`Mcb::send_message`] reads it: the
-/// job hosts use it to follow a raw START, STOP or CLEAR like a typed one.
-pub fn raw_verb(command: &str) -> String {
-    verb(command)
-}
-
 /// A raw message's verb, upper case.
 fn verb(command: &str) -> String {
     command
@@ -467,25 +461,36 @@ fn raw_presets(current: &Presets, command: &str) -> Result<Option<Presets>, Devi
     if !verb.starts_with("SET_PRESET") {
         return Ok(None);
     }
-    let argument = command.split_whitespace().nth(1);
+    let words: Vec<&str> = command.split_whitespace().collect();
     let refuse = |detail: String| DeviceError::Command {
         command: command.trim().to_string(),
         detail,
     };
+    // One value, or none for CLEAR: an extra word is refused, not dropped.
+    let wanted = if verb == "SET_PRESET_CLEAR" { 1 } else { 2 };
+    if words.len() > wanted {
+        return Err(refuse(format!(
+            "{verb} takes {} value; nothing was sent",
+            if wanted == 1 { "no" } else { "one" }
+        )));
+    }
+    let argument = words.get(1).copied();
     let number = || -> Result<f64, DeviceError> {
         argument
             .and_then(|word| word.parse::<f64>().ok())
             .ok_or_else(|| refuse("the value is not a number; nothing was sent".into()))
     };
     // Counts are whole: a fraction is refused, never truncated (rule 6).
-    // Exact, or refused: never rounded above 2^53 or saturated.
+    // Exact, or refused: never rounded above 2^53 or saturated. The refusal
+    // quotes what was written, not the nearest float.
     let count = |setting: &str| -> Result<Option<u64>, DeviceError> {
-        let value = number()?;
-        mantaray_core::numbers::whole_count(argument.unwrap_or_default())
+        number()?;
+        let text = argument.unwrap_or_default();
+        mantaray_core::numbers::whole_count(text)
             .map(Some)
             .ok_or_else(|| DeviceError::OutOfRange {
                 setting: setting.into(),
-                detail: format!("{value} is not a whole number of counts"),
+                detail: format!("{text} is not a whole number of counts"),
             })
     };
     let mut presets = *current;

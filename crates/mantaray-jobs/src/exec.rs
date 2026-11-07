@@ -316,7 +316,16 @@ fn execute(
         }
         Command::SendMessage(message) => {
             let message = expand!(message);
-            host.send_message(&message).map(|_| ())
+            // A bare START, STOP or CLEAR is the job's own command, so it
+            // takes the host's one door (the detector the job counts on, the
+            // count a later WAIT watches, Undo for a CLEAR). With any other
+            // word it goes to the instrument, whose gate refuses it.
+            match message.trim().to_ascii_uppercase().as_str() {
+                "START" => host.start(),
+                "STOP" => host.stop(),
+                "CLEAR" => host.clear(),
+                _ => host.send_message(&message).map(|_| ()),
+            }
         }
         Command::SetBuffer => host.select_detector(Some(0)),
         Command::SetDetector(number) => host.select_detector(*number),

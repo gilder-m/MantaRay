@@ -119,23 +119,26 @@ fn parse_line(text: &str, line: usize) -> Result<Command, JobError> {
     // refused rather than truncated: 1500.7 is not 1500, and 0.4 would become
     // the zero that disables the preset without saying so.
     let count_preset = |index: usize| -> Result<u64, JobError> {
-        let value = preset(index)?;
-        // Exact, or refused: never rounded above 2^53 or saturated.
-        mantaray_core::numbers::whole_count(&text_arg(index)?).ok_or_else(|| {
+        preset(index)?;
+        // Exact, or refused: never rounded above 2^53 or saturated. The
+        // refusal quotes what was written, not the nearest float.
+        let text = text_arg(index)?;
+        mantaray_core::numbers::whole_count(&text).ok_or_else(|| {
             bad(format!(
-                "{value} is not a valid count preset (it must be a whole number of counts, \
+                "{text} is not a valid count preset (it must be a whole number of counts, \
                  or 0 to disable the preset)"
             ))
         })
     };
     // A channel is a whole, non-negative number.
     let channel = |index: usize| -> Result<usize, JobError> {
-        let value = number(index)?;
-        mantaray_core::numbers::whole_count(&text_arg(index)?)
+        number(index)?;
+        let text = text_arg(index)?;
+        mantaray_core::numbers::whole_count(&text)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or_else(|| {
                 bad(format!(
-                    "{value} is not a channel number (a whole number, 0 or more)"
+                    "{text} is not a channel number (a whole number, 0 or more)"
                 ))
             })
     };

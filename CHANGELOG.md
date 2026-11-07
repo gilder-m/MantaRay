@@ -26,9 +26,12 @@ SET_GAIN_COARSE (SEND_MESSAGE, and every command a `mantaray serve` client
 sends) is the typed command through the same rules: checked, confirmed and
 mirrored, sent in the program's own spelling (`SET_HV 1200`), answered `OK`
 rather than with the instrument's own reply, and refused with an extra word
-(`STOP 1`); the batch no longer sends STOP. Counts and channels are read
-exactly: one above 2^53 written with a decimal point or exponent, or one too
-large to hold, is refused instead of rounded.
+(`STOP 1`, `SET_PRESET_LIVE 300 600`); in a job, SEND_MESSAGE "START",
+"STOP" or "CLEAR" is the job's own START, STOP or CLEAR (its detector, its
+WAIT, Undo); the batch no longer sends STOP. Counts and channels are read
+exactly: one above 2^53 written with a decimal point or exponent, one too
+large to hold, or one with a sign (`+5`, `-0`) is refused instead of
+rounded or guessed.
 The rules are pinned by a scripted rig instrument (test builds only) with
 faults seen on the bench: a reply stream that slips, ACTIVE lagging after
 STOP, ERR replies, odd status lines, front-panel changes and locks.

@@ -523,3 +523,19 @@ fn review_r2_a_job_stop_on_a_buffer_stops_no_detector() {
         "a job STOP with a buffer active stopped a detector it never named"
     );
 }
+
+#[test]
+fn review_r3_a_raw_stop_is_the_jobs_own_stop() {
+    // SEND_MESSAGE "STOP" takes the job's door: with a buffer active it
+    // stops no detector, as the job's STOP does not.
+    let (mut app, rig, index) = rig_app();
+    app.apply_action(Action::Start);
+    settle(&mut app, index);
+    assert!(rig.counting());
+    app.apply_action(Action::CopyToBuffer);
+    let _ = run_job(&mut app, &rig, index, "SEND_MESSAGE \"STOP\"\n", 3);
+    assert!(
+        rig.counting(),
+        "a raw STOP with a buffer active stopped a detector it never named"
+    );
+}

@@ -190,13 +190,17 @@ impl JobHost for CliSession {
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
-        self.count = None;
         match self.target {
+            // The detector is not touched, so the count it was told to make
+            // is still the one a later WAIT watches.
             Target::Buffer => {
                 self.buffer.clear();
                 Ok(())
             }
-            Target::Detector => self.instrument()?.clear().map_err(device),
+            Target::Detector => {
+                self.count = None;
+                self.instrument()?.clear().map_err(device)
+            }
         }
     }
 
@@ -531,18 +535,9 @@ impl JobHost for CliSession {
     }
 
     fn send_message(&mut self, command: &str) -> Result<String, JobError> {
-        let instrument = self.instrument()?;
-        let reply = instrument.send_message(command).map_err(device)?;
-        // A raw START, STOP or CLEAR is the typed one (Mcb::send_message), so
-        // the count a later WAIT watches follows it the same way.
-        let watch = match mantaray_device::raw_verb(command).as_str() {
-            "START" => Some(Some(mantaray_device::CountWatch::started(&*instrument))),
-            "STOP" | "CLEAR" => Some(None),
-            _ => None,
-        };
-        if let Some(watch) = watch {
-            self.count = watch;
-        }
+        // A bare START, STOP or CLEAR never arrives here: the job runs its
+        // own (mantaray_jobs::exec), so the count watch follows it.
+        let reply = self.instrument()?.send_message(command).map_err(device)?;
         self.note(&format!("{command} -> {reply}"));
         Ok(reply)
     }
@@ -768,12 +763,13 @@ mod tests {
 
     #[test]
     fn rig_review_r2_a_raw_stop_and_clear_drop_the_watch() {
+        // Through the job runner: a bare raw STOP or CLEAR is the job's own.
         let (mut session, _rig) = rig_session();
-        session.set_preset_live(3.0).expect("preset");
-        session.start().expect("START");
-        session.send_message("STOP").expect("raw STOP");
-        session.send_message("CLEAR").expect("raw CLEAR");
-        let outcome = within(30, "WAIT", move || session.wait_for_stop());
+        let job = Job::parse(
+            "SET_PRESET_LIVE 3\nSTART\nSEND_MESSAGE \"STOP\"\nSEND_MESSAGE \"CLEAR\"\nWAIT\n",
+        )
+        .expect("job");
+        let outcome = within(30, "the job", move || run(&job, &mut session).map(|_| ()));
         outcome.expect("WAIT on an idle detector is over at once");
     }
 
@@ -782,17 +778,14 @@ mod tests {
         // A raw START the detector accepted but did not count is reported,
         // not taken for a count that is over.
         let (mut session, rig) = rig_session();
-        session.set_preset_live(2.0).expect("preset");
         rig.fault(mantaray_device::rig::Fault::Reply {
             verb: "START".into(),
             reply: "OK".into(),
             count: 1,
             execute: false,
         });
-        session
-            .send_message("START")
-            .expect("raw START is accepted");
-        let outcome = within(30, "WAIT", move || session.wait_for_stop());
+        let job = Job::parse("SET_PRESET_LIVE 2\nSEND_MESSAGE \"START\"\nWAIT\n").expect("job");
+        let outcome = within(30, "the job", move || run(&job, &mut session).map(|_| ()));
         let error = outcome.expect_err("a count that never ran is not over");
         assert!(error.to_string().contains("did not count"), "{error}");
     }

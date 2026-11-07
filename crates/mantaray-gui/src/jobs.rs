@@ -940,21 +940,11 @@ impl JobHost for App {
         let Some(detector) = self.job_detector() else {
             return Err(JobError::host("no detector selected"));
         };
-        let mcb = &mut self.detectors[detector];
-        let reply = mcb.send_message(command).map_err(device)?;
-        // A raw START, STOP or CLEAR is the typed one (Mcb::send_message), so
-        // the count a later WAIT watches follows it the same way.
-        match mantaray_device::raw_verb(command).as_str() {
-            "START" => {
-                self.job_count = Some((
-                    mcb.identity().number,
-                    mantaray_device::CountWatch::started(&*mcb),
-                ));
-            }
-            "STOP" | "CLEAR" => self.job_count = None,
-            _ => {}
-        }
-        Ok(reply)
+        // A bare START, STOP or CLEAR never arrives here: the job runs its
+        // own (mantaray_jobs::exec), so Undo and the count watch follow it.
+        self.detectors[detector]
+            .send_message(command)
+            .map_err(device)
     }
 
     fn lock(&mut self, password: &str, owner: &str, _name: Option<&str>) -> Result<(), JobError> {
