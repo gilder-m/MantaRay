@@ -15,7 +15,7 @@
 //!  36  u16  CALRP2  second calibration record
 //!  40  u16  ROIRP1  first region-of-interest record
 //!  54  u16  MAXRCS  records in the file
-//!  56  u16  LSTREC  last record used; holds the energy calibration
+//!  56  u16  LSTREC  last record used
 //!  60  u16  SPCTRP  first record of the channel data
 //!  62  u16  SPCRCN  number of channel-data records (32 channels each)
 //!  64  u16  SPCCHN  number of channels
@@ -39,7 +39,9 @@
 //! 110  10 ascii  sample collection stop date
 //! 120   8 ascii  sample collection stop time
 //!
-//! last record: three f32 energy calibration coefficients
+//! first calibration record (CALRP1)
+//!  20  3 f32  energy calibration, keV: offset, gain, quadratic
+//!  32  3 f32  peak shape (FWHM) coefficients, not decoded here
 //! ```
 //!
 //! Record numbers are one-based, so record `n` starts at byte `(n - 1) * 128`.
@@ -65,7 +67,8 @@ pub const RECORD_SIZE: usize = 128;
 pub const CHANNELS_PER_RECORD: usize = 32;
 /// Records of header and descriptions that precede the channel data.
 const LEADING_RECORDS: usize = 21;
-/// Records that follow the channel data (two reserved, then the calibration).
+/// Records that follow the channel data (two reserved, then a copy of the
+/// calibration for readers that look there).
 const TRAILING_RECORDS: usize = 3;
 
 const MONTHS: [&str; 12] = [
@@ -193,30 +196,99 @@ pub fn read(bytes: &[u8]) -> Result<Spectrum, FormatError> {
         }
     }
 
-    // Energy calibration: the last record, falling back to the pointers.
-    for candidate in [last_record, calibration_record_2, calibration_record_1] {
-        if candidate == 0 {
-            continue;
+    // Energy calibration. GammaVision keeps it in the first calibration
+    // record, three f32 coefficients from byte 20; confirmed on a GammaVision
+    // 6.09 file against the `.Clb` it was calibrated with. This program's
+    // writer puts the same twelve bytes in the last record as well (where
+    // earlier versions kept it), so a file whose two copies are bit-identical
+    // was written by this program, and what it holds is believed whatever the
+    // numbers (a gain of 20000 keV per channel is a calibration somebody wrote)
+    // as long as they are finite and energy changes with the channel. Any
+    // other file - GammaVision's or anyone's - gets the plausibility filter on
+    // every candidate, tried in the order earlier versions did: byte 20 of the
+    // first calibration record, byte 0 of the last record, then byte 0 of each
+    // pointer. A record inside the channel data is never a calibration: in
+    // that GammaVision file the last record *is* channel data, and its counts
+    // read as coefficients of 1e-43 put every peak below a thousandth of a keV.
+    let data_records = spectrum_record as usize..spectrum_record as usize + expected_records;
+    let candidate_triplet = |candidate: u16, at: usize| -> Option<[u8; 12]> {
+        if candidate == 0 || data_records.contains(&(candidate as usize)) {
+            return None;
         }
-        let Some(record) = record_bytes(bytes, candidate) else {
-            continue;
+        record_bytes(bytes, candidate)?
+            .get(at..at + 12)?
+            .try_into()
+            .ok()
+    };
+    let triplet = |raw: [u8; 12]| -> [f32; 3] {
+        let word = |index: usize| {
+            let start = index * 4;
+            f32::from_le_bytes([raw[start], raw[start + 1], raw[start + 2], raw[start + 3]])
         };
-        let coefficients = [
-            f32::from_le_bytes([record[0], record[1], record[2], record[3]]) as f64,
-            f32::from_le_bytes([record[4], record[5], record[6], record[7]]) as f64,
-            f32::from_le_bytes([record[8], record[9], record[10], record[11]]) as f64,
-        ];
-        // A usable calibration has a sane, non-zero gain.
-        if coefficients.iter().all(|c| c.is_finite())
-            && coefficients[1] > 0.0
-            && coefficients[1] < 1e4
-        {
-            spectrum.energy_calibration = Some(EnergyCalibration::new(coefficients, "keV"));
-            break;
+        [word(0), word(1), word(2)]
+    };
+    let stated = candidate_triplet(calibration_record_1, CALIBRATION_OFFSET);
+    let written_by_us = match (stated, candidate_triplet(last_record, 0)) {
+        (Some(first), Some(last)) if first == last => stated_calibration(triplet(first)),
+        _ => None,
+    };
+    if written_by_us.is_some() {
+        spectrum.energy_calibration = written_by_us;
+    } else {
+        for (candidate, at) in [
+            (calibration_record_1, CALIBRATION_OFFSET),
+            (last_record, 0),
+            (calibration_record_2, 0),
+            (calibration_record_1, 0),
+        ] {
+            let Some(raw) = candidate_triplet(candidate, at) else {
+                continue;
+            };
+            if let Some(calibration) = plausible_calibration(triplet(raw), channels) {
+                spectrum.energy_calibration = Some(calibration);
+                break;
+            }
         }
     }
 
     Ok(spectrum)
+}
+
+/// Byte offset of the energy coefficients inside GammaVision's calibration
+/// record. The peak-shape coefficients follow at byte 32.
+const CALIBRATION_OFFSET: usize = 20;
+
+/// The coefficients of a calibration this program wrote (the two copies in the
+/// file are bit-identical): any finite numbers, as long as energy changes with
+/// the channel. A record of zeros is no calibration.
+fn stated_calibration(coefficients: [f32; 3]) -> Option<EnergyCalibration> {
+    let [offset, gain, quadratic] = coefficients;
+    let usable = coefficients.iter().all(|c| c.is_finite()) && (gain != 0.0 || quadratic != 0.0);
+    usable.then(|| {
+        EnergyCalibration::new(
+            [f64::from(offset), f64::from(gain), f64::from(quadratic)],
+            "keV",
+        )
+    })
+}
+
+/// Three coefficients that could be an energy calibration in keV, or `None`.
+/// For every record that is not a calibration this program wrote; see
+/// [`stated_calibration`].
+///
+/// Every coefficient must be zero or a normal float - counts and text read as
+/// floats are mostly subnormal or absurd - the gain must lie between 0.0001
+/// and 1000 keV per channel, the offset within 10 MeV of zero, and energy
+/// must still rise at the last channel.
+fn plausible_calibration(coefficients: [f32; 3], channels: usize) -> Option<EnergyCalibration> {
+    if !coefficients.iter().all(|c| *c == 0.0 || c.is_normal()) {
+        return None;
+    }
+    let [offset, gain, quadratic] = coefficients.map(f64::from);
+    let last = channels.saturating_sub(1) as f64;
+    let plausible =
+        (1e-4..1e3).contains(&gain) && offset.abs() < 1e4 && gain + 2.0 * quadratic * last > 0.0;
+    plausible.then(|| EnergyCalibration::new([offset, gain, quadratic], "keV"))
 }
 
 /// Writes an integer `.Spc` file.
@@ -335,12 +407,36 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
         out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
 
-    // Last record: the energy calibration.
+    // The energy calibration, where GammaVision keeps it (record 6, the first
+    // calibration record) and in the last record, where earlier versions of
+    // this program look for it. The file stores f32, so a coefficient that
+    // is not zero and does not come out of the conversion as a normal float
+    // (it underflows to zero, lands in the subnormals where digits are lost,
+    // overflows to infinity, or is NaN) cannot be stored as it is. It is
+    // refused by name instead of written as something else.
     if let Some(calibration) = &spectrum.energy_calibration {
-        let base = (last_record - 1) * RECORD_SIZE;
-        for (index, coefficient) in calibration.coefficients.iter().enumerate() {
-            let offset = base + index * 4;
-            out[offset..offset + 4].copy_from_slice(&(*coefficient as f32).to_le_bytes());
+        for (name, coefficient) in ["offset", "gain", "quadratic term"]
+            .into_iter()
+            .zip(calibration.coefficients)
+        {
+            if coefficient != 0.0 && !(coefficient as f32).is_normal() {
+                return Err(FormatError::invalid(
+                    ".Spc",
+                    format!(
+                        "the energy calibration {name} {coefficient:e} cannot be stored in a \
+                         32-bit float"
+                    ),
+                ));
+            }
+        }
+        for base in [
+            5 * RECORD_SIZE + CALIBRATION_OFFSET,
+            (last_record - 1) * RECORD_SIZE,
+        ] {
+            for (index, coefficient) in calibration.coefficients.iter().enumerate() {
+                let offset = base + index * 4;
+                out[offset..offset + 4].copy_from_slice(&(*coefficient as f32).to_le_bytes());
+            }
         }
     }
 
@@ -490,5 +586,256 @@ mod tests {
             read(&bytes[..RECORD_SIZE * 4]),
             Err(FormatError::Truncated { .. })
         ));
+    }
+
+    /// A file laid out the way GammaVision 6.09 writes one: no trailing
+    /// records, so the last record used is the last record of channel data,
+    /// and the calibration in record 6 from byte 20. The coefficients are the
+    /// ones such a file carried, matching the `.Clb` it was calibrated with.
+    fn gammavision_layout(calibration: Option<[f32; 3]>) -> Vec<u8> {
+        let counts: Vec<u64> = (0..1024u64).map(|c| 100 + c % 60).collect();
+        let mut bytes = write(&Spectrum::from_counts(counts)).unwrap();
+        let data_records = 1024 / CHANNELS_PER_RECORD;
+        let last = LEADING_RECORDS + data_records;
+        bytes.truncate(last * RECORD_SIZE);
+        bytes[56..58].copy_from_slice(&(last as u16).to_le_bytes()); // LSTREC
+        bytes[54..56].copy_from_slice(&(last as u16).to_le_bytes()); // MAXRCS
+        if let Some(coefficients) = calibration {
+            for (index, coefficient) in coefficients.iter().enumerate() {
+                let at = 5 * RECORD_SIZE + 20 + index * 4;
+                bytes[at..at + 4].copy_from_slice(&coefficient.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_gammavision_file_reads_its_calibration_from_the_calibration_record() {
+        // Before, the last record - channel data here - was read first, and
+        // counts of 100-160 passed as a gain of 2e-43 keV per channel.
+        let bytes = gammavision_layout(Some([14.340785, 0.3175845, -3.695523e-8]));
+        let calibration = read(&bytes)
+            .unwrap()
+            .energy_calibration
+            .expect("calibrated");
+        assert!((calibration.coefficients[0] - 14.340785).abs() < 1e-5);
+        assert!((calibration.coefficients[1] - 0.3175845).abs() < 1e-7);
+        assert!((calibration.coefficients[2] + 3.695523e-8).abs() < 1e-13);
+    }
+
+    #[test]
+    fn channel_data_is_never_taken_for_a_calibration() {
+        // With no calibration in the file, the counts in the last record must
+        // leave the spectrum uncalibrated, not scaled to nothing.
+        let back = read(&gammavision_layout(None)).unwrap();
+        assert_eq!(back.energy_calibration, None);
+    }
+
+    #[test]
+    fn written_files_put_the_calibration_where_gammavision_keeps_it() {
+        let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+        spectrum.energy_calibration = Some(EnergyCalibration::new([1.5, 0.25, 0.0], "keV"));
+        let bytes = write(&spectrum).unwrap();
+        let at = 5 * RECORD_SIZE + 20;
+        let gain = f32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap());
+        assert_eq!(gain, 0.25);
+    }
+
+    #[test]
+    fn a_file_from_an_earlier_version_still_reads_its_calibration() {
+        // Earlier versions wrote the calibration only into the last record.
+        let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+        spectrum.energy_calibration = Some(EnergyCalibration::new([1.5, 0.25, 0.0], "keV"));
+        let mut bytes = write(&spectrum).unwrap();
+        let at = 5 * RECORD_SIZE + 20;
+        bytes[at..at + 12].fill(0);
+        let calibration = read(&bytes)
+            .unwrap()
+            .energy_calibration
+            .expect("calibrated");
+        assert_eq!(calibration.coefficients, [1.5, 0.25, 0.0]);
+    }
+
+    #[test]
+    fn implausible_coefficients_are_refused() {
+        let tiny = f32::from_bits(127); // a count of 127, read as a float
+        for coefficients in [
+            [0.0, tiny, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, -0.3, 0.0],
+            [0.0, 5e3, 0.0],
+            [5e4, 0.3, 0.0],
+            [0.0, 0.3, -1e-3], // energy falling by the last channel
+            [f32::NAN, 0.3, 0.0],
+            [1e4, 0.3, 0.0], // the offset bound is exclusive
+        ] {
+            assert_eq!(
+                plausible_calibration(coefficients, 1024),
+                None,
+                "{coefficients:?}"
+            );
+        }
+        // Energy flat at the last channel is not rising.
+        assert_eq!(plausible_calibration([0.0, 0.5, -0.25], 2), None);
+        assert!(plausible_calibration([14.34, 0.3176, -3.7e-8], 8192).is_some());
+    }
+
+    #[test]
+    fn a_falling_quadratic_in_a_candidate_that_is_not_ours_is_rejected() {
+        // [0, 0.3, -1e-3] at 1024 channels has energy falling before the last
+        // channel. In a file whose two copies differ nothing vouches for it.
+        let mut spectrum = Spectrum::from_counts(vec![1; 1024]);
+        spectrum.energy_calibration = Some(EnergyCalibration::new([0.0, 0.3, -1e-3], "keV"));
+        let mut bytes = write(&spectrum).unwrap();
+        let at = 5 * RECORD_SIZE + CALIBRATION_OFFSET;
+        bytes[at..at + 4].copy_from_slice(&1.0f32.to_le_bytes()); // copies now differ
+        bytes[at + 4..at + 8].copy_from_slice(&0.3f32.to_le_bytes());
+        bytes[at + 8..at + 12].copy_from_slice(&(-1e-3f32).to_le_bytes());
+        assert_eq!(read(&bytes).unwrap().energy_calibration, None);
+    }
+
+    /// What `read` gives for a calibration written by `write`.
+    fn through_the_file(coefficients: [f64; 3]) -> Option<[f64; 3]> {
+        let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+        spectrum.energy_calibration = Some(EnergyCalibration::new(coefficients, "keV"));
+        read(&write(&spectrum).unwrap())
+            .unwrap()
+            .energy_calibration
+            .map(|calibration| calibration.coefficients)
+    }
+
+    #[test]
+    fn the_reader_accepts_every_calibration_the_writer_writes() {
+        // The file stores f32. Whatever the writer can emit comes back as the
+        // f32 it stored - including the extremes a plausibility filter on the
+        // reader's side would refuse: a gain of 1000 keV per channel or more,
+        // an offset of 10 MeV or more, and a falling energy.
+        let offsets = [0.0, 0.5783, -14.34, 9_999.0, 1e4, -1e4, 5e5, -3e6];
+        let gains = [
+            1e-4, 0.0123, 0.374436, 1.0, 999.9, 1e3, 2_500.0, 1e6, 1e-7, -0.3,
+        ];
+        let quadratics = [
+            0.0,
+            2.985859e-7,
+            -3.695523e-8,
+            1e-30, // small, but a normal f32
+            -1e-37,
+            1e-3,
+            -1e-3, // energy falling by the last channel
+        ];
+        let mut checked = 0;
+        for offset in offsets {
+            for gain in gains {
+                for quadratic in quadratics {
+                    let wrote = [offset, gain, quadratic];
+                    let back = through_the_file(wrote)
+                        .unwrap_or_else(|| panic!("{wrote:?} was written and not read"));
+                    for (got, put) in back.iter().zip(wrote) {
+                        assert_eq!(*got, f64::from(put as f32), "{wrote:?} came back {back:?}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 8 * 10 * 7);
+    }
+
+    #[test]
+    fn a_calibration_that_does_not_fit_the_file_is_refused_not_dropped() {
+        // 1e300 is infinity as an f32: the file would carry no calibration and
+        // say nothing.
+        for coefficients in [[1e300, 0.3, 0.0], [0.0, f64::NAN, 0.0], [0.0, 0.3, 1e39]] {
+            let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+            spectrum.energy_calibration = Some(EnergyCalibration::new(coefficients, "keV"));
+            assert!(
+                matches!(write(&spectrum), Err(FormatError::Invalid { .. })),
+                "{coefficients:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_coefficient_an_f32_cannot_carry_is_refused_by_name() {
+        // Underflow to zero, a subnormal that keeps few digits, overflow, NaN:
+        // none may be written as something else without a word.
+        for (coefficients, name) in [
+            ([0.0, 1e-46, 0.0], "gain"),
+            ([0.0, 0.3, 1e-46], "quadratic term"),
+            ([1e-46, 0.3, 0.0], "offset"),
+            ([0.0, 1e-40, 0.0], "gain"),
+            ([0.0, 0.3, -1e-42], "quadratic term"),
+            ([0.0, 1e39, 0.0], "gain"),
+            ([f64::NAN, 0.3, 0.0], "offset"),
+        ] {
+            let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+            spectrum.energy_calibration = Some(EnergyCalibration::new(coefficients, "keV"));
+            let error = write(&spectrum).expect_err("refused").to_string();
+            assert!(error.contains(name), "{coefficients:?}: {error}");
+        }
+        // Zero is zero, and ordinary calibrations are unaffected.
+        for coefficients in [[0.0, 0.5, 0.0], [-0.0, 0.5, -0.0], [14.34, 0.3176, -3.7e-8]] {
+            let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+            spectrum.energy_calibration = Some(EnergyCalibration::new(coefficients, "keV"));
+            assert!(write(&spectrum).is_ok(), "{coefficients:?}");
+        }
+    }
+
+    #[test]
+    fn junk_in_the_calibration_record_does_not_hide_a_real_calibration_elsewhere() {
+        // A third-party file with finite but absurd numbers at record 6 byte
+        // 20 and a real calibration at byte 0 of the last record: the copies
+        // differ, so nothing is taken on trust and the plausible one wins.
+        let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+        spectrum.energy_calibration = Some(EnergyCalibration::new([1.5, 0.25, 0.0], "keV"));
+        let mut bytes = write(&spectrum).unwrap();
+        let at = 5 * RECORD_SIZE + CALIBRATION_OFFSET;
+        for (index, junk) in [0.0f32, 5_000.0, 0.0].iter().enumerate() {
+            bytes[at + index * 4..at + index * 4 + 4].copy_from_slice(&junk.to_le_bytes());
+        }
+        let calibration = read(&bytes)
+            .unwrap()
+            .energy_calibration
+            .expect("the real one");
+        assert_eq!(calibration.coefficients, [1.5, 0.25, 0.0]);
+    }
+
+    #[test]
+    fn a_calibration_only_one_record_carries_must_look_like_one() {
+        // No second copy to agree with it: an extreme gain is not believed.
+        let mut spectrum = Spectrum::from_counts(vec![1; 64]);
+        spectrum.energy_calibration = Some(EnergyCalibration::new([0.0, 20_000.0, 0.0], "keV"));
+        let mut bytes = write(&spectrum).unwrap();
+        let last = bytes.len() - RECORD_SIZE;
+        bytes[last..last + 12].fill(0);
+        assert_eq!(read(&bytes).unwrap().energy_calibration, None);
+    }
+
+    #[test]
+    fn a_file_with_no_calibration_reads_with_none() {
+        // The calibration record the writer always fills is zero: that is no
+        // calibration, not a gain of nothing.
+        let spectrum = Spectrum::from_counts(vec![1; 64]);
+        assert_eq!(
+            read(&write(&spectrum).unwrap()).unwrap().energy_calibration,
+            None
+        );
+    }
+
+    #[test]
+    fn float_channel_data_is_never_taken_for_a_calibration() {
+        // Counts stored as floats read as perfectly plausible coefficients -
+        // 132, 133, 134 - so only knowing where the channel data lies keeps
+        // them out.
+        let mut bytes = gammavision_layout(None);
+        bytes[2..4].copy_from_slice(&2u16.to_le_bytes()); // FILTYP: floats
+        let data = LEADING_RECORDS * RECORD_SIZE;
+        for channel in 0..1024 {
+            let value = (100 + channel % 60) as f32;
+            let at = data + channel * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let back = read(&bytes).unwrap();
+        assert_eq!(back.channels[992], 132, "the data reads as floats");
+        assert_eq!(back.energy_calibration, None);
     }
 }
