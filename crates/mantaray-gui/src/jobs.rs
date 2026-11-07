@@ -478,12 +478,8 @@ impl JobHost for App {
         // On the job's detector, like START, and a STOP that did not take
         // stops the job: going on would CLEAR or SAVE a count still running.
         // The START it ends is over, so a later WAIT does not watch it.
-        if self.active_is_buffer() {
-            // As before: a buffer has no count to stop, and the job's
-            // detector is not guessed at (it would be detector 0).
-            self.apply_action(Action::Stop);
-            return Ok(());
-        }
+        // With a buffer active this is still the job's detector, the one
+        // START counts on, so a START/STOP job never leaves a count running.
         let Some(detector) = self.job_detector() else {
             return Err(JobError::host("STOP: there is no detector"));
         };
@@ -494,10 +490,8 @@ impl JobHost for App {
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
-        if self.active_is_buffer() {
-            self.apply_action(Action::Clear);
-            return Ok(());
-        }
+        // On the job's detector, what START counted on, even with a buffer
+        // active (a buffer is cleared from the menu, not by a job).
         // A detector that refused CLEAR still holds its counts; a START after
         // it would count on top of them, so the job stops here.
         let Some(detector) = self.job_detector() else {

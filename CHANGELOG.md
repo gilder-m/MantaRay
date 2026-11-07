@@ -28,13 +28,36 @@ mirrored, sent in the program's own spelling (`SET_HV 1200`), answered `OK`
 rather than with the instrument's own reply, and refused with an extra word
 (`STOP 1`, `SET_PRESET_LIVE 300 600`); in a job, SEND_MESSAGE "START",
 "STOP" or "CLEAR" is the job's own START, STOP or CLEAR (its detector, its
-WAIT, Undo); the batch no longer sends STOP. Counts and channels are read
-exactly: one above 2^53 written with a decimal point or exponent, one too
-large to hold, or one with a sign (`+5`, `-0`) is refused instead of
-rounded or guessed.
+WAIT, Undo); the batch no longer sends STOP. The 926's own preset verbs sent
+raw (`SET_LIVE_PRESET`, `SET_TRUE_PRESET`, `SET_PEAK_PRESET`,
+`SET_INTEGRAL_PRESET`, `SET_UNCERTAINTY_PRESET`, `CLEAR_PRESETS`,
+`ENABLE_`/`DISABLE_OVERFLOW_PRESET`) are refused, pointing to SET_PRESET_*,
+so no preset change goes round the rules. Counts and channels are read
+exactly, as decimals, never through floating point: a fraction however
+close to whole (`4.9999999999999999`), one too large to hold, or one with a
+sign (`+5`, `-0`, still refused in job files) is refused instead of rounded
+or guessed, and `9007199254740993.0` is now read exactly instead of refused.
+**Job files:** with a buffer window active, a job's START, STOP and CLEAR
+(and SEND_MESSAGE "STOP" / "CLEAR") all act on the job's detector, the one
+START counts on, so a job never leaves a detector counting; before, STOP did
+nothing and CLEAR cleared the buffer. **Start time:** a spectrum's start time
+is when the detector began counting (the first reading that shows it
+counting, less its real time), not when START was sent, so a detector slow to
+begin is dated right; every file format writes the same field as before.
+Until a reading shows an accepted START counting, presets are held as during
+a count. A START the detector accepts but does not count on is called never
+started after 20 readings (about 10 s), not 4. **Sample changer:** shipped
+builds have no sample changer (it was the simulator's); the CHANGE_SAMPLE and
+WAIT_CHANGER job commands fail with "no sample changer is connected", the
+batch queue's Change sample button is gone and Skip sample is new. **STOP
+confirm:** a STOP made when a preset is reached, and the Stop button, read
+the status up to ten times 100 ms apart on the interface's thread, so the
+window can pause for about a second while a detector confirms; that is not
+a hang.
 The rules are pinned by a scripted rig instrument (test builds only) with
 faults seen on the bench: a reply stream that slips, ACTIVE lagging after
-STOP, ERR replies, odd status lines, front-panel changes and locks.
+STOP, ERR replies, odd status lines, front-panel changes and locks, and a
+START the detector is slow to act on.
 
 The analysis, report and file-format fixes of the November audit, without
 the instrument-control changes, which come later. Two of them change what

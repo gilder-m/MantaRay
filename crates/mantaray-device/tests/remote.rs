@@ -2045,3 +2045,120 @@ fn stop_on_a_locked_remote_sends_nothing() {
     assert!(matches!(error, mantaray_device::DeviceError::Locked { .. }));
     assert!(log.lock().expect("log").is_empty(), "{:?}", log.lock());
 }
+
+// ------------------------------------------- HIGH review of 05d1333
+
+/// The 926's own preset verbs, which the mantaray-mcb bridge passes through
+/// verbatim, are refused as raw messages: sent, they would change a preset
+/// with no status read (so during a count) and the mirror would never learn
+/// the new value. The refusal names the spelling that does take the rules.
+#[test]
+fn a_native_preset_verb_is_refused_and_points_to_set_preset() {
+    let transport = MockTransport::scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=DSPEC SERIAL=1 FIRMWARE=1 CHANNELS=2",
+        ),
+        ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        ("SHOW_PRESETS", "PRESETS REAL=0 LIVE=300 PEAK=0 INTEG=0"),
+        // The typed spelling: one gate read, refused.
+        ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+        // Nothing after this: any native verb that reached the wire, or a
+        // status read made for it, would be answered with a script error.
+    ]);
+    let mut mcb = RemoteMcb::connect(Box::new(transport), 1, "t").expect("connect");
+    let typed = mcb.send_message("SET_PRESET_LIVE 60");
+    assert!(
+        typed
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("during acquisition")),
+        "{typed:?}"
+    );
+    for native in [
+        "SET_LIVE_PRESET 3000",
+        "set_true_preset 3000",
+        "SET_PEAK_PRESET 100",
+        "SET_INTEGRAL_PRESET 5000",
+        "SET_UNCERTAINTY_PRESET 1 2 3",
+        "CLEAR_PRESETS",
+        "ENABLE_OVERFLOW_PRESET",
+        "DISABLE_OVERFLOW_PRESET",
+    ] {
+        let reply = mcb.send_message(native);
+        assert!(
+            reply
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("SET_PRESET_")),
+            "{native} was not refused with a pointer to SET_PRESET_*: {reply:?}"
+        );
+    }
+    assert_eq!(
+        mcb.presets().live_time,
+        Some(300.0),
+        "the mirror still says 300 s"
+    );
+    // A preset read is still a read.
+    let transport = MockTransport::scripted(&[
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=DSPEC SERIAL=1 FIRMWARE=1 CHANNELS=2",
+        ),
+        ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        ("SHOW_PRESETS", "PRESETS REAL=0 LIVE=300 PEAK=0 INTEG=0"),
+        ("SHOW_LIVE_PRESET", "$G0000015000081"),
+    ]);
+    let mut mcb = RemoteMcb::connect(Box::new(transport), 1, "t").expect("connect");
+    assert_eq!(
+        mcb.send_message("SHOW_LIVE_PRESET").expect("a read passes"),
+        "$G0000015000081"
+    );
+}
+
+/// Never started takes NEVER_STARTED_READINGS believed readings: readings
+/// without the flag do not count towards it.
+#[test]
+fn never_started_counts_only_believed_idle_readings() {
+    use mantaray_device::{CountState, CountWatch, NEVER_STARTED_READINGS};
+    let idle = "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0";
+    let no_flag = "RT=0 LT=0 DT=0% ICR=0 TOTAL=0";
+    let mut script = vec![
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=DSPEC SERIAL=1 FIRMWARE=1 CHANNELS=2",
+        ),
+        ("SHOW_STATUS", idle),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        ("SHOW_PRESETS", "PRESETS REAL=0 LIVE=10 PEAK=0 INTEG=0"),
+        // start(): the already-reached read, then START.
+        ("SHOW_STATUS", idle),
+        ("START", "OK"),
+    ];
+    // Three status lines without the flag, then believed idle lines.
+    for _ in 0..3 {
+        script.extend([("SHOW_STATUS", no_flag), ("SHOW_DATA", "DATA 2 0 0")]);
+    }
+    for _ in 0..NEVER_STARTED_READINGS {
+        script.extend([("SHOW_STATUS", idle), ("SHOW_DATA", "DATA 2 0 0")]);
+    }
+    let transport = MockTransport::scripted(&script);
+    let mut mcb = RemoteMcb::connect(Box::new(transport), 1, "t").expect("connect");
+    mcb.set_confirm_step(Duration::ZERO);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    let mut states = Vec::new();
+    for _ in 0..3 + NEVER_STARTED_READINGS {
+        mcb.poll(0.5).expect("poll");
+        let state = watch.check(&mcb);
+        // A second look at the same reading is not a second reading.
+        assert_eq!(watch.check(&mcb), state);
+        states.push(state);
+    }
+    let last = states.pop();
+    assert!(
+        states.iter().all(|state| *state == CountState::Counting),
+        "called before {NEVER_STARTED_READINGS} believed readings: {states:?}"
+    );
+    assert_eq!(last, Some(CountState::NeverStarted));
+}

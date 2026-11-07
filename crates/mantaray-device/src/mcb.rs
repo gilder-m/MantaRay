@@ -449,6 +449,27 @@ fn raw_allowed(command: &str) -> Result<(), DeviceError> {
     Ok(())
 }
 
+/// Refuses the instrument's own preset verbs sent raw (`SET_LIVE_PRESET`,
+/// `SET_TRUE_PRESET`, `SET_PEAK_PRESET`, `SET_INTEGRAL_PRESET`,
+/// `SET_UNCERTAINTY_PRESET`, `CLEAR_PRESETS`, `ENABLE_`/`DISABLE_OVERFLOW_PRESET`,
+/// and any other verb naming a preset that is not a read or this program's
+/// `SET_PRESET_*`). The bridge passes them to the 926 verbatim, so sent they
+/// would change a preset with no counting check and the mirror would keep
+/// the old one. Refused rather than routed: their values are in ticks.
+fn native_preset_refused(command: &str, verb: &str) -> Result<(), DeviceError> {
+    if verb.contains("PRESET") && !verb.starts_with("SHOW_") && !verb.starts_with("SET_PRESET") {
+        return Err(DeviceError::Command {
+            command: command.trim().to_string(),
+            detail: format!(
+                "{verb} changes a preset outside the preset rules; use SET_PRESET_CLEAR, \
+                 SET_PRESET_REAL, SET_PRESET_LIVE, SET_PRESET_COUNT or SET_PRESET_INTEG \
+                 (SET_PRESET_*) instead; nothing was sent"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// A raw preset command (`SET_PRESET_CLEAR`, `SET_PRESET_REAL s`,
 /// `SET_PRESET_LIVE s`, `SET_PRESET_COUNT n`, `SET_PRESET_INTEG n`) as the
 /// whole preset set it asks for, starting from `current`; `None` for a
@@ -865,6 +886,7 @@ pub trait Mcb: Send {
         // The tuning and store commands stay raw: a network instrument has
         // no typed path for them, and routing would refuse what it accepts.
         const TYPED: [&str; 5] = ["START", "STOP", "CLEAR", "SET_HV", "SET_GAIN_COARSE"];
+        native_preset_refused(command, &word)?;
         if !word.starts_with("SET_PRESET") && !TYPED.contains(&word.as_str()) {
             let admitted = admit(self, Op::Raw(command))?;
             return self.do_send_message(command, admitted);

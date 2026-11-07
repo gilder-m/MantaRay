@@ -208,7 +208,7 @@ fn rule10_a_start_that_never_counts_leaves_the_sample_waiting() {
     });
     run_next(&mut app);
     assert_eq!(head_state(&app), Some(JobState::Counting), "{}", app.status);
-    for _ in 0..4 {
+    for _ in 0..mantaray_device::NEVER_STARTED_READINGS {
         settle(&mut app, index);
     }
     assert_eq!(head_state(&app), Some(JobState::Pending), "{}", app.status);
@@ -512,6 +512,9 @@ fn review4_a_stopped_start_does_not_haunt_a_later_wait() {
 
 #[test]
 fn review_r2_a_job_stop_on_a_buffer_stops_no_detector() {
+    // The job's detector with a buffer active is the first one (the
+    // simulator here), what its START would count on; never the rig the
+    // buffer was copied from.
     let (mut app, rig, index) = rig_app();
     app.apply_action(Action::Start);
     settle(&mut app, index);
@@ -520,14 +523,15 @@ fn review_r2_a_job_stop_on_a_buffer_stops_no_detector() {
     let _ = run_job(&mut app, &rig, index, "STOP\n", 3);
     assert!(
         rig.counting(),
-        "a job STOP with a buffer active stopped a detector it never named"
+        "a job STOP with a buffer active stopped a detector its START would not count on"
     );
 }
 
 #[test]
 fn review_r3_a_raw_stop_is_the_jobs_own_stop() {
     // SEND_MESSAGE "STOP" takes the job's door: with a buffer active it
-    // stops no detector, as the job's STOP does not.
+    // stops the job's detector (the first one), as the job's STOP does,
+    // never the rig the buffer was copied from.
     let (mut app, rig, index) = rig_app();
     app.apply_action(Action::Start);
     settle(&mut app, index);
@@ -536,6 +540,105 @@ fn review_r3_a_raw_stop_is_the_jobs_own_stop() {
     let _ = run_job(&mut app, &rig, index, "SEND_MESSAGE \"STOP\"\n", 3);
     assert!(
         rig.counting(),
-        "a raw STOP with a buffer active stopped a detector it never named"
+        "a raw STOP with a buffer active stopped a detector its START would not count on"
+    );
+}
+
+// ------------------------------------------- HIGH review of 05d1333
+
+/// Runs a job on a headless application to its end.
+fn run_headless_job(app: &mut App, name: &str, text: &str) {
+    let job = std::env::temp_dir().join(format!("mantaray-{}-{name}.job", std::process::id()));
+    std::fs::write(&job, text).expect("write the job");
+    mantaray_gui::jobs::start(app, &job).expect("parse");
+    for _ in 0..100 {
+        mantaray_gui::jobs::step(app);
+        if app.job.is_none() {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&job);
+    assert!(app.job.is_none(), "the job did not finish: {}", app.status);
+}
+
+#[test]
+fn high_a_job_with_the_buffer_active_does_not_leave_a_detector_counting() {
+    // A job's START, STOP and CLEAR act on one target, the job's detector:
+    // with a buffer active that is the first detector, for all three.
+    for stop in ["STOP", "SEND_MESSAGE \"STOP\""] {
+        let mut app = App::headless();
+        assert!(
+            !app.detectors.is_empty(),
+            "the simulator build has a detector"
+        );
+        app.open_buffer("Buffer".into(), mantaray_core::Spectrum::new(1024), None);
+        assert!(!app.detectors[0].is_active());
+        run_headless_job(&mut app, "buffer-stop", &format!("START\n{stop}\n"));
+        assert!(
+            !app.detectors[0].is_active(),
+            "the job's START started detector {} and its {stop} left it counting; status: {}",
+            app.detectors[0].identity().number,
+            app.status
+        );
+    }
+}
+
+#[test]
+fn high_a_job_clear_with_the_buffer_active_clears_what_start_counted() {
+    for clear in ["CLEAR", "SEND_MESSAGE \"CLEAR\""] {
+        let mut app = App::headless();
+        let mut buffer = mantaray_core::Spectrum::new(1024);
+        buffer.channels[10] = 42;
+        app.open_buffer("Buffer".into(), buffer, None);
+        run_headless_job(
+            &mut app,
+            "buffer-clear",
+            &format!("SET_PRESET_LIVE 5\nSTART\nWAIT\n{clear}\n"),
+        );
+        assert_eq!(
+            app.detectors[0].spectrum().total_counts(),
+            0,
+            "{clear} left the counts START made; status: {}",
+            app.status
+        );
+        let buffer = app.active_spectrum().expect("the buffer is still active");
+        assert_eq!(
+            buffer.channels.get(10),
+            Some(&42),
+            "{clear} cleared the buffer, not the job's detector"
+        );
+    }
+}
+
+// ------------------------------------------- Gilder 11/7, a slow start
+
+#[test]
+fn gilder_a_saved_spectrum_is_dated_when_a_slow_count_began() {
+    // The file's start time is when the detector began counting, not when
+    // START was sent, for a detector slow to raise ACTIVE.
+    let (mut app, rig, index) = rig_app();
+    rig.fault(mantaray_device::rig::Fault::StartLag { reads: 10 });
+    let sent = chrono::Local::now().naive_local();
+    app.apply_action(Action::Start);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !app.detectors[index].is_active() {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        app.advance_by(0.5);
+        assert!(std::time::Instant::now() < deadline, "never seen counting");
+    }
+    let began = rig.began_at().expect("the rig began counting");
+    assert!(
+        (began - sent).num_milliseconds() >= 1200,
+        "the rig did not lag long enough to tell ({sent} -> {began})"
+    );
+    let path = std::env::temp_dir().join(format!("mantaray-{}-slow-start.spe", std::process::id()));
+    app.save_active_to(&path).expect("save");
+    let saved = mantaray_formats::load_spectrum(&path).expect("read back");
+    let _ = std::fs::remove_file(&path);
+    let dated = saved.start_time.expect("the file carries a start time");
+    // The file keeps whole seconds.
+    assert!(
+        (dated - began).num_milliseconds().abs() <= 1000 && dated > sent,
+        "the file says {dated}; the count began {began}; START was sent {sent}"
     );
 }

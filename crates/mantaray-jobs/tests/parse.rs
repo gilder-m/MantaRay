@@ -320,8 +320,9 @@ fn t25_no_count_preset_or_channel_is_truncated() {
         "SET_PRESET_UNCERTAINTY 5 -1 9",
         // Too large to hold: refused, never saturated to the largest count.
         "SET_PRESET_COUNT 1e30",
-        "SET_PRESET_COUNT 9007199254740993.0",
         "SET_PRESET_INTEG 18446744073709551616",
+        // A fraction a float would round to whole (HIGH review of 05d1333).
+        "SET_PRESET_COUNT 4.9999999999999999",
         "SET_PRESET_UNCERTAINTY 5 1 1e30",
     ] {
         let error = Job::parse(&format!("REM x\nREM y\n{line}\n")).unwrap_err();
@@ -335,9 +336,14 @@ fn t25_no_count_preset_or_channel_is_truncated() {
         only("SET_PRESET_COUNT 1500"),
         Command::SetPresetCount(1500)
     ));
-    // Above 2^53 plain digits are read exactly, not through a float.
+    // Above 2^53 a count is read exactly, not through a float, with or
+    // without a decimal point.
     assert!(matches!(
         only("SET_PRESET_COUNT 9007199254740993"),
+        Command::SetPresetCount(9_007_199_254_740_993)
+    ));
+    assert!(matches!(
+        only("SET_PRESET_COUNT 9007199254740993.0"),
         Command::SetPresetCount(9_007_199_254_740_993)
     ));
 }

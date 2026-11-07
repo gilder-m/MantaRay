@@ -79,9 +79,12 @@ pub enum CountState {
 pub const UNREADABLE_READINGS: u64 = 20;
 
 /// How many believed readings after an accepted START may say idle with the
-/// clocks unmoved before the count is called never started: about two
-/// seconds of fetches, room for an instrument slow to raise its flag.
-pub const NEVER_STARTED_READINGS: u64 = 4;
+/// clocks unmoved before the count is called never started: about ten
+/// seconds of fetches at two a second. Nobody has measured how long the 926
+/// takes to raise ACTIVE after START (the bench only showed it lagging after
+/// STOP), so the bound is wide: only a detector that truly does not count
+/// trips it, never a slow one mid-start. Counted in readings, not in time.
+pub const NEVER_STARTED_READINGS: u64 = 20;
 
 /// Watches one count for its end, for a job's `WAIT` and the batch queue
 /// (the one count-over rule, shared by the interface and the command line).
@@ -109,6 +112,11 @@ pub struct CountWatch {
     seen_counting: bool,
     /// The readings count when the current run of unbelieved ones began.
     untrusted_from: Option<u64>,
+    /// Believed readings seen idle with the clocks unmoved since the START.
+    idle_unmoved: u64,
+    /// The readings count of the last reading added to `idle_unmoved`, so a
+    /// second look at the same reading is not a second reading.
+    idle_seen_at: u64,
 }
 
 impl CountWatch {
@@ -120,6 +128,8 @@ impl CountWatch {
             started: false,
             seen_counting: false,
             untrusted_from: None,
+            idle_unmoved: 0,
+            idle_seen_at: mcb.readings(),
         }
     }
 
@@ -152,7 +162,15 @@ impl CountWatch {
         if !self.started || self.seen_counting || mcb.status().real_time > self.real_time {
             return CountState::Over;
         }
-        if now - self.after >= NEVER_STARTED_READINGS {
+        // Only believed readings count towards never started: one taken
+        // since the last look is counted once, and the ones between two
+        // looks that were not seen are not counted at all (the call can come
+        // later than NEVER_STARTED_READINGS fetches, never sooner).
+        if now > self.idle_seen_at {
+            self.idle_seen_at = now;
+            self.idle_unmoved += 1;
+        }
+        if self.idle_unmoved >= NEVER_STARTED_READINGS {
             return CountState::NeverStarted;
         }
         CountState::Counting

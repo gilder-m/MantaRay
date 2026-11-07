@@ -28,6 +28,9 @@ use crate::transport::Transport;
 pub(crate) struct Fetched {
     pub status: String,
     pub data: String,
+    /// When the status reply arrived, on this computer's clock: the moment
+    /// its clocks were read, which dates a count's real start.
+    pub read_at: chrono::NaiveDateTime,
 }
 
 /// What the caller can send the courier to do.
@@ -163,9 +166,12 @@ fn deliver(
             }
             Errand::Fetch => {
                 let fetched = transport.exchange("SHOW_STATUS").and_then(|status| {
-                    transport
-                        .exchange("SHOW_DATA")
-                        .map(|data| Fetched { status, data })
+                    let read_at = chrono::Local::now().naive_local();
+                    transport.exchange("SHOW_DATA").map(|data| Fetched {
+                        status,
+                        data,
+                        read_at,
+                    })
                 });
                 *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fetched);
             }

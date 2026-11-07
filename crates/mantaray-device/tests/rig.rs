@@ -904,3 +904,111 @@ fn review_45f02cf_gate_reads_do_not_hurry_the_never_started_call() {
         );
     });
 }
+
+// ------------------------------------------- Gilder 11/7, a slow start
+
+/// Polls, a little wall time apart, until the mirror says counting.
+fn until_counting(mcb: &mut RemoteMcb, line: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !mcb.is_active() {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = mcb.poll(0.5);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{line}: never seen counting"
+        );
+    }
+}
+
+/// Gilder (11/7): "the start time of the spectra should coincide with when
+/// acquisition really starts". A detector slow to raise ACTIVE after START is
+/// dated when it began counting (the first reading that shows it counting,
+/// less its real time), not when START was sent. Meanwhile no preset (and
+/// the CLEAR a preset write carries) reaches the count about to begin.
+#[test]
+fn gilder_a_slow_start_is_dated_when_the_count_began() {
+    both(|rig, mut mcb, line| {
+        apply(&mut mcb, Presets::live(30.0)).expect("preset");
+        rig.fault(Fault::StartLag { reads: 6 });
+        let _ = rig.take_sent();
+        let sent = chrono::Local::now().naive_local();
+        mcb.start().expect("START is accepted");
+        let refused = apply(&mut mcb, Presets::live(60.0));
+        assert!(
+            matches!(
+                refused,
+                Err(mantaray_device::DeviceError::PresetsWhileCounting)
+            ),
+            "{line}: a preset change between START and the count's start: {refused:?}"
+        );
+        until_counting(&mut mcb, line);
+        let began = rig.began_at().expect("the rig began counting");
+        assert!(
+            (began - sent).num_milliseconds() >= 300,
+            "{line}: the rig did not lag ({sent} -> {began})"
+        );
+        let dated = mcb.spectrum().start_time.expect("a start date");
+        let off = (dated - began).num_milliseconds().abs();
+        assert!(
+            off < 150,
+            "{line}: dated {dated}, began {began}, START sent {sent}"
+        );
+        // Later readings keep the date.
+        rig.tick(5.0);
+        fresh(&mut mcb);
+        assert_eq!(mcb.spectrum().start_time, Some(dated), "{line}");
+        assert!(
+            !rig.take_sent()
+                .iter()
+                .any(|command| command == "CLEAR" || command.starts_with("SET_PRESET")),
+            "{line}: a CLEAR or preset was sent after START"
+        );
+        assert!(
+            rig.violations().is_empty(),
+            "{line}: {:?}",
+            rig.violations()
+        );
+    });
+}
+
+/// The wait for a slow start is bounded: a START the detector never acts on
+/// stops holding the presets after NEVER_STARTED_READINGS fetches, when a
+/// WAIT or the batch has called it never started.
+#[test]
+fn gilder_a_start_that_never_counts_stops_holding_the_presets() {
+    both(|rig, mut mcb, line| {
+        apply(&mut mcb, Presets::live(30.0)).expect("preset");
+        rig.fault(Fault::Reply {
+            verb: "START".into(),
+            reply: "OK".into(),
+            count: 1,
+            execute: false,
+        });
+        mcb.start().expect("START is accepted");
+        let mut watch = mantaray_device::CountWatch::started(&mcb);
+        let mut state = mantaray_device::CountState::Counting;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while state == mantaray_device::CountState::Counting {
+            assert!(
+                matches!(
+                    apply(&mut mcb, Presets::live(60.0)),
+                    Err(mantaray_device::DeviceError::PresetsWhileCounting)
+                ),
+                "{line}: presets changed while the START could still begin"
+            );
+            // One fetch, then a look, as a WAIT and the batch look at each.
+            loop {
+                let _ = mcb.poll(0.5);
+                if mcb.poll_freshened() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "{line}: no fetch");
+                std::thread::yield_now();
+            }
+            state = watch.check(&mcb);
+            assert!(std::time::Instant::now() < deadline, "{line}: no call made");
+        }
+        assert_eq!(state, mantaray_device::CountState::NeverStarted, "{line}");
+        apply(&mut mcb, Presets::live(60.0)).expect("presets free again");
+    });
+}

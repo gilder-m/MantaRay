@@ -78,6 +78,14 @@ pub enum Fault {
         /// Status reads that still say counting.
         reads: usize,
     },
+    /// After the next accepted START, the instrument does not begin counting
+    /// for this many status reads: `ACTIVE=0`, the clocks still. The read
+    /// after them finds it counting. A detector slow to begin, as the 926
+    /// may be (nobody has measured its lag).
+    StartLag {
+        /// Status reads before it begins.
+        reads: usize,
+    },
     /// The next `count` status lines leave out the word `key=` (`ACTIVE`,
     /// `RT`, `LT`...).
     StatusWithout {
@@ -127,6 +135,11 @@ struct Instrument {
     faults: Vec<Fault>,
     /// Status reads that still say counting after a lagging STOP.
     lagging: usize,
+    /// Status reads left before an accepted, lagging START begins counting.
+    starting: usize,
+    /// When (this computer's clock) the last count began, as the
+    /// instrument would know it.
+    began_at: Option<chrono::NaiveDateTime>,
     /// The reply the slipped stream owes the next command.
     behind: Option<String>,
     tick_per_status: f64,
@@ -164,6 +177,8 @@ impl Rig {
                     locked_by: None,
                     faults: Vec::new(),
                     lagging: 0,
+                    starting: 0,
+                    began_at: None,
                     behind: None,
                     tick_per_status: 0.0,
                     latency: Duration::ZERO,
@@ -318,6 +333,11 @@ impl Rig {
         self.state().counting
     }
 
+    /// When the last count really began, on this computer's clock.
+    pub fn began_at(&self) -> Option<chrono::NaiveDateTime> {
+        self.state().began_at
+    }
+
     /// The preset registers as the instrument holds them.
     pub fn registers(&self) -> Registers {
         self.state().registers
@@ -405,6 +425,25 @@ impl Instrument {
         if self.reached() {
             return;
         }
+        if let Some(at) = self
+            .faults
+            .iter()
+            .position(|fault| matches!(fault, Fault::StartLag { .. }))
+            && let Fault::StartLag { reads } = self.faults.remove(at)
+            && reads > 0
+        {
+            self.starting = reads;
+            return;
+        }
+        self.begin();
+    }
+
+    /// The count begins.
+    fn begin(&mut self) {
+        if !self.counting {
+            self.began_at = Some(chrono::Local::now().naive_local());
+        }
+        self.starting = 0;
         self.counting = true;
     }
 
@@ -515,7 +554,9 @@ impl Instrument {
         if changing && let Some(owner) = &self.locked_by {
             return format!("ERR locked by {owner}");
         }
-        if verb.starts_with("SET_PRESET") && self.counting {
+        // A count about to begin is a count: a preset written into it lands
+        // on the acquisition all the same.
+        if verb.starts_with("SET_PRESET") && (self.counting || self.starting > 0) {
             self.violations
                 .push(format!("{verb} {argument}").trim().to_string());
         }
@@ -531,6 +572,12 @@ impl Instrument {
                 self.channels.len()
             ),
             "SHOW_STATUS" => {
+                if self.starting > 0 {
+                    self.starting -= 1;
+                    if self.starting == 0 {
+                        self.begin();
+                    }
+                }
                 let step = self.tick_per_status;
                 self.advance(step);
                 self.status_line()
@@ -565,6 +612,7 @@ impl Instrument {
                     self.lagging = reads;
                 }
                 self.counting = false;
+                self.starting = 0;
                 "OK".into()
             }
             "CLEAR" => {

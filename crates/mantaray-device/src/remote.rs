@@ -85,6 +85,30 @@ pub struct RemoteMcb {
     untrusted: Option<String>,
     /// Status readings the polls have worked in so far ([`Mcb::readings`]).
     readings: u64,
+    /// An accepted START that no reading has yet shown counting.
+    start_unseen: Option<StartUnseen>,
+}
+
+/// An accepted START waiting for a reading to show the count begin.
+///
+/// The detector may take a while to raise ACTIVE after it accepts START
+/// (nobody has measured the 926's lag). Until a reading shows the count
+/// begin, it is treated as counting for the preset rule, so no preset write
+/// (and the CLEAR it carries) can land on a count that is about to begin;
+/// and the first reading that shows it counting dates the start, since its
+/// real-time clock has run only since the count really began. A START the
+/// detector never acts on stops being waited for after
+/// [`crate::NEVER_STARTED_READINGS`] believed fetches, the bound a job's WAIT
+/// and the batch use to call it never started.
+#[derive(Clone, Copy, Debug)]
+struct StartUnseen {
+    /// The real time the mirror read when START was accepted.
+    real_time: f64,
+    /// Believed fetches since then that said idle with the clocks unmoved.
+    idle_fetches: u64,
+    /// Whether the start date is the provisional one set when START was
+    /// sent, to be replaced by the real start.
+    date: bool,
 }
 
 /// The most status reads that confirm a STOP before it is called failed.
@@ -251,6 +275,7 @@ impl RemoteMcb {
             confirm_step: CONFIRM_STEP,
             untrusted: None,
             readings: 0,
+            start_unseen: None,
         };
         remote.refresh()?;
         // A first status that is not a status line leaves nothing to show
@@ -414,8 +439,43 @@ impl RemoteMcb {
     fn refresh(&mut self) -> Result<(), DeviceError> {
         self.since_poll = 0.0;
         let status = self.raw("SHOW_STATUS")?;
+        let read_at = chrono::Local::now().naive_local();
         let data = self.raw("SHOW_DATA")?;
-        self.integrate(Fetched { status, data })
+        self.integrate(Fetched {
+            status,
+            data,
+            read_at,
+        })
+    }
+
+    /// Works a believed reading, taken at `read_at`, into an accepted START
+    /// still waiting to be seen ([`StartUnseen`]). Only a fetch (`fetch`)
+    /// counts towards giving up on it, never the gate's own status reads.
+    fn see_start(&mut self, reading: Status, read_at: chrono::NaiveDateTime, fetch: bool) {
+        let Some(unseen) = self.start_unseen.as_mut() else {
+            return;
+        };
+        if reading.active {
+            // The real-time clock runs only while it counts, so the count
+            // began that long before this reading: the real start, however
+            // late after START the detector raised its flag.
+            if unseen.date {
+                let counted = chrono::Duration::milliseconds((reading.real_time * 1000.0) as i64);
+                if let Some(start) = read_at.checked_sub_signed(counted) {
+                    self.spectrum.start_time = Some(start);
+                }
+            }
+            self.start_unseen = None;
+        } else if reading.real_time > unseen.real_time {
+            // Counted and over between two readings: it began, but when
+            // cannot be read back, so the date stays the moment START was sent.
+            self.start_unseen = None;
+        } else if fetch {
+            unseen.idle_fetches += 1;
+            if unseen.idle_fetches >= crate::NEVER_STARTED_READINGS {
+                self.start_unseen = None;
+            }
+        }
     }
 
     /// Whether a fetch's channel count is believed enough to rebuild for.
@@ -465,6 +525,7 @@ impl RemoteMcb {
                 self.status.input_count_rate = number("ICR").unwrap_or(0.0);
                 self.status.total_counts = number("TOTAL").unwrap_or(0.0) as u64;
                 self.untrusted = None;
+                self.see_start(reading, fetched.read_at, true);
             }
             None => {
                 self.untrusted = Some(format!(
@@ -581,9 +642,7 @@ impl RemoteMcb {
                 ));
             }
             let counted = chrono::Duration::milliseconds((self.status.real_time * 1000.0) as i64);
-            self.spectrum.start_time = chrono::Local::now()
-                .naive_local()
-                .checked_sub_signed(counted);
+            self.spectrum.start_time = fetched.read_at.checked_sub_signed(counted);
         }
         self.freshened = true;
         Ok(())
@@ -926,7 +985,10 @@ impl Mcb for RemoteMcb {
         self.status.real_time = reading.real_time;
         self.status.live_time = reading.live_time;
         self.since_poll = POLL_INTERVAL;
-        Ok(reading.active)
+        self.see_start(reading, chrono::Local::now().naive_local(), false);
+        // An accepted START no reading has shown begin yet counts as
+        // counting: the detector may be about to raise its flag.
+        Ok(reading.active || self.start_unseen.is_some())
     }
 
     fn do_write_presets(
@@ -973,12 +1035,22 @@ impl Mcb for RemoteMcb {
         // the next poll fetches at once.
         self.command("START")?;
         self.since_poll = POLL_INTERVAL;
-        // The instrument reports no measurement date of its own, so the moment
-        // the start was accepted is the record - as the simulator keeps it. A
-        // resumed count keeps the original date; Clear resets it.
+        // The instrument reports no measurement date on this road (only
+        // ORTEC's Windows library has MIOGetStartTime), so the moment START
+        // was accepted is a provisional date, replaced by the real start -
+        // the first reading that shows it counting, less its real time - so
+        // a detector slow to begin is dated when it began. A resumed count
+        // keeps the original date; Clear resets it.
+        let date = self.spectrum.start_time.is_none()
+            || self.start_unseen.is_some_and(|unseen| unseen.date);
         if self.spectrum.start_time.is_none() {
             self.spectrum.start_time = Some(chrono::Local::now().naive_local());
         }
+        self.start_unseen = Some(StartUnseen {
+            real_time: self.status.real_time,
+            idle_fetches: 0,
+            date,
+        });
         Ok(())
     }
 
@@ -988,6 +1060,9 @@ impl Mcb for RemoteMcb {
         // ERR, and a reply can be another command's. The stop is the detector
         // saying it no longer counts.
         let reply = self.raw("STOP")?;
+        // The START is ended, seen to count or not: the confirm asks the
+        // detector alone.
+        self.start_unseen = None;
         if self.confirm_stopped()? {
             return Ok(());
         }
@@ -1015,6 +1090,12 @@ impl Mcb for RemoteMcb {
         // moment cleared - and a job's CLEAR / START does not start at all.
         self.status.real_time = 0.0;
         self.status.live_time = 0.0;
+        // A START still waiting to be seen now waits from zeroed clocks, and
+        // the first reading that shows it counting dates the count afresh.
+        if let Some(unseen) = self.start_unseen.as_mut() {
+            unseen.real_time = 0.0;
+            unseen.date = true;
+        }
         self.freshened = true;
         Ok(())
     }

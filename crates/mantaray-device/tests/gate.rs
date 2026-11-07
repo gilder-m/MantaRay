@@ -1459,7 +1459,7 @@ fn review6_a_raw_preset_command_goes_through_the_preset_rules() {
             "set_preset_real NaN",
             "SET_PRESET_COUNT 1500.7",
             "SET_PRESET_COUNT 18446744073709551616",
-            "SET_PRESET_COUNT 9007199254740993.0",
+            "SET_PRESET_COUNT 4.9999999999999999",
             "SET_PRESET_LIVE 300 600",
             "SET_PRESET_CLEAR 5",
             "SET_PRESET_LIVE",
