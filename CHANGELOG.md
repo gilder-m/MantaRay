@@ -21,8 +21,14 @@ accepted but did not count is reported, and readings that stay unreadable end
 the wait with the reason. **Instrument commands:** a SHOW_STATUS now precedes
 every preset change and every START; a STOP is followed by status reads until
 the detector agrees; settings send SET_HV / SET_GAIN_COARSE only when they
-change and never a preset; a raw SET_PRESET_* (SEND_MESSAGE, `mantaray serve`)
-is a preset change through the same rules; the batch no longer sends STOP.
+change and never a preset; a raw SET_PRESET_*, START, STOP, CLEAR, SET_HV or
+SET_GAIN_COARSE (SEND_MESSAGE, and every command a `mantaray serve` client
+sends) is the typed command through the same rules: checked, confirmed and
+mirrored, sent in the program's own spelling (`SET_HV 1200`), answered `OK`
+rather than with the instrument's own reply, and refused with an extra word
+(`STOP 1`); the batch no longer sends STOP. Counts and channels are read
+exactly: one above 2^53 written with a decimal point or exponent, or one too
+large to hold, is refused instead of rounded.
 The rules are pinned by a scripted rig instrument (test builds only) with
 faults seen on the bench: a reply stream that slips, ACTIVE lagging after
 STOP, ERR replies, odd status lines, front-panel changes and locks.

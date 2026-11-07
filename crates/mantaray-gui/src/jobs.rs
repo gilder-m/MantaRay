@@ -478,17 +478,22 @@ impl JobHost for App {
         // On the job's detector, like START, and a STOP that did not take
         // stops the job: going on would CLEAR or SAVE a count still running.
         // The START it ends is over, so a later WAIT does not watch it.
-        self.job_count = None;
+        if self.active_is_buffer() {
+            // As before: a buffer has no count to stop, and the job's
+            // detector is not guessed at (it would be detector 0).
+            self.apply_action(Action::Stop);
+            return Ok(());
+        }
         let Some(detector) = self.job_detector() else {
             return Err(JobError::host("STOP: there is no detector"));
         };
         self.detectors[detector].stop().map_err(device)?;
+        self.job_count = None;
         self.status = "acquisition stopped".into();
         Ok(())
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
-        self.job_count = None;
         if self.active_is_buffer() {
             self.apply_action(Action::Clear);
             return Ok(());
@@ -498,10 +503,8 @@ impl JobHost for App {
         let Some(detector) = self.job_detector() else {
             return Err(JobError::host("CLEAR: there is no detector"));
         };
-        self.push_undo("Clear");
-        self.detectors[detector].clear().map_err(device)?;
-        self.mark_modified();
-        self.status = "cleared - Edit/Undo recovers the data".into();
+        self.clear_detector_for_job(detector).map_err(device)?;
+        self.job_count = None;
         Ok(())
     }
 
@@ -937,9 +940,21 @@ impl JobHost for App {
         let Some(detector) = self.job_detector() else {
             return Err(JobError::host("no detector selected"));
         };
-        self.detectors[detector]
-            .send_message(command)
-            .map_err(device)
+        let mcb = &mut self.detectors[detector];
+        let reply = mcb.send_message(command).map_err(device)?;
+        // A raw START, STOP or CLEAR is the typed one (Mcb::send_message), so
+        // the count a later WAIT watches follows it the same way.
+        match mantaray_device::raw_verb(command).as_str() {
+            "START" => {
+                self.job_count = Some((
+                    mcb.identity().number,
+                    mantaray_device::CountWatch::started(&*mcb),
+                ));
+            }
+            "STOP" | "CLEAR" => self.job_count = None,
+            _ => {}
+        }
+        Ok(reply)
     }
 
     fn lock(&mut self, password: &str, owner: &str, _name: Option<&str>) -> Result<(), JobError> {

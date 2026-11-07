@@ -509,3 +509,17 @@ fn review4_a_stopped_start_does_not_haunt_a_later_wait() {
     assert!(app.job.is_none(), "the job did not finish: {status}");
     assert!(status.contains("job finished"), "{status}");
 }
+
+#[test]
+fn review_r2_a_job_stop_on_a_buffer_stops_no_detector() {
+    let (mut app, rig, index) = rig_app();
+    app.apply_action(Action::Start);
+    settle(&mut app, index);
+    assert!(rig.counting());
+    app.apply_action(Action::CopyToBuffer);
+    let _ = run_job(&mut app, &rig, index, "STOP\n", 3);
+    assert!(
+        rig.counting(),
+        "a job STOP with a buffer active stopped a detector it never named"
+    );
+}

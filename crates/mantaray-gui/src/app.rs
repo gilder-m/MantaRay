@@ -2359,6 +2359,41 @@ impl App {
         self.status = "cleared - Edit/Undo recovers the data".into();
     }
 
+    /// A job's CLEAR of a detector: a refusal is returned, not shown, so the
+    /// job stops. The undo snapshot is kept only when the clear happened and
+    /// the cleared detector is the active window's (the one Undo restores);
+    /// otherwise the status does not promise Undo.
+    pub(crate) fn clear_detector_for_job(
+        &mut self,
+        detector: usize,
+    ) -> Result<(), mantaray_device::DeviceError> {
+        let shown = self
+            .active
+            .filter(|index| self.windows[*index].target == Target::Detector(detector));
+        let snapshot = shown.and_then(|index| {
+            let spectrum = Self::spectrum_of(&self.windows, &self.detectors, index).cloned()?;
+            let window = &self.windows[index];
+            Some(UndoSnapshot {
+                target: window.target,
+                window: window.id,
+                spectrum,
+                title: window.title.clone(),
+            })
+        });
+        self.detectors[detector].clear()?;
+        if let Some(index) = shown {
+            self.windows[index].modified = true;
+        }
+        self.status = match snapshot {
+            Some(snapshot) => {
+                self.history.push("Clear", snapshot);
+                "cleared - Edit/Undo recovers the data".into()
+            }
+            None => "cleared".into(),
+        };
+        Ok(())
+    }
+
     fn copy_to_buffer(&mut self) {
         let Some(index) = self.active else { return };
         let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index).cloned()

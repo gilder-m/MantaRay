@@ -44,7 +44,7 @@ pub use detector::{
 pub use error::DeviceError;
 pub use mcb::{
     AdcSettings, AmplifierSettings, BaselineRestorer, Capabilities, GateMode, HighVoltageSettings,
-    HvShutdown, Mcb, McbIdentity, McbProperties, McbStatus, Polarity, StabilizerSettings,
+    HvShutdown, Mcb, McbIdentity, McbProperties, McbStatus, Polarity, StabilizerSettings, raw_verb,
 };
 pub use presets::{MdaPreset, PRESET_TICK_SECONDS, PresetKind, Presets, UncertaintyPreset};
 pub use remote::RemoteMcb;

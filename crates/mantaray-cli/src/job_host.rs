@@ -531,7 +531,18 @@ impl JobHost for CliSession {
     }
 
     fn send_message(&mut self, command: &str) -> Result<String, JobError> {
-        let reply = self.instrument()?.send_message(command).map_err(device)?;
+        let instrument = self.instrument()?;
+        let reply = instrument.send_message(command).map_err(device)?;
+        // A raw START, STOP or CLEAR is the typed one (Mcb::send_message), so
+        // the count a later WAIT watches follows it the same way.
+        let watch = match mantaray_device::raw_verb(command).as_str() {
+            "START" => Some(Some(mantaray_device::CountWatch::started(&*instrument))),
+            "STOP" | "CLEAR" => Some(None),
+            _ => None,
+        };
+        if let Some(watch) = watch {
+            self.count = watch;
+        }
         self.note(&format!("{command} -> {reply}"));
         Ok(reply)
     }
@@ -753,6 +764,37 @@ mod tests {
         session.clear().expect("CLEAR");
         let outcome = within(30, "WAIT", move || session.wait_for_stop());
         outcome.expect("WAIT on an idle detector is over at once");
+    }
+
+    #[test]
+    fn rig_review_r2_a_raw_stop_and_clear_drop_the_watch() {
+        let (mut session, _rig) = rig_session();
+        session.set_preset_live(3.0).expect("preset");
+        session.start().expect("START");
+        session.send_message("STOP").expect("raw STOP");
+        session.send_message("CLEAR").expect("raw CLEAR");
+        let outcome = within(30, "WAIT", move || session.wait_for_stop());
+        outcome.expect("WAIT on an idle detector is over at once");
+    }
+
+    #[test]
+    fn rig_review_r2_a_raw_start_is_watched_like_a_typed_one() {
+        // A raw START the detector accepted but did not count is reported,
+        // not taken for a count that is over.
+        let (mut session, rig) = rig_session();
+        session.set_preset_live(2.0).expect("preset");
+        rig.fault(mantaray_device::rig::Fault::Reply {
+            verb: "START".into(),
+            reply: "OK".into(),
+            count: 1,
+            execute: false,
+        });
+        session
+            .send_message("START")
+            .expect("raw START is accepted");
+        let outcome = within(30, "WAIT", move || session.wait_for_stop());
+        let error = outcome.expect_err("a count that never ran is not over");
+        assert!(error.to_string().contains("did not count"), "{error}");
     }
 
     #[test]

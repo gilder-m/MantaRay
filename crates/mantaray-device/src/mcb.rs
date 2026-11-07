@@ -401,7 +401,6 @@ fn admit<M: Mcb + ?Sized>(mcb: &mut M, op: Op<'_>) -> Result<Admitted, DeviceErr
             presets.validate()?;
         }
         Op::Start => not_already_reached(mcb)?,
-        Op::Raw(command) if verb(command) == "START" => not_already_reached(mcb)?,
         _ => {}
     }
     Ok(Admitted(()))
@@ -426,6 +425,12 @@ fn not_already_reached<M: Mcb + ?Sized>(mcb: &mut M) -> Result<(), DeviceError> 
         }),
         None => Ok(()),
     }
+}
+
+/// A raw message's verb, upper case, as [`Mcb::send_message`] reads it: the
+/// job hosts use it to follow a raw START, STOP or CLEAR like a typed one.
+pub fn raw_verb(command: &str) -> String {
+    verb(command)
 }
 
 /// A raw message's verb, upper case.
@@ -473,15 +478,15 @@ fn raw_presets(current: &Presets, command: &str) -> Result<Option<Presets>, Devi
             .ok_or_else(|| refuse("the value is not a number; nothing was sent".into()))
     };
     // Counts are whole: a fraction is refused, never truncated (rule 6).
+    // Exact, or refused: never rounded above 2^53 or saturated.
     let count = |setting: &str| -> Result<Option<u64>, DeviceError> {
         let value = number()?;
-        if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= u64::MAX as f64 {
-            return Err(DeviceError::OutOfRange {
+        mantaray_core::numbers::whole_count(argument.unwrap_or_default())
+            .map(Some)
+            .ok_or_else(|| DeviceError::OutOfRange {
                 setting: setting.into(),
                 detail: format!("{value} is not a whole number of counts"),
-            });
-        }
-        Ok(Some(value as u64))
+            })
     };
     let mut presets = *current;
     match verb.as_str() {
@@ -846,41 +851,55 @@ pub trait Mcb: Send {
     /// mirror follows what was sent.
     fn send_message(&mut self, command: &str) -> Result<String, DeviceError> {
         raw_allowed(command)?;
-        // The lock is the gate's first question, before the value is read.
         let word = verb(command);
-        if word.starts_with("SET_PRESET") || word == "SET_HV" || word == "SET_GAIN_COARSE" {
-            self.ensure_unlocked()?;
+        // The commands the typed methods own take the same door, chosen on
+        // the verb alone, so a raw one is checked, confirmed and mirrored
+        // like its typed twin and no spelling of it goes round.
+        // Exact verbs: SET_HV_POSITIVE is not SET_HV. Every SET_PRESET_* is a
+        // preset command, refused by name if it is not one this program has.
+        // The tuning and store commands stay raw: a network instrument has
+        // no typed path for them, and routing would refuse what it accepts.
+        const TYPED: [&str; 5] = ["START", "STOP", "CLEAR", "SET_HV", "SET_GAIN_COARSE"];
+        if !word.starts_with("SET_PRESET") && !TYPED.contains(&word.as_str()) {
+            let admitted = admit(self, Op::Raw(command))?;
+            return self.do_send_message(command, admitted);
         }
+        // The lock is the gate's first question, before the value is read.
+        self.ensure_unlocked()?;
         if let Some(presets) = raw_presets(self.presets(), command)? {
             self.set_presets(presets)?;
             return Ok("OK".into());
         }
-        // The other commands the typed methods own take the same door, so a
-        // raw one is checked, confirmed and mirrored like its typed twin.
         let words: Vec<&str> = command.split_whitespace().collect();
+        let refuse = |detail: &str| DeviceError::Command {
+            command: command.trim().to_string(),
+            detail: format!("{detail}; nothing was sent"),
+        };
         let value = || -> Result<f64, DeviceError> {
             match words.as_slice() {
                 [_, word] => word.parse::<f64>().ok(),
                 _ => None,
             }
-            .ok_or_else(|| DeviceError::Command {
-                command: command.trim().to_string(),
-                detail: "the value is not a number; nothing was sent".into(),
-            })
+            .ok_or_else(|| refuse("the value is not one number"))
         };
-        let typed = match (verb(command).as_str(), words.len()) {
-            ("START", 1) => Some(self.start()),
-            ("STOP", 1) => Some(self.stop()),
-            ("CLEAR", 1) => Some(self.clear()),
-            ("SET_HV", _) => Some(self.set_high_voltage(value()?)),
-            ("SET_GAIN_COARSE", _) => Some(self.set_coarse_gain(value()?)),
-            _ => None,
+        let bare = || -> Result<(), DeviceError> {
+            match words.len() {
+                1 => Ok(()),
+                _ => Err(refuse(&format!("{word} takes no value"))),
+            }
         };
-        if let Some(outcome) = typed {
-            return outcome.map(|()| "OK".into());
+        match word.as_str() {
+            "START" => bare().and_then(|()| self.start()),
+            "STOP" => bare().and_then(|()| self.stop()),
+            "CLEAR" => bare().and_then(|()| self.clear()),
+            "SET_HV" => self.set_high_voltage(value()?),
+            "SET_GAIN_COARSE" => self.set_coarse_gain(value()?),
+            // Not reached: every SET_PRESET_* was answered above.
+            _ => Err(DeviceError::NotSupported {
+                feature: format!("{word} sent raw; nothing was sent"),
+            }),
         }
-        let admitted = admit(self, Op::Raw(command))?;
-        self.do_send_message(command, admitted)
+        .map(|()| "OK".into())
     }
 
     /// The exchange behind [`Self::send_message`].

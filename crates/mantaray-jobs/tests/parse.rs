@@ -320,6 +320,7 @@ fn t25_no_count_preset_or_channel_is_truncated() {
         "SET_PRESET_UNCERTAINTY 5 -1 9",
         // Too large to hold: refused, never saturated to the largest count.
         "SET_PRESET_COUNT 1e30",
+        "SET_PRESET_COUNT 9007199254740993.0",
         "SET_PRESET_INTEG 18446744073709551616",
         "SET_PRESET_UNCERTAINTY 5 1 1e30",
     ] {
@@ -333,6 +334,11 @@ fn t25_no_count_preset_or_channel_is_truncated() {
     assert!(matches!(
         only("SET_PRESET_COUNT 1500"),
         Command::SetPresetCount(1500)
+    ));
+    // Above 2^53 plain digits are read exactly, not through a float.
+    assert!(matches!(
+        only("SET_PRESET_COUNT 9007199254740993"),
+        Command::SetPresetCount(9_007_199_254_740_993)
     ));
 }
 

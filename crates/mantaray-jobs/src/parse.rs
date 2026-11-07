@@ -120,25 +120,24 @@ fn parse_line(text: &str, line: usize) -> Result<Command, JobError> {
     // the zero that disables the preset without saying so.
     let count_preset = |index: usize| -> Result<u64, JobError> {
         let value = preset(index)?;
-        // Too large to hold is refused too, never saturated to the largest
-        // count (2^64 itself would saturate).
-        if value.fract() != 0.0 || value >= u64::MAX as f64 {
-            return Err(bad(format!(
+        // Exact, or refused: never rounded above 2^53 or saturated.
+        mantaray_core::numbers::whole_count(&text_arg(index)?).ok_or_else(|| {
+            bad(format!(
                 "{value} is not a valid count preset (it must be a whole number of counts, \
                  or 0 to disable the preset)"
-            )));
-        }
-        Ok(value as u64)
+            ))
+        })
     };
     // A channel is a whole, non-negative number.
     let channel = |index: usize| -> Result<usize, JobError> {
         let value = number(index)?;
-        if value < 0.0 || value.fract() != 0.0 || value >= usize::MAX as f64 {
-            return Err(bad(format!(
-                "{value} is not a channel number (a whole number, 0 or more)"
-            )));
-        }
-        Ok(value as usize)
+        mantaray_core::numbers::whole_count(&text_arg(index)?)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| {
+                bad(format!(
+                    "{value} is not a channel number (a whole number, 0 or more)"
+                ))
+            })
     };
 
     let command = match upper.as_str() {

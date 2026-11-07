@@ -1459,6 +1459,7 @@ fn review6_a_raw_preset_command_goes_through_the_preset_rules() {
             "set_preset_real NaN",
             "SET_PRESET_COUNT 1500.7",
             "SET_PRESET_COUNT 18446744073709551616",
+            "SET_PRESET_COUNT 9007199254740993.0",
             "SET_PRESET_LIVE",
             "SET_PRESET_UNCERTAINTY 5 10 20",
         ] {
@@ -1498,15 +1499,21 @@ fn review_45f02cf_a_raw_bias_or_gain_goes_through_the_setting_rules() {
             "SET_HV 1200.7",
             "SET_HV",
             "SET_GAIN_COARSE 1e9",
+            // Round 2: no extra word takes a command round its typed door.
+            "STOP 1",
+            "CLEAR x",
+            "START 0",
         ] {
             rig.mcb
                 .send_message(message)
                 .expect_err(&format!("{name}: {message}"));
         }
         assert!(
-            !rig.log()
-                .iter()
-                .any(|command| command.starts_with("SET_HV") || command.starts_with("SET_GAIN")),
+            !rig.log().iter().any(|command| {
+                ["SET_HV", "SET_GAIN", "STOP", "CLEAR", "START"]
+                    .iter()
+                    .any(|verb| command.starts_with(verb))
+            }),
             "{name}: {:?}",
             rig.log()
         );

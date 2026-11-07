@@ -872,9 +872,9 @@ impl Mcb for SimulatedMcb {
                 }
                 Ok(line)
             }
-            "START" => self.do_start(admitted).map(|_| "OK".to_string()),
-            "STOP" => self.do_stop(admitted).map(|_| "OK".to_string()),
-            "CLEAR" => self.do_clear(admitted).map(|_| "OK".to_string()),
+            // START, STOP, CLEAR, SET_HV, SET_GAIN_COARSE and SET_PRESET_*
+            // never arrive here: the gate sends them through their typed
+            // methods (Mcb::send_message).
             "STORE" => self
                 .do_store_spectrum(admitted)
                 .map(|count| format!("OK {count} stored")),
@@ -896,26 +896,12 @@ impl Mcb for SimulatedMcb {
                 self.properties.amplifier.fine_gain = number()? / 4096.0;
                 Ok("OK".to_string())
             }
-            "SET_GAIN_COARSE" => {
-                let gain = number()?;
-                AmplifierSettings::check_coarse_gain(gain)?;
-                self.properties.amplifier.coarse_gain = plain_zero(gain);
-                Ok("OK".to_string())
-            }
-            // SET_PRESET_* never arrives here: the gate refuses a raw preset
-            // command (presets go through the preset rules).
             "SET_OUTPUT_HIGH" => {
                 self.output_high = true;
                 Ok("OK".to_string())
             }
             "SET_OUTPUT_LOW" => {
                 self.output_high = false;
-                Ok("OK".to_string())
-            }
-            "SET_HV" => {
-                let volts = number()?;
-                HighVoltageSettings::check_target(volts)?;
-                self.properties.high_voltage.target_volts = plain_zero(volts);
                 Ok("OK".to_string())
             }
             other => Err(DeviceError::Command {
