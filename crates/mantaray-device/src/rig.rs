@@ -86,6 +86,14 @@ pub enum Fault {
         /// Status reads before it begins.
         reads: usize,
     },
+    /// After the next accepted START, the instrument counts at once (its
+    /// clocks run) but its status says `ACTIVE=0` for this many status
+    /// reads: the flag trailing the clocks at the start of a count, the
+    /// converse of [`Fault::StopLag`]. HIGH review of 4ae6457.
+    FlagLag {
+        /// Status reads whose flag still says idle.
+        reads: usize,
+    },
     /// The next `count` status lines leave out the word `key=` (`ACTIVE`,
     /// `RT`, `LT`...).
     StatusWithout {
@@ -137,6 +145,8 @@ struct Instrument {
     lagging: usize,
     /// Status reads left before an accepted, lagging START begins counting.
     starting: usize,
+    /// Status reads left whose flag says idle on a count that runs.
+    flag_lag: usize,
     /// When (this computer's clock) the last count began, as the
     /// instrument would know it.
     began_at: Option<chrono::NaiveDateTime>,
@@ -178,6 +188,7 @@ impl Rig {
                     faults: Vec::new(),
                     lagging: 0,
                     starting: 0,
+                    flag_lag: 0,
                     began_at: None,
                     behind: None,
                     tick_per_status: 0.0,
@@ -438,6 +449,14 @@ impl Instrument {
             self.starting = reads + 1;
             return;
         }
+        if let Some(at) = self
+            .faults
+            .iter()
+            .position(|fault| matches!(fault, Fault::FlagLag { .. }))
+            && let Fault::FlagLag { reads } = self.faults.remove(at)
+        {
+            self.flag_lag = reads;
+        }
         self.begin();
     }
 
@@ -516,8 +535,11 @@ impl Instrument {
     }
 
     fn status_line(&mut self) -> String {
-        let active = self.counting || self.lagging > 0;
+        let active = (self.counting && self.flag_lag == 0) || self.lagging > 0;
         self.lagging = self.lagging.saturating_sub(1);
+        if self.counting {
+            self.flag_lag = self.flag_lag.saturating_sub(1);
+        }
         let real = self.real_time;
         let live = self.live_time;
         let dead = self.dead_fraction * 100.0;
@@ -616,6 +638,7 @@ impl Instrument {
                 }
                 self.counting = false;
                 self.starting = 0;
+                self.flag_lag = 0;
                 "OK".into()
             }
             "CLEAR" => {

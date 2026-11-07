@@ -198,8 +198,13 @@ impl JobHost for CliSession {
                 Ok(())
             }
             Target::Detector => {
-                self.count = None;
-                self.instrument()?.clear().map_err(device)
+                self.instrument()?.clear().map_err(device)?;
+                // A count the job STARTed is still the one a later WAIT
+                // watches (START / CLEAR / WAIT), its clocks from zero again.
+                if let Some(watch) = self.count.as_mut() {
+                    watch.cleared();
+                }
+                Ok(())
             }
         }
     }

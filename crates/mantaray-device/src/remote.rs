@@ -91,6 +91,8 @@ pub struct RemoteMcb {
     /// START was sent on a fresh count, to be replaced by the first reading
     /// that shows it counting ([`Self::date_start`]).
     provisional_start: bool,
+    /// Whether a STOP's confirm reads are under way (they date nothing).
+    confirming: bool,
 }
 
 /// An accepted START waiting for a reading to show the count begin.
@@ -104,9 +106,14 @@ pub struct RemoteMcb {
 /// and the batch use to call it never started.
 #[derive(Clone, Copy, Debug)]
 struct StartUnseen {
-    /// The real time the instrument read just before START (the gate's
-    /// fresh status read).
+    /// The real time of the latest reading (the gate's fresh status read
+    /// just before START, to begin with).
     real_time: f64,
+    /// Whether a reading since START has shown the clocks run on.
+    ran: bool,
+    /// The real time of the latest fetch: once the clocks have run, a fetch
+    /// a poll later on the same value says the count is over.
+    last_fetch: Option<f64>,
     /// Believed fetches since then that said idle with the clocks unmoved.
     idle_fetches: u64,
 }
@@ -277,6 +284,7 @@ impl RemoteMcb {
             readings: 0,
             start_unseen: None,
             provisional_start: false,
+            confirming: false,
         };
         remote.refresh()?;
         // A first status that is not a status line leaves nothing to show
@@ -413,6 +421,14 @@ impl RemoteMcb {
     /// wire. A read that fails ends it with that read's reason: the STOP was
     /// sent, but could not be confirmed.
     fn confirm_stopped(&mut self) -> Result<bool, DeviceError> {
+        self.confirming = true;
+        let confirmed = self.confirm_reads();
+        self.confirming = false;
+        confirmed
+    }
+
+    /// The reads behind [`Self::confirm_stopped`].
+    fn confirm_reads(&mut self) -> Result<bool, DeviceError> {
         for read in 0..CONFIRM_READS {
             if read > 0 && !self.confirm_step.is_zero() {
                 std::thread::sleep(self.confirm_step);
@@ -454,7 +470,9 @@ impl RemoteMcb {
     /// fetch (`fetch`) counts towards giving up on it, never the gate's own
     /// status reads.
     fn see_start(&mut self, reading: Status, read_at: chrono::NaiveDateTime, fetch: bool) {
-        if reading.active {
+        // A STOP's confirm reads date nothing: a flag that trails the stop
+        // beside clocks frozen at it would date the count late.
+        if reading.active && !self.confirming {
             self.date_start(reading.real_time, read_at);
         }
         let Some(unseen) = self.start_unseen.as_mut() else {
@@ -462,12 +480,35 @@ impl RemoteMcb {
         };
         if reading.active {
             self.start_unseen = None;
-        } else if reading.real_time > unseen.real_time {
-            // Counted and over between two readings: it began, but when
-            // cannot be read back, so the date stays the moment START was
-            // sent, for good (a resume's clock would include this run).
-            self.start_unseen = None;
-            self.provisional_start = false;
+            return;
+        }
+        let previous_fetch = if fetch {
+            unseen.last_fetch.replace(reading.real_time)
+        } else {
+            unseen.last_fetch
+        };
+        if reading.real_time > unseen.real_time {
+            // Idle, with the clocks run on: it has begun, and the flag may
+            // just trail the clocks (the bridge also reads the flag before
+            // the clocks), so this decides nothing and the hold stays. Clocks
+            // that run on again after an earlier such reading say it counts
+            // now, and date it.
+            let again = unseen.ran;
+            unseen.real_time = reading.real_time;
+            unseen.ran = true;
+            if again {
+                self.date_start(reading.real_time, read_at);
+            }
+        } else if unseen.ran {
+            // Two fetches a poll apart on the same clocks, after they ran:
+            // it counted and is over between readings. When it began cannot
+            // be read back, so the date stays the moment START was sent, for
+            // good (a resume's clock would include this run). A gate read
+            // close behind a fetch decides nothing here.
+            if fetch && previous_fetch == Some(reading.real_time) {
+                self.start_unseen = None;
+                self.provisional_start = false;
+            }
         } else if fetch {
             unseen.idle_fetches += 1;
             if unseen.idle_fetches >= crate::NEVER_STARTED_READINGS {
@@ -1082,6 +1123,8 @@ impl Mcb for RemoteMcb {
         if self.start_unseen.is_none() {
             self.start_unseen = Some(StartUnseen {
                 real_time: self.status.real_time,
+                ran: false,
+                last_fetch: None,
                 idle_fetches: 0,
             });
         }
@@ -1136,6 +1179,7 @@ impl Mcb for RemoteMcb {
         // (the date went with the spectrum).
         if let Some(unseen) = self.start_unseen.as_mut() {
             unseen.real_time = 0.0;
+            unseen.last_fetch = None;
         }
         self.provisional_start = false;
         self.freshened = true;

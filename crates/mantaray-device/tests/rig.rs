@@ -1061,3 +1061,57 @@ fn gilder_a_resume_after_an_unseen_run_keeps_its_date() {
         );
     });
 }
+
+/// One fetch, then back to the caller.
+fn one_fetch(mcb: &mut RemoteMcb) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let _ = mcb.poll(0.5);
+        if mcb.poll_freshened() {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "no fetch");
+        std::thread::yield_now();
+    }
+}
+
+/// HIGH review of 4ae6457: a count whose flag trails its clocks at the start
+/// (ACTIVE=0 while the clocks run) is watched to its real end, holds the
+/// presets meanwhile, and nothing is sent into it.
+#[test]
+fn high_a_flag_trailing_the_clocks_at_start_is_watched_to_the_end() {
+    both(|rig, mut mcb, line| {
+        mcb.set_confirm_step(std::time::Duration::ZERO);
+        apply(&mut mcb, Presets::live(2.0)).expect("preset");
+        rig.tick_per_status(0.2);
+        rig.fault(Fault::FlagLag { reads: 4 });
+        mcb.start().expect("START is accepted");
+        let mut watch = mantaray_device::CountWatch::started(&mcb);
+        let mut state = mantaray_device::CountState::Counting;
+        let mut fetches = 0;
+        while state == mantaray_device::CountState::Counting && fetches < 100 {
+            // Well short of the preset, so the gate's own read (which ticks
+            // the rig) cannot be the one that ends the count.
+            if rig.counting() && rig.clocks().1 < 1.0 {
+                assert!(
+                    matches!(
+                        apply(&mut mcb, Presets::live(60.0)),
+                        Err(mantaray_device::DeviceError::PresetsWhileCounting)
+                    ),
+                    "{line}: a preset change reached a running count"
+                );
+            }
+            one_fetch(&mut mcb);
+            fetches += 1;
+            state = watch.check(&mcb);
+        }
+        assert_eq!(state, mantaray_device::CountState::Over, "{line}");
+        assert!(!rig.counting(), "{line}: the WAIT ended while it counted");
+        assert!(rig.clocks().1 >= 2.0 - 1e-9, "{line}: {:?}", rig.clocks());
+        assert!(
+            rig.violations().is_empty(),
+            "{line}: {:?}",
+            rig.violations()
+        );
+    });
+}

@@ -693,3 +693,27 @@ fn medium_review_a_buffer_clear_in_a_job_that_started_nothing_clears_the_buffer(
         assert!(rig.counting(), "{clear}");
     }
 }
+
+#[test]
+fn high_review_start_clear_wait_watches_the_jobs_count() {
+    // HIGH review of 4ae6457, nit 4: a CLEAR after the job's START keeps the
+    // job's watch, so a WAIT on a count whose flag trails its clocks does
+    // not end on the first idle reading.
+    let (mut app, rig, index) = rig_app();
+    rig.tick_per_status(0.2);
+    rig.fault(mantaray_device::rig::Fault::FlagLag { reads: 3 });
+    let status = run_job(
+        &mut app,
+        &rig,
+        index,
+        "SET_PRESET_LIVE 3\nSTART\nCLEAR\nWAIT\n",
+        200,
+    );
+    assert!(app.job.is_none(), "the job did not finish: {status}");
+    assert!(status.contains("job finished"), "{status}");
+    assert!(
+        !rig.counting(),
+        "the WAIT ended while the rig counted: {status}"
+    );
+    assert!(rig.clocks().1 >= 3.0 - 1e-9, "{:?}", rig.clocks());
+}

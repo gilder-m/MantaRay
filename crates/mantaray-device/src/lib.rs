@@ -92,31 +92,50 @@ pub const NEVER_STARTED_READINGS: u64 = 20;
 /// A START is accepted on its reply (amended rule 9), so right after it the
 /// mirror's flag is still the reading from before it. The watch therefore
 /// judges only readings taken after it began ([`Mcb::readings`]). Watching
-/// a count it started ([`Self::started`]), a believed idle reading ends the
-/// count once it has been seen counting or its clocks have moved; idle with
-/// the clocks unmoved for [`NEVER_STARTED_READINGS`] readings, it never
-/// started. Watching with no START of its own ([`Self::begin`], a job's WAIT
-/// on a detector it did not start), the first believed idle reading ends
-/// it, so a WAIT on an idle detector returns on the next fetch. Nothing here
-/// reads a clock of this computer's, so no count is cut short or waited out
-/// by a timer.
+/// a count it started ([`Self::started`]):
+/// - a believed idle reading ends the count once it has been seen counting;
+/// - before that, an idle reading whose clocks have moved does not decide
+///   it: the flag can trail the clocks when a count begins (and the bridge
+///   reads the flag before the clocks). The next believed reading does:
+///   clocks moved again, it counts; clocks where they stood, it is over;
+/// - idle with the clocks unmoved for [`NEVER_STARTED_READINGS`] readings,
+///   it never started.
+///
+/// Watching with no START of its own ([`Self::begin`], a job's WAIT on a
+/// detector it did not start), the first believed idle reading ends it, so
+/// a WAIT on an idle detector returns on the next fetch. Nothing here reads
+/// a clock of this computer's, so no count is cut short or waited out by a
+/// timer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CountWatch {
     /// The readings taken when the watch began.
     after: u64,
-    /// The real time the mirror read when the watch began.
+    /// The real time of the last idle reading judged (the mirror's when the
+    /// watch began).
     real_time: f64,
     /// Whether the watch began on a START it saw accepted.
     started: bool,
     /// Whether a reading during the watch said counting.
     seen_counting: bool,
+    /// Whether an idle reading's clocks have moved since the START.
+    moved: bool,
     /// The readings count when the current run of unbelieved ones began.
     untrusted_from: Option<u64>,
     /// Believed readings seen idle with the clocks unmoved since the START.
     idle_unmoved: u64,
-    /// The readings count of the last reading added to `idle_unmoved`, so a
-    /// second look at the same reading is not a second reading.
-    idle_seen_at: u64,
+    /// The readings count of the last idle reading judged, so a second look
+    /// at the same reading is not a second reading.
+    looked_at: u64,
+    /// What that reading was judged to say.
+    verdict: Idle,
+}
+
+/// What an idle reading after an accepted START says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Idle {
+    Counting,
+    Over,
+    NeverStarted,
 }
 
 impl CountWatch {
@@ -127,10 +146,19 @@ impl CountWatch {
             real_time: mcb.status().real_time,
             started: false,
             seen_counting: false,
+            moved: false,
             untrusted_from: None,
             idle_unmoved: 0,
-            idle_seen_at: mcb.readings(),
+            looked_at: mcb.readings(),
+            verdict: Idle::Counting,
         }
+    }
+
+    /// The detector was cleared while watched: its clocks start again from
+    /// zero, and the count the watch was told of is still the one it
+    /// watches.
+    pub fn cleared(&mut self) {
+        self.real_time = 0.0;
     }
 
     /// Begins watching a count whose START was just accepted.
@@ -159,21 +187,36 @@ impl CountWatch {
             self.seen_counting = true;
             return CountState::Counting;
         }
-        if !self.started || self.seen_counting || mcb.status().real_time > self.real_time {
+        if !self.started || self.seen_counting {
             return CountState::Over;
         }
-        // Only believed readings count towards never started: one taken
-        // since the last look is counted once, and the ones between two
-        // looks that were not seen are not counted at all (the call can come
-        // later than NEVER_STARTED_READINGS fetches, never sooner).
-        if now > self.idle_seen_at {
-            self.idle_seen_at = now;
-            self.idle_unmoved += 1;
+        // Each believed reading is judged once: a second look at it says
+        // what the first did. Readings between two looks that were not seen
+        // are not counted at all (a call can come later than the readings
+        // would make it, never sooner).
+        if now > self.looked_at {
+            self.looked_at = now;
+            let real_time = mcb.status().real_time;
+            self.verdict = if real_time > self.real_time {
+                self.real_time = real_time;
+                self.moved = true;
+                Idle::Counting
+            } else if self.moved {
+                Idle::Over
+            } else {
+                self.idle_unmoved += 1;
+                if self.idle_unmoved >= NEVER_STARTED_READINGS {
+                    Idle::NeverStarted
+                } else {
+                    Idle::Counting
+                }
+            };
         }
-        if self.idle_unmoved >= NEVER_STARTED_READINGS {
-            return CountState::NeverStarted;
+        match self.verdict {
+            Idle::Counting => CountState::Counting,
+            Idle::Over => CountState::Over,
+            Idle::NeverStarted => CountState::NeverStarted,
         }
-        CountState::Counting
     }
 }
 

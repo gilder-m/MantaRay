@@ -37,7 +37,8 @@ exactly, as decimals, never through floating point: a fraction however
 close to whole (`4.9999999999999999`), one too large to hold, or one with a
 sign (`+5`, `-0`, still refused in job files) is refused instead of rounded
 or guessed, and `9007199254740993.0` is now read exactly instead of refused.
-**Job files:** with a buffer window active, once a job has STARTed a count,
+**Job files (in the interface; the command line's job host keeps its own
+buffer rule):** with a buffer window active, once a job has STARTed a count,
 its STOP, CLEAR (and SEND_MESSAGE "STOP" / "CLEAR"), WAIT, presets and raw
 commands act on the detector that START counted on (the first detector when
 the START ran with the buffer active), so a job never leaves a detector
@@ -48,8 +49,13 @@ is when the detector began counting (the first reading that shows it
 counting, less its real time), not when START was sent, so a detector slow to
 begin is dated right; every file format writes the same field as before.
 Until a reading shows an accepted START counting, presets are held as during
-a count. A START the detector accepts but does not count on is called never
-started after 20 readings (about 10 s), not 4. **Sample changer:** shipped
+a count. An idle reading whose clocks have already run after START does not
+end a WAIT, a batch sample or that hold: the flag can trail the clocks as a
+count begins, so the next reading decides (clocks moved again, it counts;
+where they stood, it is over), at the cost of one fetch at the end of a
+count that runs out between two readings. A job's CLEAR after its START
+keeps the job's WAIT on that count. A START the detector accepts but does
+not count on is called never started after 20 readings (about 10 s), not 4. **Sample changer:** shipped
 builds have no sample changer (it was the simulator's); the CHANGE_SAMPLE and
 WAIT_CHANGER job commands fail with "no sample changer is connected", the
 batch queue's Change sample button is gone and Skip sample is new. **STOP

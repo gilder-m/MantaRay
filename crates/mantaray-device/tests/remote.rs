@@ -2163,3 +2163,99 @@ fn never_started_counts_only_believed_idle_readings() {
     );
     assert_eq!(last, Some(CountState::NeverStarted));
 }
+
+// ------------------------------------------- HIGH review of 4ae6457
+
+const IDLE0: &str = "RT=0.00 LT=0.00 DT=0% ICR=0 ACTIVE=0 TOTAL=0";
+
+fn connect_live_10(script: &[(&str, &str)]) -> RemoteMcb {
+    let mut all = vec![
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=DSPEC SERIAL=1 FIRMWARE=1 CHANNELS=2",
+        ),
+        ("SHOW_STATUS", IDLE0),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        ("SHOW_PRESETS", "PRESETS REAL=0 LIVE=10 PEAK=0 INTEG=0"),
+    ];
+    all.extend_from_slice(script);
+    let mut mcb =
+        RemoteMcb::connect(Box::new(MockTransport::scripted(&all)), 1, "t").expect("connect");
+    mcb.set_confirm_step(Duration::ZERO);
+    mcb
+}
+
+/// A first reading after START that says idle while the clocks already run
+/// (the flag trailing the clocks, or the bridge's flag-first status
+/// straddling the moment counting begins) is not the end of the count.
+#[test]
+fn a_flag_trailing_running_clocks_is_not_a_count_over() {
+    use mantaray_device::{CountState, CountWatch};
+    let mut mcb = connect_live_10(&[
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        (
+            "SHOW_STATUS",
+            "RT=0.40 LT=0.40 DT=0% ICR=0 ACTIVE=0 TOTAL=3",
+        ),
+        ("SHOW_DATA", "DATA 2 1 2"),
+        // A poll later, the clocks stood still: it ran 0.4 s and is over.
+        (
+            "SHOW_STATUS",
+            "RT=0.40 LT=0.40 DT=0% ICR=0 ACTIVE=0 TOTAL=3",
+        ),
+        ("SHOW_DATA", "DATA 2 1 2"),
+    ]);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    mcb.poll(0.0).expect("poll");
+    assert_eq!(
+        watch.check(&mcb),
+        CountState::Counting,
+        "a reading 0.4 s into a 10 s live count ended the WAIT"
+    );
+    assert_eq!(watch.check(&mcb), CountState::Counting, "a second look");
+    mcb.poll(0.5).expect("poll");
+    assert_eq!(
+        watch.check(&mcb),
+        CountState::Over,
+        "clocks that stood still"
+    );
+}
+
+/// The same reading keeps the preset hold: a preset write (with the CLEAR it
+/// carries) is refused while the clocks run on behind an idle flag.
+#[test]
+fn a_flag_trailing_running_clocks_keeps_the_preset_hold() {
+    let mut mcb = connect_live_10(&[
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        (
+            "SHOW_STATUS",
+            "RT=0.40 LT=0.40 DT=0% ICR=0 ACTIVE=0 TOTAL=3",
+        ),
+        ("SHOW_DATA", "DATA 2 1 2"),
+        (
+            "SHOW_STATUS",
+            "RT=0.90 LT=0.90 DT=0% ICR=0 ACTIVE=0 TOTAL=7",
+        ),
+    ]);
+    let sent = chrono::Local::now().naive_local();
+    mcb.start().expect("START accepted");
+    mcb.poll(0.0).expect("poll");
+    let result = mcb.set_presets(Presets {
+        live_time: Some(20.0),
+        ..Presets::default()
+    });
+    assert!(
+        matches!(
+            result,
+            Err(mantaray_device::DeviceError::PresetsWhileCounting)
+        ),
+        "a preset write reached a count whose clocks were running: {result:?}"
+    );
+    // Clocks that ran on twice date the count from the second reading:
+    // 0.9 s before it, so before the START was even sent here.
+    let dated = mcb.spectrum().start_time.expect("a date");
+    assert!(dated < sent, "dated {dated}, START sent {sent}");
+}
