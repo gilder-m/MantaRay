@@ -2,10 +2,10 @@
 //! simulator, detector monitoring and the batch workflow.
 //!
 //! ```
-//! use mantaray_device::{Mcb, SimulatedMcb, advance};
+//! use mantaray_device::{Mcb, Presets, SimulatedMcb, advance};
 //!
 //! let mut detector = SimulatedMcb::new(1, "SIM-01");
-//! detector.presets_mut().live_time = Some(10.0);
+//! detector.apply_presets(Presets::live(10.0)).unwrap();
 //! detector.start().unwrap();
 //! while detector.is_active() {
 //!     advance(&mut detector, 1.0).unwrap();
@@ -46,7 +46,7 @@ pub use mcb::{
     AdcSettings, AmplifierSettings, BaselineRestorer, Capabilities, GateMode, HighVoltageSettings,
     HvShutdown, Mcb, McbIdentity, McbProperties, McbStatus, Polarity, StabilizerSettings,
 };
-pub use presets::{MdaPreset, PresetKind, Presets, UncertaintyPreset};
+pub use presets::{MdaPreset, PRESET_TICK_SECONDS, PresetKind, Presets, UncertaintyPreset};
 pub use remote::RemoteMcb;
 pub use rng::Rng;
 pub use simulator::{SimulatedMcb, SimulatedMcbBuilder, SimulatedSource, SourceLine};
@@ -54,6 +54,110 @@ pub use transport::{MockTransport, TcpTransport, Transport};
 
 /// Re-exported so callers do not need `mantaray-core` just to name a mode.
 pub use mantaray_core::AcquisitionMode;
+
+/// Where a watched count stands, as the readings say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CountState {
+    /// Still counting, or no reading taken since the watch began says
+    /// otherwise yet.
+    Counting,
+    /// A believed reading taken after the watch began says it is not
+    /// counting: the count is over (or never ran).
+    Over,
+    /// The readings have not been believed for [`UNREADABLE_READINGS`] in a
+    /// row, with the last one's reason: whether it counts cannot be told.
+    Unreadable(String),
+    /// A START was accepted, and [`NEVER_STARTED_READINGS`] believed
+    /// readings since have all said idle with the clocks where they stood:
+    /// it did not count (the 926 accepts START and does not count when a
+    /// preset is already satisfied).
+    NeverStarted,
+}
+
+/// How many readings in a row may be unbelievable before a watched count is
+/// given up as unreadable: about ten seconds of fetches at two a second.
+pub const UNREADABLE_READINGS: u64 = 20;
+
+/// How many believed readings after an accepted START may say idle with the
+/// clocks unmoved before the count is called never started: about two
+/// seconds of fetches, room for an instrument slow to raise its flag.
+pub const NEVER_STARTED_READINGS: u64 = 4;
+
+/// Watches one count for its end, for a job's `WAIT` and the batch queue
+/// (the one count-over rule, shared by the interface and the command line).
+///
+/// A START is accepted on its reply (amended rule 9), so right after it the
+/// mirror's flag is still the reading from before it. The watch therefore
+/// judges only readings taken after it began ([`Mcb::readings`]). Watching
+/// a count it started ([`Self::started`]), a believed idle reading ends the
+/// count once it has been seen counting or its clocks have moved; idle with
+/// the clocks unmoved for [`NEVER_STARTED_READINGS`] readings, it never
+/// started. Watching with no START of its own ([`Self::begin`], a job's WAIT
+/// on a detector it did not start), the first believed idle reading ends
+/// it, so a WAIT on an idle detector returns on the next fetch. Nothing here
+/// reads a clock of this computer's, so no count is cut short or waited out
+/// by a timer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CountWatch {
+    /// The readings taken when the watch began.
+    after: u64,
+    /// The real time the mirror read when the watch began.
+    real_time: f64,
+    /// Whether the watch began on a START it saw accepted.
+    started: bool,
+    /// Whether a reading during the watch said counting.
+    seen_counting: bool,
+    /// The readings count when the current run of unbelieved ones began.
+    untrusted_from: Option<u64>,
+}
+
+impl CountWatch {
+    /// Begins watching a count that may or may not be running.
+    pub fn begin(mcb: &dyn Mcb) -> Self {
+        Self {
+            after: mcb.readings(),
+            real_time: mcb.status().real_time,
+            started: false,
+            seen_counting: false,
+            untrusted_from: None,
+        }
+    }
+
+    /// Begins watching a count whose START was just accepted.
+    pub fn started(mcb: &dyn Mcb) -> Self {
+        Self {
+            started: true,
+            ..Self::begin(mcb)
+        }
+    }
+
+    /// Where the count stands now.
+    pub fn check(&mut self, mcb: &dyn Mcb) -> CountState {
+        let now = mcb.readings();
+        if let Some(reason) = mcb.reading_untrusted() {
+            let from = *self.untrusted_from.get_or_insert(now);
+            if now.saturating_sub(from) >= UNREADABLE_READINGS {
+                return CountState::Unreadable(reason.to_string());
+            }
+            return CountState::Counting;
+        }
+        self.untrusted_from = None;
+        if now <= self.after {
+            return CountState::Counting;
+        }
+        if mcb.is_active() {
+            self.seen_counting = true;
+            return CountState::Counting;
+        }
+        if !self.started || self.seen_counting || mcb.status().real_time > self.real_time {
+            return CountState::Over;
+        }
+        if now - self.after >= NEVER_STARTED_READINGS {
+            return CountState::NeverStarted;
+        }
+        CountState::Counting
+    }
+}
 
 /// Advances an instrument and stops it if a preset has been satisfied.
 ///
@@ -74,9 +178,14 @@ pub fn advance(mcb: &mut dyn Mcb, elapsed_seconds: f64) -> Result<Option<PresetK
     if !mcb.poll_freshened() {
         return Ok(None);
     }
+    // A reached preset stops the count even on a locked detector: the lock
+    // guards against the operator's commands, not the preset (and without
+    // this an uncertainty or MDA preset on a locked detector never stops).
+    // A stop that fails is tried again at the next fresh reading, never per
+    // frame, and its error is the caller's to show.
     match mcb.preset_reached() {
         Some(kind) => {
-            mcb.stop()?;
+            mcb.stop_at_preset()?;
             Ok(Some(kind))
         }
         None => Ok(None),

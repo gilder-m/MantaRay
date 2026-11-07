@@ -121,7 +121,7 @@ fn rule11_a_stop_that_did_not_take_is_not_reported_as_stopped() {
 // ------------------------------------------------------- rule 10, the batch
 
 #[test]
-fn rule10_t35_t41_run_next_sample_on_an_idle_detector() {
+fn rule10_t35_run_next_sample_on_an_idle_detector() {
     let (mut app, rig, _) = rig_app();
     app.queue.push(sample("S1", 300.0));
     run_next(&mut app);
@@ -132,9 +132,11 @@ fn rule10_t35_t41_run_next_sample_on_an_idle_detector() {
             "SET_PRESET_CLEAR",
             "SET_PRESET_LIVE 300",
             "CLEAR",
+            "SHOW_STATUS",
             "START"
         ],
-        "one status read, then presets, clear, start (amended rule 9: no confirm after START)"
+        "a status read for the presets, presets, clear, then START behind the fresh read \
+         amended rule 9 asks for (a held preset already reached), and no confirm after it"
     );
     assert_eq!(head_state(&app), Some(JobState::Counting));
     assert!(
@@ -192,6 +194,25 @@ fn rule10_t38_a_double_click_starts_once() {
             .any(|command| command == "START" || command == "CLEAR"),
         "the second click touched the instrument"
     );
+}
+
+#[test]
+fn rule10_a_start_that_never_counts_leaves_the_sample_waiting() {
+    let (mut app, rig, index) = rig_app();
+    app.queue.push(sample("S1", 300.0));
+    rig.fault(Fault::Reply {
+        verb: "START".into(),
+        reply: "OK".into(),
+        count: 1,
+        execute: false,
+    });
+    run_next(&mut app);
+    assert_eq!(head_state(&app), Some(JobState::Counting), "{}", app.status);
+    for _ in 0..4 {
+        settle(&mut app, index);
+    }
+    assert_eq!(head_state(&app), Some(JobState::Pending), "{}", app.status);
+    assert!(app.status.contains("did not count"), "{}", app.status);
 }
 
 #[test]
@@ -287,15 +308,49 @@ fn finding8_an_operator_message_is_not_overwritten_by_an_odd_reading() {
     assert!(message.contains("complete"), "{message}");
     rig.fault(Fault::StatusWithout {
         key: "ACTIVE".into(),
-        count: 4,
+        count: 8,
     });
-    for _ in 0..4 {
+    // The odd reading is said once, when it begins...
+    settle(&mut app, index);
+    assert!(app.status.contains("last good reading"), "{}", app.status);
+    // ...and what the operator is told afterwards stays on screen while it
+    // lasts (it used to be overwritten every frame).
+    run_next(&mut app);
+    let told = app.status.clone();
+    assert!(told.contains("queue is empty"), "{told}");
+    for _ in 0..3 {
         settle(&mut app, index);
     }
     assert!(
-        app.status.contains("complete"),
-        "the batch's message was replaced: {}",
-        app.status
+        app.detectors[index].reading_untrusted().is_some(),
+        "the fault ran out before the check"
+    );
+    assert_eq!(app.status, told, "the operator's message was replaced");
+}
+
+#[test]
+fn finding9_a_preset_draft_does_not_outlive_a_count() {
+    let (mut app, rig, index) = rig_app();
+    app.dialogs.presets_edit.insert(
+        7,
+        Presets {
+            live_time: Some(50.0),
+            ..Presets::default()
+        },
+    );
+    rig.front_panel_start();
+    settle(&mut app, index);
+    // Another client sets presets while it counts, then the count ends.
+    rig.front_panel_stop();
+    rig.front_panel_presets(Registers {
+        live: Some(900.0),
+        ..Registers::default()
+    });
+    settle(&mut app, index);
+    assert!(
+        !app.dialogs.presets_edit.contains_key(&7),
+        "the stale draft came back after the count: {:?}",
+        app.dialogs.presets_edit.get(&7)
     );
 }
 

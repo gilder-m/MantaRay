@@ -43,7 +43,7 @@ fn presets_start_empty_and_clear() {
 #[test]
 fn a_real_time_preset_stops_the_detector() {
     let mut mcb = detector(500.0);
-    mcb.presets_mut().real_time = Some(20.0);
+    mcb.apply_presets(Presets::real(20.0)).unwrap();
     mcb.start().unwrap();
     let reason = run(&mut mcb, 1.0, 60.0);
     assert_eq!(reason, Some(PresetKind::RealTime));
@@ -55,7 +55,7 @@ fn a_real_time_preset_stops_the_detector() {
 #[test]
 fn a_live_time_preset_stops_on_live_time() {
     let mut mcb = detector(20_000.0);
-    mcb.presets_mut().live_time = Some(10.0);
+    mcb.apply_presets(Presets::live(10.0)).unwrap();
     mcb.start().unwrap();
     let reason = run(&mut mcb, 0.5, 120.0);
     assert_eq!(reason, Some(PresetKind::LiveTime));
@@ -69,7 +69,11 @@ fn a_live_time_preset_stops_on_live_time() {
 #[test]
 fn a_roi_peak_preset_needs_a_region_and_stops_at_the_channel_count() {
     let mut mcb = detector(2_000.0);
-    mcb.presets_mut().roi_peak = Some(500);
+    mcb.apply_presets(Presets {
+        roi_peak: Some(500),
+        ..Presets::default()
+    })
+    .unwrap();
     mcb.start().unwrap();
     // Without a region the preset can never be met.
     assert_eq!(run(&mut mcb, 1.0, 10.0), None);
@@ -92,7 +96,11 @@ fn a_roi_peak_preset_needs_a_region_and_stops_at_the_channel_count() {
 #[test]
 fn a_roi_integral_preset_sums_every_marked_channel() {
     let mut mcb = detector(2_000.0);
-    mcb.presets_mut().roi_integral = Some(20_000);
+    mcb.apply_presets(Presets {
+        roi_integral: Some(20_000),
+        ..Presets::default()
+    })
+    .unwrap();
     mcb.spectrum_mut().rois.mark(Roi::new(300, 360));
     mcb.start().unwrap();
     let reason = run(&mut mcb, 1.0, 600.0);
@@ -103,11 +111,15 @@ fn a_roi_integral_preset_sums_every_marked_channel() {
 #[test]
 fn an_uncertainty_preset_stops_when_the_statistics_are_good_enough() {
     let mut mcb = detector(2_000.0);
-    mcb.presets_mut().uncertainty = Some(UncertaintyPreset {
-        limit_percent: 1.0,
-        low_channel: 300,
-        high_channel: 360,
-    });
+    mcb.apply_presets(Presets {
+        uncertainty: Some(UncertaintyPreset {
+            limit_percent: 1.0,
+            low_channel: 300,
+            high_channel: 360,
+        }),
+        ..Presets::default()
+    })
+    .unwrap();
     mcb.start().unwrap();
     let reason = run(&mut mcb, 1.0, 600.0);
     assert_eq!(reason, Some(PresetKind::Uncertainty));
@@ -118,12 +130,16 @@ fn an_uncertainty_preset_stops_when_the_statistics_are_good_enough() {
 #[test]
 fn an_mda_preset_stops_when_the_detection_limit_is_low_enough() {
     let mut mcb = detector(500.0);
-    mcb.presets_mut().mda = Some(MdaPreset {
-        target: 25.0,
-        region: Roi::new(300, 360),
-        efficiency: 0.05,
-        yield_fraction: 0.851,
-    });
+    mcb.apply_presets(Presets {
+        mda: Some(MdaPreset {
+            target: 25.0,
+            region: Roi::new(300, 360),
+            efficiency: 0.05,
+            yield_fraction: 0.851,
+        }),
+        ..Presets::default()
+    })
+    .unwrap();
     mcb.start().unwrap();
     let reason = run(&mut mcb, 2.0, 2000.0);
     assert_eq!(reason, Some(PresetKind::Mda));
@@ -133,8 +149,12 @@ fn an_mda_preset_stops_when_the_detection_limit_is_low_enough() {
 #[test]
 fn the_first_preset_to_be_met_wins() {
     let mut mcb = detector(500.0);
-    mcb.presets_mut().real_time = Some(1_000.0);
-    mcb.presets_mut().live_time = Some(5.0);
+    mcb.apply_presets(Presets {
+        real_time: Some(1_000.0),
+        live_time: Some(5.0),
+        ..Presets::default()
+    })
+    .unwrap();
     mcb.start().unwrap();
     assert_eq!(run(&mut mcb, 0.5, 100.0), Some(PresetKind::LiveTime));
 }
@@ -151,6 +171,13 @@ fn presets_can_only_be_changed_while_stopped() {
         mcb.set_presets(presets).is_err(),
         "presets are locked while counting"
     );
+    // An explicit set is a command to the instrument even when the values
+    // are the ones it holds; only set_properties is change-only.
+    let held = *mcb.presets();
+    assert!(
+        mcb.set_presets(held).is_err(),
+        "an explicit set mid-count is refused, equal or not"
+    );
     mcb.stop().unwrap();
     assert!(mcb.set_presets(Presets::default()).is_ok());
 }
@@ -158,7 +185,7 @@ fn presets_can_only_be_changed_while_stopped() {
 #[test]
 fn preset_progress_reports_the_closest_preset() {
     let mut mcb = detector(500.0);
-    mcb.presets_mut().live_time = Some(100.0);
+    mcb.apply_presets(Presets::live(100.0)).unwrap();
     mcb.start().unwrap();
     assert_eq!(mcb.preset_progress(), Some(0.0));
     advance(&mut mcb, 50.0).unwrap();
@@ -172,4 +199,59 @@ fn an_acquisition_without_presets_never_stops_by_itself() {
     mcb.start().unwrap();
     assert_eq!(run(&mut mcb, 10.0, 1000.0), None);
     assert!(mcb.is_active());
+}
+
+#[test]
+fn an_mda_preset_with_no_efficiency_or_yield_and_a_backwards_range_are_refused() {
+    let mda = |efficiency: f64, yield_fraction: f64| Presets {
+        mda: Some(MdaPreset {
+            target: 25.0,
+            region: Roi::new(300, 360),
+            efficiency,
+            yield_fraction,
+        }),
+        ..Presets::default()
+    };
+    assert!(mda(0.05, 0.85).validate().is_ok());
+    for (efficiency, yield_fraction) in [(0.0, 0.85), (0.05, 0.0), (-0.1, 0.85), (0.05, -1.0)] {
+        assert!(
+            mda(efficiency, yield_fraction).validate().is_err(),
+            "{efficiency} / {yield_fraction}"
+        );
+    }
+    let range = |low_channel: usize, high_channel: usize| Presets {
+        uncertainty: Some(UncertaintyPreset {
+            limit_percent: 1.0,
+            low_channel,
+            high_channel,
+        }),
+        ..Presets::default()
+    };
+    assert!(range(10, 10).validate().is_ok());
+    assert!(range(11, 10).validate().is_err());
+}
+
+#[test]
+fn a_zero_preset_disables_it_instead_of_storing_a_zero_limit() {
+    let mut presets = Presets {
+        real_time: Some(5.0),
+        live_time: Some(5.0),
+        roi_peak: Some(5),
+        roi_integral: Some(5),
+        uncertainty: Some(UncertaintyPreset {
+            limit_percent: 1.0,
+            low_channel: 0,
+            high_channel: 9,
+        }),
+        ..Presets::default()
+    };
+    presets.set_real_time(0.0);
+    presets.set_live_time(0.0);
+    presets.set_roi_peak(0);
+    presets.set_roi_integral(0);
+    presets.set_uncertainty(0.0, 0, 9);
+    assert!(presets.is_empty(), "{presets:?}");
+    presets.set_live_time(30.0);
+    presets.set_roi_peak(7);
+    assert_eq!((presets.live_time, presets.roi_peak), (Some(30.0), Some(7)));
 }

@@ -30,8 +30,14 @@ fn connect_scripted(pairs: &[(&str, &str)]) -> RemoteMcb {
 /// A scripted instrument, with no presets answer spliced in.
 fn connect_exactly(pairs: &[(&str, &str)]) -> RemoteMcb {
     let transport = MockTransport::scripted(pairs);
-    RemoteMcb::connect(Box::new(transport), 7, "BENCH-01").expect("connect")
+    let mut remote = RemoteMcb::connect(Box::new(transport), 7, "BENCH-01").expect("connect");
+    remote.set_confirm_step(Duration::ZERO);
+    remote
 }
+
+/// The status read before a START (no held preset is reached) or after a
+/// STOP (it has stopped).
+const IDLE: (&str, &str) = ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0");
 
 #[test]
 fn connecting_learns_what_the_instrument_is() {
@@ -164,7 +170,12 @@ fn starting_against_a_preset_already_reached_is_refused_by_name() {
             "SHOW_PRESETS",
             "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0",
         ),
-        // No START is scripted: sending one would be the bug.
+        // The fresh reading Start takes; no START is scripted: sending one
+        // would be the bug.
+        (
+            "SHOW_STATUS",
+            "RT=310.90 LT=300.00 DT=3.51% ICR=0 ACTIVE=0 TOTAL=0",
+        ),
     ]);
     let error = remote.start().expect_err("a satisfied preset cannot start");
     let text = error.to_string();
@@ -270,7 +281,7 @@ fn renaming_reaches_the_saved_spectrum_too() {
 }
 
 #[test]
-fn starting_sends_the_start_command_and_nothing_else() {
+fn starting_reads_the_clocks_and_then_sends_the_start_command() {
     let mut remote = connect_scripted(&[
         (
             "SHOW_CONFIGURATION",
@@ -278,10 +289,14 @@ fn starting_sends_the_start_command_and_nothing_else() {
         ),
         ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SHOW_DATA", "DATA 2 0 0"),
+        IDLE,
         ("START", "OK"),
     ]);
     remote.start().expect("start");
-    assert!(remote.is_active(), "the mirror should follow the command");
+    assert!(
+        !remote.is_active(),
+        "the mirror says counting only once a reading does"
+    );
 }
 
 #[test]
@@ -293,8 +308,11 @@ fn starting_stamps_the_measurement_date_and_clear_takes_it_back() {
         ),
         ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SHOW_DATA", "DATA 2 0 0"),
+        IDLE,
         ("START", "OK"),
         ("STOP", "OK"),
+        IDLE,
+        IDLE,
         ("START", "OK"),
         ("CLEAR", "OK"),
     ]);
@@ -355,6 +373,7 @@ fn presets_are_pushed_as_the_documented_commands() {
         ),
         ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SHOW_DATA", "DATA 2 0 0"),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SET_PRESET_CLEAR", "OK"),
         ("SET_PRESET_REAL 500", "OK"),
         ("SET_PRESET_LIVE 300", "OK"),
@@ -370,15 +389,18 @@ fn presets_are_pushed_as_the_documented_commands() {
 
 #[test]
 fn a_rejection_comes_back_as_the_error_it_is() {
-    let mut remote = connect_scripted(&[
+    // The instrument's own refusal, at once: no read after it.
+    let script = vec![
         (
             "SHOW_CONFIGURATION",
             "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
         ),
         ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SHOW_DATA", "DATA 2 0 0"),
+        IDLE,
         ("START", "ERR the detector is locked by operator"),
-    ]);
+    ];
+    let mut remote = connect_scripted(&script);
     let error = remote.start().expect_err("the refusal should surface");
     assert!(
         error.to_string().contains("locked by operator"),
@@ -536,26 +558,30 @@ fn an_uncertainty_preset_does_stop_a_remote_instrument() {
         ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
         ("SHOW_DATA", PEAK),
         ("SHOW_PRESETS", "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"),
-        // Only the four the instrument itself carries go over the wire.
-        ("SET_PRESET_CLEAR", "OK"),
+        // Only the four the instrument itself carries go over the wire, and
+        // an uncertainty preset alone is not one: nothing at all is sent.
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        IDLE,
         ("START", "OK"),
         ("SHOW_STATUS", "RT=10 LT=10 DT=0% ICR=0 ACTIVE=1 TOTAL=960"),
         ("SHOW_DATA", PEAK),
         ("STOP", "OK"),
+        IDLE,
     ]);
     let mut remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH-01").expect("connect");
 
-    let presets = mantaray_device::Presets {
-        uncertainty: Some(mantaray_device::UncertaintyPreset {
-            limit_percent: 25.0,
-            low_channel: 2,
-            high_channel: 12,
-        }),
-        ..Default::default()
-    };
-    remote.set_presets(presets).expect("the preset is accepted");
+    // A host-side preset alone: nothing is sent for it.
+    remote
+        .apply_presets(mantaray_device::Presets {
+            uncertainty: Some(mantaray_device::UncertaintyPreset {
+                limit_percent: 25.0,
+                low_channel: 2,
+                high_channel: 12,
+            }),
+            ..Default::default()
+        })
+        .expect("the preset is accepted");
     remote.start().expect("start");
-    assert!(remote.is_active());
 
     let stopped = advance(&mut remote, 2.0).expect("advance");
     assert_eq!(
@@ -588,8 +614,15 @@ fn clearing_lets_the_next_start_through_a_preset_that_was_reached() {
             "SHOW_PRESETS",
             "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0",
         ),
-        // Exactly what the operator does next, and nothing in between.
+        // Exactly what the operator does next: Start (refused on the fresh
+        // reading, nothing sent), Clear, Start (the fresh reading, then
+        // START).
+        (
+            "SHOW_STATUS",
+            "RT=310.90 LT=300.00 DT=3.51% ICR=0 ACTIVE=0 TOTAL=0",
+        ),
         ("CLEAR", "OK"),
+        IDLE,
         ("START", "OK"),
     ]);
     assert_eq!(remote.presets().live_time, Some(300.0));
@@ -607,7 +640,6 @@ fn clearing_lets_the_next_start_through_a_preset_that_was_reached() {
     remote
         .start()
         .expect("after clearing, the preset is no longer reached");
-    assert!(remote.is_active());
 }
 
 /// A transport whose fetches wait at a gate the test holds shut.
@@ -710,8 +742,10 @@ fn a_poll_over_a_courier_returns_before_a_slow_instrument_answers() {
     assert_eq!(remote.spectrum().channels, vec![2, 2, 2, 2]);
     assert!((remote.status().real_time - 9.0).abs() < 1e-9);
 
-    // Commands still round-trip through the same line, in order.
-    remote.stop().expect("STOP answers over the courier");
+    // Commands still round-trip through the same line, in order. (CLEAR: a
+    // STOP is confirmed by status reads, and this instrument's stand at the
+    // gate.)
+    remote.clear().expect("CLEAR answers over the courier");
 }
 
 /// An instrument with a before and an after: CLEAR moves it between eras.
@@ -999,4 +1033,1015 @@ fn a_persistent_length_change_is_adopted_on_the_second_fetch() {
         vec![9, 9],
         "two agreeing fetches are a real gain change"
     );
+}
+
+/// A line that answers like a quiet eight-channel instrument and keeps a log
+/// of every command sent, for tests that care what did *not* go out.
+struct Recording {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl mantaray_device::Transport for Recording {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+            "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
+            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "recording".into()
+    }
+}
+
+fn connect_recording() -> (RemoteMcb, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let transport = Recording { log: log.clone() };
+    let remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH").expect("connect");
+    log.lock().expect("log").clear();
+    (remote, log)
+}
+
+#[test]
+fn editing_one_setting_sends_only_that_setting() {
+    // The mirror's bias is a default, not a reading. Before this, changing the
+    // lower discriminator sent SET_HV 3000, SET_GAIN_COARSE 20 and
+    // SET_PRESET_CLEAR: a bias nobody chose, and the presets of the count
+    // gone.
+    let (mut remote, log) = connect_recording();
+    let mut properties = remote.properties().clone();
+    properties.adc.lower_discriminator = 10;
+    remote.set_properties(properties).expect("set");
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+    assert_eq!(remote.properties().adc.lower_discriminator, 10);
+    assert_eq!(
+        remote.presets().live_time,
+        Some(300.0),
+        "the instrument's preset is still mirrored"
+    );
+}
+
+#[test]
+fn the_bias_and_the_gain_go_out_only_when_they_change() {
+    let (mut remote, log) = connect_recording();
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.target_volts = 1500.0;
+    remote.set_properties(properties.clone()).expect("bias");
+    assert_eq!(*log.lock().expect("log"), vec!["SET_HV 1500".to_string()]);
+
+    log.lock().expect("log").clear();
+    properties.amplifier.coarse_gain = 50.0;
+    remote.set_properties(properties).expect("gain");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SET_GAIN_COARSE 50".to_string()],
+        "the bias already set is not sent again"
+    );
+    assert_eq!(remote.properties().high_voltage.target_volts, 1500.0);
+}
+
+#[test]
+fn switching_the_bias_off_is_refused_rather_than_faked() {
+    // Unticking Enabled used to send SET_HV with the target - bias left on -
+    // while the dialog showed it off.
+    let (mut remote, log) = connect_recording();
+    let before = remote.properties().high_voltage.enabled;
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.enabled = !before;
+    let error = remote
+        .set_properties(properties)
+        .expect_err("no on/off command is proven");
+    assert!(error.to_string().contains("high voltage"), "{error}");
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+    assert_eq!(
+        remote.properties().high_voltage.enabled,
+        before,
+        "the mirror does not claim the change"
+    );
+}
+
+#[test]
+fn the_upper_discriminator_starts_inside_the_instrument() {
+    // At u32::MAX the ADC tab's range clamp fired on first draw, and the
+    // clamp counted as an edit.
+    let (remote, _) = connect_recording();
+    assert_eq!(remote.properties().adc.upper_discriminator, 7);
+}
+
+#[test]
+fn an_applied_bias_is_sent_even_when_the_mirror_already_says_it() {
+    // The mirror's target is a default, not a reading: applying that same
+    // number must still reach the instrument, or 3000 V could never be set.
+    let (mut remote, log) = connect_recording();
+    let shown = remote.properties().high_voltage.target_volts;
+    remote.set_high_voltage(shown).expect("bias");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![format!("SET_HV {shown:.0}")]
+    );
+
+    log.lock().expect("log").clear();
+    let mut any: mantaray_device::AnyMcb = remote.into();
+    any.set_high_voltage(1200.0).expect("through the pick list");
+    assert_eq!(*log.lock().expect("log"), vec!["SET_HV 1200".to_string()]);
+    assert_eq!(any.properties().high_voltage.target_volts, 1200.0);
+}
+
+#[test]
+fn the_simulator_takes_an_applied_bias_too() {
+    let mut any: AnyMcb = SimulatedMcb::new(1, "SIM-01").into();
+    any.set_high_voltage(1234.0).expect("bias");
+    assert_eq!(any.properties().high_voltage.target_volts, 1234.0);
+}
+
+#[test]
+fn an_applied_coarse_gain_is_sent_even_when_the_mirror_already_says_it() {
+    // The mirror's 20 is a default, not a reading: applying that same number
+    // must still reach the instrument, as the bias does.
+    let (mut remote, log) = connect_recording();
+    let shown = remote.properties().amplifier.coarse_gain;
+    remote.set_coarse_gain(shown).expect("gain");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![format!("SET_GAIN_COARSE {shown:.0}")]
+    );
+
+    log.lock().expect("log").clear();
+    let mut any: mantaray_device::AnyMcb = remote.into();
+    any.set_coarse_gain(40.0).expect("through the pick list");
+    any.set_coarse_gain(40.0).expect("and again, unchanged");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SET_GAIN_COARSE 40".to_string(); 2]
+    );
+    assert_eq!(any.properties().amplifier.coarse_gain, 40.0);
+}
+
+#[test]
+fn the_simulator_takes_an_applied_coarse_gain_too() {
+    let mut any: AnyMcb = SimulatedMcb::new(1, "SIM-01").into();
+    any.set_coarse_gain(64.0).expect("gain");
+    assert_eq!(any.properties().amplifier.coarse_gain, 64.0);
+}
+
+#[test]
+fn the_mirror_holds_exactly_what_was_sent() {
+    // 20.4 went out as "SET_GAIN_COARSE 20" and 1234.5 as "SET_HV 1234" while
+    // the mirror, and so the dialog, kept the fraction. Whole numbers only,
+    // so there is nothing to round.
+    let (mut remote, log) = connect_recording();
+    let mut properties = remote.properties().clone();
+    properties.amplifier.coarse_gain = 21.0;
+    properties.high_voltage.target_volts = 1234.0;
+    remote.set_properties(properties).expect("set");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SET_HV 1234".to_string(), "SET_GAIN_COARSE 21".to_string()]
+    );
+    assert_eq!(remote.properties().amplifier.coarse_gain, 21.0);
+    assert_eq!(remote.properties().high_voltage.target_volts, 1234.0);
+}
+
+#[test]
+fn a_gain_or_bias_that_is_not_a_whole_number_in_range_is_refused_before_it_is_sent() {
+    let (mut remote, log) = connect_recording();
+    let before = remote.properties().clone();
+    for bad in [f64::NAN, f64::INFINITY, 0.0, -5.0, 20.4, 1001.0, 1e9] {
+        let mut properties = before.clone();
+        properties.amplifier.coarse_gain = bad;
+        assert!(remote.set_properties(properties).is_err(), "gain {bad}");
+        assert!(remote.set_coarse_gain(bad).is_err(), "gain {bad}");
+    }
+    for bad in [f64::NAN, f64::NEG_INFINITY, -1.0, 1500.5, 5001.0] {
+        let mut properties = before.clone();
+        properties.high_voltage.target_volts = bad;
+        assert!(remote.set_properties(properties).is_err(), "bias {bad}");
+        assert!(remote.set_high_voltage(bad).is_err(), "bias {bad}");
+    }
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+    assert_eq!(remote.properties(), &before);
+    // The edges of the range are fine.
+    for good in [1.0, 1000.0] {
+        remote.set_coarse_gain(good).expect("gain");
+    }
+    for good in [0.0, 5000.0] {
+        remote.set_high_voltage(good).expect("bias");
+    }
+}
+
+#[test]
+fn the_simulator_refuses_what_the_network_instrument_refuses() {
+    // One check, used by both, on every way in: the properties and the wire.
+    let (mut remote, _) = connect_recording();
+    let mut sim = SimulatedMcb::new(1, "SIM-01");
+    for bad in [f64::NAN, 0.0, 20.4, 1001.0] {
+        let mut properties = sim.properties().clone();
+        properties.amplifier.coarse_gain = bad;
+        assert!(sim.set_properties(properties).is_err(), "gain {bad}");
+        assert!(remote.set_coarse_gain(bad).is_err(), "gain {bad}");
+        if bad.is_finite() {
+            assert!(
+                sim.send_message(&format!("SET_GAIN_COARSE {bad}")).is_err(),
+                "wire gain {bad}"
+            );
+        }
+    }
+    for bad in [f64::NAN, -1.0, 1500.5, 5001.0] {
+        let mut properties = sim.properties().clone();
+        properties.high_voltage.target_volts = bad;
+        assert!(sim.set_properties(properties).is_err(), "bias {bad}");
+        assert!(remote.set_high_voltage(bad).is_err(), "bias {bad}");
+        if bad.is_finite() {
+            assert!(
+                sim.send_message(&format!("SET_HV {bad}")).is_err(),
+                "wire bias {bad}"
+            );
+        }
+    }
+    assert_eq!(sim.properties().amplifier.coarse_gain, 20.0);
+    assert_eq!(sim.properties().high_voltage.target_volts, 3000.0);
+    // And the same good values go through both.
+    sim.send_message("SET_GAIN_COARSE 50").expect("wire gain");
+    sim.send_message("SET_HV 1200").expect("wire bias");
+    assert_eq!(sim.properties().amplifier.coarse_gain, 50.0);
+    assert_eq!(sim.properties().high_voltage.target_volts, 1200.0);
+}
+
+#[test]
+fn negative_zero_is_sent_and_kept_as_zero() {
+    // `{:.0}` prints -0.0 as "-0". A bias of 0 V typed as -0 must go out as 0.
+    let (mut remote, log) = connect_recording();
+    remote.set_high_voltage(-0.0).expect("bias");
+    assert_eq!(*log.lock().expect("log"), vec!["SET_HV 0".to_string()]);
+    assert!(
+        remote
+            .properties()
+            .high_voltage
+            .target_volts
+            .is_sign_positive()
+    );
+
+    log.lock().expect("log").clear();
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.target_volts = 1200.0;
+    remote.set_properties(properties).expect("set");
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.target_volts = -0.0;
+    remote.set_properties(properties).expect("set");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SET_HV 1200".to_string(), "SET_HV 0".to_string()]
+    );
+    assert!(
+        remote
+            .properties()
+            .high_voltage
+            .target_volts
+            .is_sign_positive()
+    );
+
+    let mut sim = SimulatedMcb::new(1, "SIM-01");
+    sim.send_message("SET_HV -0").expect("wire bias");
+    assert!(
+        sim.properties()
+            .high_voltage
+            .target_volts
+            .is_sign_positive()
+    );
+    sim.set_high_voltage(-0.0).expect("bias");
+    assert!(
+        sim.properties()
+            .high_voltage
+            .target_volts
+            .is_sign_positive()
+    );
+}
+
+fn an_mda_preset() -> mantaray_device::MdaPreset {
+    mantaray_device::MdaPreset {
+        target: 10.0,
+        region: mantaray_core::Roi::new(1, 4),
+        efficiency: 0.05,
+        yield_fraction: 0.85,
+    }
+}
+
+#[test]
+fn host_side_presets_never_reach_the_instrument() {
+    // The uncertainty and MDA presets are worked out on this side. Changing
+    // them sent SET_PRESET_CLEAR and the presets again, wiping the
+    // instrument's own presets for an edit it never held. (While the detector
+    // counts no preset changes at all: see
+    // `every_preset_road_is_refused_while_the_instrument_counts`.)
+    let (mut remote, log) = connect_recording();
+
+    remote
+        .apply_presets(mantaray_device::Presets {
+            mda: Some(an_mda_preset()),
+            uncertainty: Some(mantaray_device::UncertaintyPreset {
+                limit_percent: 1.0,
+                low_channel: 0,
+                high_channel: 3,
+            }),
+            ..*remote.presets()
+        })
+        .expect("host-side edit");
+    // Only the status read goes to the instrument: no command changes it.
+    assert_eq!(*log.lock().expect("log"), vec!["SHOW_STATUS".to_string()]);
+    log.lock().expect("log").clear();
+    assert_eq!(remote.presets().mda, Some(an_mda_preset()));
+    assert_eq!(remote.presets().live_time, Some(300.0), "still mirrored");
+
+    // The instrument's own presets do go, and exactly those.
+    remote
+        .apply_presets(mantaray_device::Presets {
+            live_time: Some(60.0),
+            ..*remote.presets()
+        })
+        .expect("live preset");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![
+            "SHOW_STATUS".to_string(),
+            "SET_PRESET_CLEAR".to_string(),
+            "SET_PRESET_LIVE 60".to_string()
+        ]
+    );
+    assert_eq!(remote.presets().live_time, Some(60.0));
+    assert_eq!(remote.presets().mda, Some(an_mda_preset()));
+}
+
+/// A line like [`Recording`] that refuses the commands whose names it is given.
+struct Refusing {
+    refuse: Vec<&'static str>,
+}
+
+impl mantaray_device::Transport for Refusing {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        if self.refuse.iter().any(|name| command.starts_with(name)) {
+            return Ok("ERR not allowed now".into());
+        }
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+            "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
+            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "refusing".into()
+    }
+}
+
+#[test]
+fn a_partial_send_says_what_was_applied_and_the_mirror_agrees() {
+    let mut remote = RemoteMcb::connect(
+        Box::new(Refusing {
+            refuse: vec!["SET_GAIN_COARSE"],
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let before = remote.properties().amplifier.coarse_gain;
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.target_volts = 1200.0;
+    properties.adc.lower_discriminator = 10;
+    properties.amplifier.coarse_gain = before * 2.0;
+    let error = remote
+        .set_properties(properties)
+        .expect_err("the gain is refused");
+    let text = error.to_string();
+    assert!(text.contains("bias set to 1200 V"), "{text}");
+    assert!(text.contains("coarse gain not set"), "{text}");
+    assert!(text.contains("not allowed now"), "{text}");
+    // The bias went out and is mirrored; the edit with no command is kept; the
+    // gain the instrument still holds is what the mirror says.
+    assert_eq!(remote.properties().high_voltage.target_volts, 1200.0);
+    assert_eq!(remote.properties().adc.lower_discriminator, 10);
+    assert_eq!(remote.properties().amplifier.coarse_gain, before);
+}
+
+#[test]
+fn a_refusal_before_anything_went_out_is_the_instruments_own_error() {
+    let mut remote = RemoteMcb::connect(
+        Box::new(Refusing {
+            refuse: vec!["SET_HV"],
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let mut properties = remote.properties().clone();
+    properties.high_voltage.target_volts = 1200.0;
+    properties.amplifier.coarse_gain *= 2.0;
+    let error = remote.set_properties(properties).expect_err("refused");
+    let text = error.to_string();
+    assert!(!text.contains("set to"), "nothing was applied: {text}");
+    assert!(text.contains("not allowed now"), "{text}");
+    assert_ne!(remote.properties().high_voltage.target_volts, 1200.0);
+}
+
+#[test]
+fn presets_cleared_and_then_refused_leave_the_mirror_as_the_instrument_is() {
+    // SET_PRESET_CLEAR went out, SET_PRESET_LIVE was refused: the instrument
+    // holds no presets now, and the mirror must not keep claiming the old one.
+    let mut remote = RemoteMcb::connect(
+        Box::new(Refusing {
+            refuse: vec!["SET_PRESET_LIVE"],
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let error = remote
+        .set_presets(mantaray_device::Presets::live(60.0))
+        .expect_err("refused");
+    let text = error.to_string();
+    assert!(text.contains("presets cleared"), "{text}");
+    assert!(text.contains("live-time preset not set"), "{text}");
+    assert_eq!(remote.presets().live_time, None);
+}
+
+/// A [`Recording`] line whose instrument has been counting a peak, so an
+/// uncertainty preset can be satisfied, and which refuses what it is told to.
+struct CountingPeak {
+    refuse: Vec<&'static str>,
+    log: Arc<Mutex<Vec<String>>>,
+    /// Starts counting; STOP and START move it, as an instrument's would.
+    counting: bool,
+}
+
+impl mantaray_device::Transport for CountingPeak {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        if self.refuse.iter().any(|name| command.starts_with(name)) {
+            return Ok("ERR not allowed now".into());
+        }
+        match command {
+            "STOP" => self.counting = false,
+            "START" => self.counting = true,
+            _ => {}
+        }
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=16".into(),
+            "SHOW_STATUS" => format!(
+                "RT=10 LT=10 DT=0% ICR=0 ACTIVE={} TOTAL=960",
+                u8::from(self.counting)
+            ),
+            "SHOW_DATA" => "DATA 16 5 5 5 10 50 200 400 200 50 10 5 5 5 5 5 5".into(),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "counting-peak".into()
+    }
+}
+
+#[test]
+fn set_presets_always_sends_a_clear_and_every_held_preset() {
+    // An explicit presets action reaches the instrument, like set_high_voltage
+    // and set_coarse_gain do: equal to the mirror or not, it sends the clear
+    // and each held preset. (The caller that must not disturb a count decides
+    // whether to call; see the GUI's apply_presets.)
+    let (mut remote, log) = connect_recording();
+    let held = vec![
+        "SHOW_STATUS".to_string(),
+        "SET_PRESET_CLEAR".to_string(),
+        "SET_PRESET_LIVE 300".to_string(),
+    ];
+    let same = *remote.presets();
+    remote.set_presets(same).expect("same presets");
+    assert_eq!(*log.lock().expect("log"), held);
+
+    // Only the host-side presets differ: still sent, and kept in the mirror.
+    log.lock().expect("log").clear();
+    let mut presets = *remote.presets();
+    presets.mda = Some(an_mda_preset());
+    remote.set_presets(presets).expect("host-side edit");
+    assert_eq!(*log.lock().expect("log"), held);
+    assert_eq!(remote.presets().mda, Some(an_mda_preset()));
+    assert_eq!(remote.presets().live_time, Some(300.0));
+
+    // A real change to a held preset sends clear and then each preset.
+    log.lock().expect("log").clear();
+    let mut presets = *remote.presets();
+    presets.live_time = Some(60.0);
+    remote.set_presets(presets).expect("live preset");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![
+            "SHOW_STATUS".to_string(),
+            "SET_PRESET_CLEAR".to_string(),
+            "SET_PRESET_LIVE 60".to_string()
+        ]
+    );
+    assert_eq!(remote.presets().mda, Some(an_mda_preset()));
+}
+
+/// An instrument from before the bridge answered SHOW_PRESETS: the mirror
+/// starts empty although the instrument may hold presets (the bench 926).
+struct SilentAboutPresets {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl mantaray_device::Transport for SilentAboutPresets {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8".into(),
+            "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
+            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+            "SHOW_PRESETS" => "ERR unknown command".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "silent".into()
+    }
+}
+
+#[test]
+fn clear_presets_with_an_empty_mirror_still_reaches_the_instrument() {
+    // The mirror says "no presets" because the instrument never said; the
+    // instrument may well hold one. An explicit clear must go out.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut remote = RemoteMcb::connect(
+        Box::new(SilentAboutPresets { log: log.clone() }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    assert!(remote.presets().is_empty());
+    log.lock().expect("log").clear();
+    remote
+        .set_presets(mantaray_device::Presets::default())
+        .expect("clear");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SHOW_STATUS".to_string(), "SET_PRESET_CLEAR".to_string()]
+    );
+}
+
+#[test]
+fn a_refused_clear_leaves_the_host_side_presets_where_they_were() {
+    // "Clear presets" asked, the instrument said no: it still holds its live
+    // preset, so the mirror must still hold the MDA/uncertainty presets that
+    // advance() is enforcing, not an emptied set that stops enforcing them.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut remote = RemoteMcb::connect(
+        Box::new(CountingPeak {
+            refuse: vec!["SET_PRESET_CLEAR"],
+            log: log.clone(),
+            counting: true,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    // The line reports ACTIVE=1; presets are set with the detector stopped.
+    remote.stop().expect("stop");
+    let uncertainty = mantaray_device::UncertaintyPreset {
+        limit_percent: 25.0,
+        low_channel: 2,
+        high_channel: 12,
+    };
+    remote
+        .apply_presets(mantaray_device::Presets {
+            uncertainty: Some(uncertainty),
+            mda: Some(an_mda_preset()),
+            ..*remote.presets()
+        })
+        .expect("host-side presets");
+
+    let error = remote
+        .set_presets(mantaray_device::Presets::default())
+        .expect_err("the clear is refused");
+    assert!(error.to_string().contains("not allowed now"), "{error}");
+    assert_eq!(remote.presets().uncertainty, Some(uncertainty));
+    assert_eq!(remote.presets().mda, Some(an_mda_preset()));
+    assert_eq!(remote.presets().live_time, Some(300.0));
+
+    remote.start().expect("start");
+    let stopped = advance(&mut remote, 2.0).expect("advance");
+    assert_eq!(
+        stopped,
+        Some(mantaray_device::PresetKind::Uncertainty),
+        "the preset the instrument never lost is still honoured"
+    );
+}
+
+#[test]
+fn a_refused_preset_names_every_step_that_was_not_sent() {
+    let mut remote = RemoteMcb::connect(
+        Box::new(Refusing {
+            refuse: vec!["SET_PRESET_REAL"],
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let presets = mantaray_device::Presets {
+        real_time: Some(100.0),
+        live_time: Some(60.0),
+        roi_peak: Some(500),
+        roi_integral: Some(9000),
+        ..Default::default()
+    };
+    let error = remote.set_presets(presets).expect_err("refused");
+    let text = error.to_string();
+    assert!(text.contains("presets cleared"), "{text}");
+    assert!(text.contains("real-time preset not set"), "{text}");
+    assert!(
+        text.contains("not sent: live-time preset, ROI peak preset, ROI integral preset"),
+        "{text}"
+    );
+    // The clear went out and the mirror agrees.
+    assert_eq!(remote.presets().live_time, None);
+}
+
+#[test]
+fn a_failed_bias_after_a_program_only_edit_says_the_edit_was_kept() {
+    let mut remote = RemoteMcb::connect(
+        Box::new(Refusing {
+            refuse: vec!["SET_HV"],
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let before = remote.properties().high_voltage.target_volts;
+    let mut properties = remote.properties().clone();
+    properties.adc.lower_discriminator = 10;
+    properties.high_voltage.target_volts = 1200.0;
+    properties.amplifier.coarse_gain *= 2.0;
+    let error = remote.set_properties(properties).expect_err("bias refused");
+    let text = error.to_string();
+    assert!(
+        text.contains("ADC settings kept in this program only"),
+        "{text}"
+    );
+    assert!(text.contains("bias not set"), "{text}");
+    assert!(text.contains("not sent: coarse gain"), "{text}");
+    assert_eq!(remote.properties().adc.lower_discriminator, 10);
+    assert_eq!(remote.properties().high_voltage.target_volts, before);
+}
+
+use mantaray_device::Presets;
+
+/// What MAESTRO says when a preset change is attempted during acquisition.
+const NO_PRESETS_WHILE_COUNTING: &str = "Presets can't be changed during acquisition.";
+
+/// A line whose instrument is counting (SHOW_STATUS says ACTIVE=1) and holds a
+/// 300 s live preset, and which logs every command.
+struct CountingLine {
+    log: Arc<Mutex<Vec<String>>>,
+    /// Starts counting; STOP and START move it.
+    counting: bool,
+}
+
+impl mantaray_device::Transport for CountingLine {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        match command {
+            "STOP" => self.counting = false,
+            "START" => self.counting = true,
+            _ => {}
+        }
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+            "SHOW_STATUS" => format!(
+                "RT=5.00 LT=5.00 DT=0.0% ICR=0 ACTIVE={} TOTAL=0",
+                u8::from(self.counting)
+            ),
+            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "counting".into()
+    }
+}
+
+fn connect_counting() -> (RemoteMcb, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let remote = RemoteMcb::connect(
+        Box::new(CountingLine {
+            log: log.clone(),
+            counting: true,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    assert!(remote.is_active(), "the instrument says it is counting");
+    log.lock().expect("log").clear();
+    (remote, log)
+}
+
+#[test]
+fn every_preset_road_is_refused_while_the_instrument_counts() {
+    let (mut remote, log) = connect_counting();
+    let before = *remote.presets();
+
+    // A held preset edited.
+    let live = Presets {
+        live_time: Some(60.0),
+        ..before
+    };
+    let error = remote.apply_presets(live).expect_err("live edit");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+
+    // A host-side edit alone is refused too: the whole preset change is.
+    let mda = Presets {
+        mda: Some(an_mda_preset()),
+        ..before
+    };
+    let error = remote.apply_presets(mda).expect_err("mda edit");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+
+    // Apply with nothing changed, which would re-arm.
+    let error = remote.apply_presets(before).expect_err("re-apply");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+
+    // Clear presets, and the explicit primitive.
+    let error = remote
+        .set_presets(Presets::default())
+        .expect_err("clear presets");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+    let error = remote.set_presets(live).expect_err("set presets");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+
+    // Five refused changes, one status read each, and nothing else.
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec!["SHOW_STATUS"; 5],
+        "no command but the status read"
+    );
+    assert_eq!(*remote.presets(), before, "the mirror is untouched");
+}
+
+#[test]
+fn a_setting_that_is_not_a_preset_still_changes_while_counting() {
+    let (mut remote, log) = connect_counting();
+    let mut properties = remote.properties().clone();
+    properties.adc.lower_discriminator = 10;
+    remote.set_properties(properties).expect("not a preset");
+    assert_eq!(remote.properties().adc.lower_discriminator, 10);
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+}
+
+#[test]
+fn presets_change_again_once_the_instrument_stops_counting() {
+    let (mut remote, log) = connect_counting();
+    remote.stop().expect("stop");
+    log.lock().expect("log").clear();
+    let edited = Presets {
+        live_time: Some(60.0),
+        ..*remote.presets()
+    };
+    remote.apply_presets(edited).expect("idle again");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![
+            "SHOW_STATUS".to_string(),
+            "SET_PRESET_CLEAR".to_string(),
+            "SET_PRESET_LIVE 60".to_string()
+        ]
+    );
+}
+
+/// An instrument whose counting state the test flips from outside, as another
+/// client (or the instrument itself, on reaching a preset) would. It logs every
+/// command and can be made to fail its status reads.
+struct Flippable {
+    log: Arc<Mutex<Vec<String>>>,
+    counting: Arc<std::sync::atomic::AtomicBool>,
+    status_fails: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl mantaray_device::Transport for Flippable {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.log.lock().expect("log").push(command.to_string());
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+            "SHOW_STATUS" if self.status_fails.load(SeqCst) => {
+                return Err(mantaray_device::DeviceError::Communication {
+                    detail: "the line dropped".into(),
+                });
+            }
+            "SHOW_STATUS" => format!(
+                "RT=5.00 LT=5.00 DT=0.0% ICR=0 ACTIVE={} TOTAL=0",
+                u8::from(self.counting.load(SeqCst))
+            ),
+            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "flippable".into()
+    }
+}
+
+type Flags = (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
+
+fn connect_flippable(counting: bool) -> (RemoteMcb, Arc<Mutex<Vec<String>>>, Flags) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let counting = Arc::new(std::sync::atomic::AtomicBool::new(counting));
+    let status_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let remote = RemoteMcb::connect(
+        Box::new(Flippable {
+            log: log.clone(),
+            counting: counting.clone(),
+            status_fails: status_fails.clone(),
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    log.lock().expect("log").clear();
+    (remote, log, (counting, status_fails))
+}
+
+#[test]
+fn a_count_another_client_started_refuses_the_preset_change_and_sends_nothing() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (mut remote, log, (counting, _)) = connect_flippable(false);
+    // Our cache says idle; someone else starts the instrument.
+    counting.store(true, SeqCst);
+    assert!(!remote.is_active(), "the cache has not seen it yet");
+    let edited = Presets {
+        live_time: Some(60.0),
+        ..*remote.presets()
+    };
+    let error = remote.apply_presets(edited).expect_err("counting");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+    let error = remote.set_presets(edited).expect_err("counting");
+    assert_eq!(error.to_string(), NO_PRESETS_WHILE_COUNTING);
+    // Only the status read went out, once per attempt; nothing was changed.
+    assert_eq!(*log.lock().expect("log"), vec!["SHOW_STATUS"; 2]);
+    assert_eq!(remote.presets().live_time, Some(300.0));
+}
+
+#[test]
+fn a_count_that_stopped_itself_on_a_preset_allows_the_change() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (mut remote, log, (counting, _)) = connect_flippable(true);
+    // Our cache says counting; the instrument reached its preset and stopped.
+    counting.store(false, SeqCst);
+    assert!(remote.is_active(), "the cache has not seen it yet");
+    let edited = Presets {
+        live_time: Some(60.0),
+        ..*remote.presets()
+    };
+    remote
+        .apply_presets(edited)
+        .expect("the instrument is idle");
+    assert_eq!(
+        *log.lock().expect("log"),
+        vec![
+            "SHOW_STATUS".to_string(),
+            "SET_PRESET_CLEAR".to_string(),
+            "SET_PRESET_LIVE 60".to_string()
+        ],
+        "one status read, then the change"
+    );
+}
+
+#[test]
+fn a_failed_status_read_refuses_the_preset_change_with_the_reads_error() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (mut remote, log, (_, status_fails)) = connect_flippable(false);
+    status_fails.store(true, SeqCst);
+    let edited = Presets {
+        live_time: Some(60.0),
+        ..*remote.presets()
+    };
+    for error in [
+        remote.apply_presets(edited).expect_err("no status"),
+        remote.set_presets(edited).expect_err("no status"),
+    ] {
+        assert!(error.to_string().contains("the line dropped"), "{error}");
+        assert!(
+            matches!(error, mantaray_device::DeviceError::CountingUnknown { .. }),
+            "{error}"
+        );
+    }
+    assert_eq!(*log.lock().expect("log"), vec!["SHOW_STATUS"; 2]);
+}
+
+#[test]
+fn a_non_finite_or_negative_preset_is_refused_before_anything_is_sent() {
+    let (mut remote, log, _) = connect_flippable(false);
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+        let presets = Presets {
+            real_time: Some(bad),
+            ..*remote.presets()
+        };
+        assert!(remote.apply_presets(presets).is_err(), "{bad}");
+        assert!(remote.set_presets(presets).is_err(), "{bad}");
+        let mut properties = remote.properties().clone();
+        properties.presets.live_time = Some(bad);
+        assert!(remote.set_properties(properties).is_err(), "{bad}");
+        let uncertainty = Presets {
+            uncertainty: Some(mantaray_device::UncertaintyPreset {
+                limit_percent: bad,
+                low_channel: 0,
+                high_channel: 3,
+            }),
+            ..*remote.presets()
+        };
+        assert!(remote.apply_presets(uncertainty).is_err(), "{bad}");
+        let mda = Presets {
+            mda: Some(mantaray_device::MdaPreset {
+                target: bad,
+                ..an_mda_preset()
+            }),
+            ..*remote.presets()
+        };
+        assert!(remote.apply_presets(mda).is_err(), "{bad}");
+    }
+    assert_eq!(
+        *remote.presets(),
+        Presets {
+            live_time: Some(300.0),
+            ..Presets::default()
+        }
+    );
+    assert!(
+        log.lock()
+            .expect("log")
+            .iter()
+            .all(|command| command == "SHOW_STATUS" || command.starts_with("SHOW")),
+        "no change went out: {:?}",
+        log.lock().expect("log")
+    );
+}
+
+/// An instrument whose answers a test decides one command at a time, logging
+/// every command it is sent.
+struct Answering {
+    log: Arc<Mutex<Vec<String>>>,
+    answer: Box<dyn FnMut(&str) -> String + Send>,
+}
+
+impl mantaray_device::Transport for Answering {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        Ok((self.answer)(command))
+    }
+
+    fn peer(&self) -> String {
+        "answering".into()
+    }
+}
+
+fn connect_answering(
+    answer: impl FnMut(&str) -> String + Send + 'static,
+) -> (RemoteMcb, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let remote = RemoteMcb::connect(
+        Box::new(Answering {
+            log: log.clone(),
+            answer: Box::new(answer),
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    log.lock().expect("log").clear();
+    (remote, log)
+}
+
+/// A locked instrument is refused before STOP leaves, like the simulator.
+#[test]
+fn stop_on_a_locked_remote_sends_nothing() {
+    let (mut remote, log) = connect_answering(|command| match command {
+        "SHOW_CONFIGURATION" => "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=4".into(),
+        "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=0".into(),
+        "SHOW_DATA" => "DATA 4 0 0 0 0".into(),
+        "SHOW_PRESETS" => "PRESETS REAL=0 LIVE=0 PEAK=0 INTEG=0".into(),
+        _ => "OK".into(),
+    });
+    remote.lock("pw", "someone").expect("lock");
+    let error = remote.stop().expect_err("locked");
+    assert!(matches!(error, mantaray_device::DeviceError::Locked { .. }));
+    assert!(log.lock().expect("log").is_empty(), "{:?}", log.lock());
 }

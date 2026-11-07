@@ -7,14 +7,24 @@ use mantaray_core::{
     Withheld,
 };
 use mantaray_device::{
-    DetectorEntry, DetectorKind, JobState, Mcb, MdaPreset, Presets, SampleJob, UncertaintyPreset,
-    tile,
+    AmplifierSettings, AnyMcb, DetectorEntry, DetectorKind, DeviceError, HighVoltageSettings,
+    JobState, Mcb, MdaPreset, Presets, SampleJob, UncertaintyPreset, tile,
 };
+
+use mantaray_device::mcb::{differs, plain_zero};
 
 use crate::app::{Action, App, Target};
 use crate::theme::{Rgb, SpectrumColors, Theme};
 use crate::view::{MarkMode, format_counts, format_rate};
 use crate::viewmodel::{FillMode, VerticalScale};
+
+/// The smallest MDA-preset efficiency or yield the Presets tab offers: the
+/// device refuses zero, so the control never reaches it.
+const MIN_FRACTION: f64 = 1e-6;
+
+/// What the Presets tab's MDA efficiency and yield controls offer: the
+/// fractions the device accepts (above zero, at most one).
+pub const MDA_FRACTION_RANGE: std::ops::RangeInclusive<f64> = MIN_FRACTION..=1.0;
 
 /// Every dialog the application can show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -219,14 +229,31 @@ pub struct Dialogs {
     /// frame would erase every keystroke; the half-typed name lives here
     /// until Enter or leaving the box commits it.
     pub detector_name_edit: Option<(u16, String)>,
-    /// Presets being typed in MCB Properties, and whose instrument they are.
+    /// Presets being typed in MCB Properties, by detector number.
     ///
     /// A preset is entered over several frames - tick the box, then type the
     /// number - and only reaches the instrument when Apply is pressed. Reading
     /// the instrument's own presets back each frame would therefore erase the
     /// tick the moment it was made, so the half-finished edit lives here until
     /// it is applied or the dialog is closed.
-    pub presets_edit: Option<(usize, Presets)>,
+    ///
+    /// Every pending edit in this dialog is keyed by the detector's number
+    /// (its identity, the one `remove_detector` goes by), never by its place
+    /// in the list: removing a detector moves the ones after it up, and an
+    /// edit keyed by place would land on another instrument.
+    pub presets_edit: std::collections::BTreeMap<u16, Presets>,
+    /// High-voltage target being typed, by detector number.
+    ///
+    /// Bias reaches the instrument only when Apply is pressed. Applied as it
+    /// changed, a drag across the field sent every voltage it passed through,
+    /// and typing 1500 sent 1, 15 and 150 on the way.
+    pub hv_edit: PendingEdits,
+    /// Coarse gain being typed or dragged, by detector number.
+    ///
+    /// Like the bias, it reaches the instrument only when Apply is pressed:
+    /// applied as it changed, a drag from 20 to 40 sent every gain it crossed.
+    /// Whole numbers, because the command carries whole numbers.
+    pub coarse_edit: PendingEdits,
 }
 
 impl Default for Dialogs {
@@ -299,7 +326,9 @@ impl Default for Dialogs {
             queue_live_time: 300.0,
             region_cache: None,
             detector_name_edit: None,
-            presets_edit: None,
+            presets_edit: std::collections::BTreeMap::new(),
+            hv_edit: PendingEdits::new(),
+            coarse_edit: PendingEdits::new(),
         }
     }
 }
@@ -339,6 +368,13 @@ impl Dialogs {
         }
     }
 
+    /// Drops every pending edit that belongs to the detector with this number.
+    pub fn forget_detector(&mut self, number: u16) {
+        self.presets_edit.remove(&number);
+        self.hv_edit.remove(&number);
+        self.coarse_edit.remove(&number);
+    }
+
     /// Opens or closes a dialog.
     pub fn set(&mut self, dialog: Dialog, open: bool) {
         if open {
@@ -354,8 +390,12 @@ impl Dialogs {
             // Half-typed calibration texts must not greet the next opening -
             // the table would show the old typing over different points.
             Dialog::Calibration => self.calibration_edits.clear(),
-            // A half-finished preset edit dies with its dialog.
-            Dialog::McbProperties => self.presets_edit = None,
+            // A half-finished preset or bias edit dies with its dialog.
+            Dialog::McbProperties => {
+                self.presets_edit.clear();
+                self.hv_edit.clear();
+                self.coarse_edit.clear();
+            }
             _ => {}
         }
     }
@@ -2262,6 +2302,124 @@ fn dialog_window<R>(
     app.dialogs.set(dialog, open);
 }
 
+/// Numbers typed into a field that reaches the instrument only on Apply, by
+/// detector number (its identity, not its place in the list): switching to
+/// another detector's tab leaves this one's edit as it was, and removing a
+/// detector cannot move its edit onto another instrument.
+pub type PendingEdits = std::collections::BTreeMap<u16, f64>;
+
+/// What a pending-apply field reports: the value if Apply was pressed (the
+/// caller sends it), and the two notes the caller puts under the table.
+pub struct PendingField {
+    /// The shown value, when Apply was pressed.
+    pub apply: Option<f64>,
+    /// The field differs from the settings: not applied yet.
+    pub differs: bool,
+    /// The settings hold a value that cannot be sent from here.
+    pub warning: Option<String>,
+}
+
+/// Decimals needed to show `value` exactly: none for a whole number.
+fn decimals_of(value: f64) -> usize {
+    if !value.is_finite() || value.fract() == 0.0 {
+        return 0;
+    }
+    let shown = format!("{value}");
+    shown
+        .split_once('.')
+        .map_or(0, |(_, decimals)| decimals.len())
+        .min(12)
+}
+
+/// A whole-number field with an Apply button, for a setting that must not be
+/// sent as it changes - a drag from 20 to 40 would send every value it
+/// crosses. Used by the bias and the coarse gain alike, so they cannot drift
+/// apart.
+///
+/// `mirror` is what the settings hold. The field starts from it, or from the
+/// edit waiting for `detector`; a mirror outside what can be sent is shown as
+/// it is - its real decimals included - with a warning, not clamped or rounded
+/// into the field. The edit is kept while it differs from the mirror, exactly,
+/// and a mirror that is NaN is never a permanent edit. Negative zero is zero.
+///
+/// This puts one cell in the caller's grid row. The two notes are returned,
+/// not drawn, for [`pending_notes`] to draw outside the grid, where a label
+/// is not another cell of the row.
+pub fn pending_field(
+    ui: &mut egui::Ui,
+    pending: &mut PendingEdits,
+    detector: u16,
+    mirror: f64,
+    range: std::ops::RangeInclusive<f64>,
+    sendable: fn(f64) -> Result<(), DeviceError>,
+) -> PendingField {
+    let mirror = plain_zero(mirror);
+    let mut value = plain_zero(pending.get(&detector).copied().unwrap_or(mirror));
+    let mut apply = false;
+    // When the settings hold a value that can be sent, the field holds only
+    // whole numbers: a fraction typed in is rounded, so an edit that Apply
+    // would refuse forever cannot exist. A mirror that cannot be sent is shown
+    // as it is, with its warning.
+    let whole_only = sendable(mirror).is_ok();
+    if whole_only {
+        value = value.round();
+    }
+    let decimals = if whole_only { 0 } else { decimals_of(value) };
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut value)
+                .range(range)
+                .fixed_decimals(decimals)
+                .clamp_existing_to_range(false)
+                .update_while_editing(false),
+        );
+        // Always available: the number shown may be a default rather than the
+        // instrument's, and applying the same number must still send it.
+        apply = ui.button("Apply").clicked();
+    });
+    let value = plain_zero(if whole_only { value.round() } else { value });
+    let differs = differs(value, mirror);
+    if differs {
+        pending.insert(detector, value);
+    } else {
+        pending.remove(&detector);
+    }
+    PendingField {
+        apply: apply.then_some(value),
+        differs,
+        warning: sendable(mirror).err().map(|error| {
+            format!(
+                "the settings hold a value that cannot be sent from here ({error}); \
+                 shown as it is"
+            )
+        }),
+    }
+}
+
+/// Asks the instrument to clear its presets. The edit in progress for this
+/// detector is dropped only when it did: a refusal leaves the operator's
+/// typing where it was, and the caller shows the error instead of saying the
+/// presets are cleared.
+fn clear_presets(
+    mcb: &mut impl Mcb,
+    edits: &mut std::collections::BTreeMap<u16, Presets>,
+    number: u16,
+) -> Result<(), DeviceError> {
+    mcb.set_presets(Presets::default())?;
+    edits.remove(&number);
+    Ok(())
+}
+
+/// The notes of a [`pending_field`], drawn under its grid.
+pub fn pending_notes(ui: &mut egui::Ui, field: &PendingField) {
+    if field.differs {
+        ui.label(egui::RichText::new("not applied yet").weak());
+    }
+    if let Some(warning) = &field.warning {
+        ui.label(egui::RichText::new(warning).color(ui.visuals().warn_fg_color));
+    }
+}
+
 fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(
         app,
@@ -2277,11 +2435,21 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                 ui.label("the buffer has no instrument settings");
                 return;
             };
+            // An edit for a detector that is gone has nothing to apply to.
+            // (Removing a detector drops its edits at once; this catches any
+            // other way a detector leaves the list.)
+            let detectors = &app.detectors;
+            let held = |number: &u16| detectors.iter().any(|mcb| mcb.identity().number == *number);
+            app.dialogs.hv_edit.retain(|number, _| held(number));
+            app.dialogs.coarse_edit.retain(|number, _| held(number));
+            app.dialogs.presets_edit.retain(|number, _| held(number));
             let Some(mcb) = app.detectors.get_mut(detector) else {
                 return;
             };
             let mut properties = mcb.properties().clone();
             let identity = mcb.identity().clone();
+            // The pending edits are keyed by this, not by `detector`.
+            let number = identity.number;
             let status = mcb.status();
             let active = mcb.is_active();
 
@@ -2307,14 +2475,35 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
             let mut changed = false;
             match app.dialogs.properties_tab {
                 0 => {
+                    // The coarse gain is held in `coarse_edit` until Apply, and
+                    // is a whole number because the command carries one.
+                    let mut coarse = None;
                     egui::Grid::new("amp").num_columns(2).show(ui, |ui| {
                         ui.label("Coarse gain");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut properties.amplifier.coarse_gain)
-                                    .range(1.0..=1000.0),
-                            )
-                            .changed();
+                        let mirror = properties.amplifier.coarse_gain;
+                        let field = pending_field(
+                            ui,
+                            &mut app.dialogs.coarse_edit,
+                            number,
+                            mirror,
+                            AmplifierSettings::COARSE_GAIN_MIN..=AmplifierSettings::COARSE_GAIN_MAX,
+                            AmplifierSettings::check_coarse_gain,
+                        );
+                        let applying = field.apply;
+                        coarse = Some(field);
+                        if let Some(gain) = applying {
+                            match app.detectors[detector].set_coarse_gain(gain) {
+                                Ok(()) => {
+                                    // So an edit later this frame cannot send
+                                    // the old gain back.
+                                    properties.amplifier.coarse_gain = gain;
+                                    actions.push(Action::Status(format!(
+                                        "coarse gain set to {gain:.0}"
+                                    )))
+                                }
+                                Err(error) => actions.push(Action::Status(error.to_string())),
+                            }
+                        }
                         ui.end_row();
                         ui.label("Fine gain");
                         changed |= ui
@@ -2355,6 +2544,11 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             .changed();
                         ui.end_row();
                     });
+                    // Under the grid, not in a row of it: a label there would
+                    // be one more cell of the row.
+                    if let Some(field) = &coarse {
+                        pending_notes(ui, field);
+                    }
                     changed |= ui
                         .checkbox(
                             &mut properties.amplifier.pileup_rejection,
@@ -2403,18 +2597,37 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     });
                 }
                 2 => {
+                    // As in MAESTRO, the preset fields are gray while the
+                    // detector acquires, and Apply and Clear are off with them.
                     if active {
                         ui.label(
-                            egui::RichText::new("stop the acquisition to change presets").weak(),
+                            egui::RichText::new(
+                                "Presets can only be set while the detector is not acquiring.",
+                            )
+                            .weak(),
                         );
                     }
                     // The edit in progress, seeded from the instrument the
-                    // first time this tab is drawn for it. Switching detectors
-                    // seeds afresh, so one instrument's presets are never
-                    // typed into another's.
-                    let mut presets = match app.dialogs.presets_edit {
-                        Some((owner, presets)) if owner == detector => presets,
-                        _ => properties.presets,
+                    // first time this tab is drawn for it. It is kept per
+                    // detector number, like the bias and the coarse gain, so
+                    // one instrument's presets are never typed into another's
+                    // and looking at another detector does not lose them.
+                    //
+                    // While the detector counts the gray form shows what the
+                    // instrument holds, never an edit that is not in force,
+                    // and a half-typed edit is dropped (device-spec 2.8): kept
+                    // and brought back after the count, it could be older than
+                    // presets another client set meanwhile, and Apply would
+                    // push it. `advance_by` drops it too, tab open or not.
+                    let mut presets = if active {
+                        app.dialogs.presets_edit.remove(&number);
+                        properties.presets
+                    } else {
+                        app.dialogs
+                            .presets_edit
+                            .get(&number)
+                            .copied()
+                            .unwrap_or(properties.presets)
                     };
                     let edit = |ui: &mut egui::Ui, label: &str, value: &mut Option<f64>| {
                         ui.label(label);
@@ -2434,118 +2647,186 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                         }
                         ui.end_row();
                     };
-                    egui::Grid::new("presets-edit")
-                        .num_columns(3)
-                        .show(ui, |ui| {
-                            edit(ui, "Real time (s)", &mut presets.real_time);
-                            edit(ui, "Live time (s)", &mut presets.live_time);
-                            ui.label("ROI peak");
-                            let mut peak_on = presets.roi_peak.is_some();
-                            if ui.checkbox(&mut peak_on, "").changed() {
-                                presets.roi_peak = peak_on.then_some(0);
-                            }
-                            let mut peak = presets.roi_peak.unwrap_or(0);
-                            if ui
-                                .add_enabled(peak_on, egui::DragValue::new(&mut peak))
-                                .changed()
-                            {
-                                presets.roi_peak = Some(peak);
-                            }
-                            ui.end_row();
-                            ui.label("ROI integral");
-                            let mut integral_on = presets.roi_integral.is_some();
-                            if ui.checkbox(&mut integral_on, "").changed() {
-                                presets.roi_integral = integral_on.then_some(0);
-                            }
-                            let mut integral = presets.roi_integral.unwrap_or(0);
-                            if ui
-                                .add_enabled(integral_on, egui::DragValue::new(&mut integral))
-                                .changed()
-                            {
-                                presets.roi_integral = Some(integral);
-                            }
-                            ui.end_row();
-                        });
-                    ui.separator();
-                    let mut uncertainty_on = presets.uncertainty.is_some();
-                    if ui
-                        .checkbox(&mut uncertainty_on, "Uncertainty preset")
-                        .changed()
-                    {
-                        presets.uncertainty = uncertainty_on.then_some(UncertaintyPreset {
-                            limit_percent: 1.0,
-                            low_channel: 0,
-                            high_channel: 100,
-                        });
-                    }
-                    if let Some(preset) = presets.uncertainty.as_mut() {
-                        ui.horizontal(|ui| {
-                            ui.label("limit %");
-                            ui.add(egui::DragValue::new(&mut preset.limit_percent).speed(0.1));
-                            ui.label("channels");
-                            ui.add(egui::DragValue::new(&mut preset.low_channel));
-                            ui.add(egui::DragValue::new(&mut preset.high_channel));
-                        });
-                    }
-                    let mut mda_on = presets.mda.is_some();
-                    if ui.checkbox(&mut mda_on, "MDA preset").changed() {
-                        presets.mda = mda_on.then_some(MdaPreset {
-                            target: 10.0,
-                            region: mantaray_core::Roi::new(0, 100),
-                            efficiency: 0.05,
-                            yield_fraction: 0.85,
-                        });
-                    }
-                    if let Some(preset) = presets.mda.as_mut() {
-                        ui.horizontal(|ui| {
-                            ui.label("target Bq");
-                            ui.add(egui::DragValue::new(&mut preset.target).speed(0.5));
-                            ui.label("efficiency");
-                            ui.add(egui::DragValue::new(&mut preset.efficiency).speed(0.001));
-                            ui.label("yield");
-                            ui.add(egui::DragValue::new(&mut preset.yield_fraction).speed(0.01));
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply presets").clicked() {
-                            match app.detectors[detector].set_presets(presets) {
-                                Ok(()) => {
-                                    // What the instrument now holds is no
-                                    // longer an unsaved edit.
-                                    app.dialogs.presets_edit = None;
-                                    actions.push(Action::Status("presets applied".into()))
+                    ui.add_enabled_ui(!active, |ui| {
+                        egui::Grid::new("presets-edit")
+                            .num_columns(3)
+                            .show(ui, |ui| {
+                                edit(ui, "Real time (s)", &mut presets.real_time);
+                                edit(ui, "Live time (s)", &mut presets.live_time);
+                                ui.label("ROI peak");
+                                let mut peak_on = presets.roi_peak.is_some();
+                                if ui.checkbox(&mut peak_on, "").changed() {
+                                    presets.roi_peak = peak_on.then_some(0);
                                 }
-                                Err(error) => actions.push(Action::Status(error.to_string())),
+                                let mut peak = presets.roi_peak.unwrap_or(0);
+                                if ui
+                                    .add_enabled(peak_on, egui::DragValue::new(&mut peak))
+                                    .changed()
+                                {
+                                    presets.roi_peak = Some(peak);
+                                }
+                                ui.end_row();
+                                ui.label("ROI integral");
+                                let mut integral_on = presets.roi_integral.is_some();
+                                if ui.checkbox(&mut integral_on, "").changed() {
+                                    presets.roi_integral = integral_on.then_some(0);
+                                }
+                                let mut integral = presets.roi_integral.unwrap_or(0);
+                                if ui
+                                    .add_enabled(integral_on, egui::DragValue::new(&mut integral))
+                                    .changed()
+                                {
+                                    presets.roi_integral = Some(integral);
+                                }
+                                ui.end_row();
+                            });
+                        ui.separator();
+                        let mut uncertainty_on = presets.uncertainty.is_some();
+                        if ui
+                            .checkbox(&mut uncertainty_on, "Uncertainty preset")
+                            .changed()
+                        {
+                            presets.uncertainty = uncertainty_on.then_some(UncertaintyPreset {
+                                limit_percent: 1.0,
+                                low_channel: 0,
+                                high_channel: 100,
+                            });
+                        }
+                        if let Some(preset) = presets.uncertainty.as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.label("limit %");
+                                ui.add(
+                                    egui::DragValue::new(&mut preset.limit_percent)
+                                        .speed(0.1)
+                                        .range(0.0..=f64::MAX),
+                                );
+                                ui.label("channels");
+                                // The range cannot run backwards: each end is
+                                // bounded by the other.
+                                let (low, high) = (preset.low_channel, preset.high_channel);
+                                ui.add(
+                                    egui::DragValue::new(&mut preset.low_channel).range(0..=high),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut preset.high_channel)
+                                        .range(low..=usize::MAX),
+                                );
+                            });
+                        }
+                        let mut mda_on = presets.mda.is_some();
+                        if ui.checkbox(&mut mda_on, "MDA preset").changed() {
+                            presets.mda = mda_on.then_some(MdaPreset {
+                                target: 10.0,
+                                region: mantaray_core::Roi::new(0, 100),
+                                efficiency: 0.05,
+                                yield_fraction: 0.85,
+                            });
+                        }
+                        if let Some(preset) = presets.mda.as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.label("target Bq");
+                                ui.add(
+                                    egui::DragValue::new(&mut preset.target)
+                                        .speed(0.5)
+                                        .range(0.0..=f64::MAX),
+                                );
+                                ui.label("efficiency");
+                                // Fractions above zero and at most one: the
+                                // MDA divides by both, and the device refuses
+                                // anything else (85 for 85 % would stop at
+                                // once).
+                                ui.add(
+                                    egui::DragValue::new(&mut preset.efficiency)
+                                        .speed(0.001)
+                                        .range(MDA_FRACTION_RANGE),
+                                );
+                                ui.label("yield");
+                                ui.add(
+                                    egui::DragValue::new(&mut preset.yield_fraction)
+                                        .speed(0.01)
+                                        .range(MDA_FRACTION_RANGE),
+                                );
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Apply presets").clicked() {
+                                match app.detectors[detector].apply_presets(presets) {
+                                    Ok(()) => {
+                                        // What the instrument now holds is no
+                                        // longer an unsaved edit, and the form
+                                        // shows it: a zero typed for "off" is
+                                        // now no preset, checkbox and all.
+                                        app.dialogs.presets_edit.remove(&number);
+                                        presets = *app.detectors[detector].presets();
+                                        actions.push(Action::Status("presets applied".into()))
+                                    }
+                                    Err(error) => actions.push(Action::Status(error.to_string())),
+                                }
                             }
-                        }
-                        if ui.button("Clear presets").clicked() {
-                            let _ = app.detectors[detector].set_presets(Presets::default());
-                            app.dialogs.presets_edit = None;
-                            actions.push(Action::Status("presets cleared".into()));
-                        }
+                            if ui.button("Clear presets").clicked() {
+                                match clear_presets(
+                                    &mut app.detectors[detector],
+                                    &mut app.dialogs.presets_edit,
+                                    number,
+                                ) {
+                                    Ok(()) => {
+                                        // The form shows what the instrument holds.
+                                        presets = Presets::default();
+                                        actions.push(Action::Status("presets cleared".into()))
+                                    }
+                                    // The edit stays, and so does the form.
+                                    Err(error) => actions.push(Action::Status(error.to_string())),
+                                }
+                            }
+                        });
                     });
                     // Whatever has been typed so far survives to the next
-                    // frame; only Apply sends it to the instrument.
+                    // frame; only Apply sends it to the instrument. While the
+                    // detector counts nothing can be typed and there is no
+                    // edit. (`differ`, not `!=`: the one comparison.)
+                    if active {
+                        return;
+                    }
                     if app
                         .detectors
                         .get(detector)
-                        .is_some_and(|mcb| mcb.properties().presets != presets)
+                        .is_some_and(|mcb| mcb.properties().presets.differ(&presets))
                     {
-                        app.dialogs.presets_edit = Some((detector, presets));
+                        app.dialogs.presets_edit.insert(number, presets);
                     } else {
-                        app.dialogs.presets_edit = None;
+                        app.dialogs.presets_edit.remove(&number);
                     }
                     return;
                 }
                 3 => {
+                    // The target is held in `hv_edit` until Apply.
+                    let mut bias = None;
                     egui::Grid::new("hv").num_columns(2).show(ui, |ui| {
                         ui.label("Target (V)");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut properties.high_voltage.target_volts)
-                                    .range(0.0..=5000.0),
-                            )
-                            .changed();
+                        let mirror = properties.high_voltage.target_volts;
+                        let field = pending_field(
+                            ui,
+                            &mut app.dialogs.hv_edit,
+                            number,
+                            mirror,
+                            0.0..=HighVoltageSettings::TARGET_MAX_VOLTS,
+                            HighVoltageSettings::check_target,
+                        );
+                        let applying = field.apply;
+                        bias = Some(field);
+                        if let Some(target) = applying {
+                            match app.detectors[detector].set_high_voltage(target) {
+                                Ok(()) => {
+                                    // So an edit later this frame cannot
+                                    // send the old target back.
+                                    properties.high_voltage.target_volts = target;
+                                    actions.push(Action::Status(format!(
+                                        "high voltage target set to {target:.0} V"
+                                    )))
+                                }
+                                Err(error) => actions.push(Action::Status(error.to_string())),
+                            }
+                        }
                         ui.end_row();
                         ui.label("Enabled");
                         changed |= ui
@@ -2556,6 +2837,17 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                         ui.label(format!("{:.0} V", status.high_voltage));
                         ui.end_row();
                     });
+                    if let Some(field) = &bias {
+                        pending_notes(ui, field);
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "the target is the last one applied from here; \
+                             the instrument's own setting is not read back",
+                        )
+                        .weak()
+                        .small(),
+                    );
                 }
                 4 => {
                     changed |= ui
@@ -5009,15 +5301,43 @@ fn dashboard_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
                 });
             ui.separator();
             ui.horizontal(|ui| {
+                // Every detector is asked; each one that refuses is named in
+                // the status line, and the others go ahead. They are asked
+                // side by side, one thread each, so a STOP's bounded confirm
+                // is paid once for them all, not once per detector.
+                let mut all = |verb: &str, act: fn(&mut AnyMcb) -> Result<(), DeviceError>| {
+                    let refused: Vec<String> = std::thread::scope(|scope| {
+                        let asked: Vec<_> = app
+                            .detectors
+                            .iter_mut()
+                            .map(|detector| {
+                                scope.spawn(move || {
+                                    act(detector).err().map(|error| {
+                                        format!("Detector {}: {error}", detector.identity().number)
+                                    })
+                                })
+                            })
+                            .collect();
+                        asked
+                            .into_iter()
+                            .filter_map(|thread| {
+                                thread
+                                    .join()
+                                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                            })
+                            .collect()
+                    });
+                    actions.push(Action::Status(if refused.is_empty() {
+                        format!("{verb} on every detector")
+                    } else {
+                        refused.join("; ")
+                    }));
+                };
                 if ui.button("Start all").clicked() {
-                    for detector in &mut app.detectors {
-                        let _ = detector.start();
-                    }
+                    all("acquisition started", |detector| detector.start());
                 }
                 if ui.button("Stop all").clicked() {
-                    for detector in &mut app.detectors {
-                        let _ = detector.stop();
-                    }
+                    all("acquisition stopped", |detector| detector.stop());
                 }
             });
             ui.separator();
@@ -5249,26 +5569,32 @@ fn batch_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
             )),
         );
         ui.separator();
-        ui.label(format!(
-            "changer at position {} of {}{}",
-            app.changer.position(),
-            app.changer.positions(),
-            if app.changer.is_ready() {
-                ""
-            } else {
-                ", moving"
-            }
-        ));
+        match &app.changer {
+            Some(changer) => ui.label(format!(
+                "changer at position {} of {}{}",
+                changer.position(),
+                changer.positions(),
+                if changer.is_ready() { "" } else { ", moving" }
+            )),
+            None => ui.label("no sample changer: change each sample by hand"),
+        };
         ui.horizontal(|ui| {
             if ui.button("Run next sample").clicked() {
                 actions.extend(crate::jobs::run_next_sample(app));
             }
-            if ui.button("Change sample").clicked() {
-                app.changer.request_change();
+            if ui.button("Skip sample").clicked() {
+                actions.extend(crate::jobs::skip_sample(app));
+            }
+            if let Some(changer) = &mut app.changer
+                && ui.button("Change sample").clicked()
+            {
+                changer.request_change();
             }
             if ui.button("Reset queue").clicked() {
                 app.queue.reset();
-                app.changer.reset();
+                if let Some(changer) = &mut app.changer {
+                    changer.reset();
+                }
             }
         });
     });
@@ -5711,8 +6037,171 @@ fn open_path_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
 
 #[cfg(test)]
 mod tests {
-    use super::{case_variants, reparse, strongest_centroid};
+    use super::{case_variants, clear_presets, reparse, strongest_centroid};
     use mantaray_core::{LineResult, NuclideResult};
+
+    /// A line that refuses `SET_PRESET_CLEAR` (or accepts everything).
+    struct Instrument {
+        refuse_clear: bool,
+    }
+
+    impl mantaray_device::Transport for Instrument {
+        fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+            Ok(match command {
+                "SET_PRESET_CLEAR" if self.refuse_clear => "ERR presets are locked".into(),
+                "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+                "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
+                "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+                "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+                _ => "OK".into(),
+            })
+        }
+
+        fn peer(&self) -> String {
+            "test".into()
+        }
+    }
+
+    #[test]
+    fn clearing_the_presets_is_reported_only_when_the_instrument_did_it() {
+        use mantaray_device::{Mcb, Presets, RemoteMcb};
+        let typed = Presets::live(60.0);
+        let edits = || std::collections::BTreeMap::from([(1u16, typed)]);
+
+        let mut refusing =
+            RemoteMcb::connect(Box::new(Instrument { refuse_clear: true }), 1, "t").unwrap();
+        let mut pending = edits();
+        let error = clear_presets(&mut refusing, &mut pending, 1).expect_err("refused");
+        assert!(error.to_string().contains("presets are locked"), "{error}");
+        assert_eq!(pending.get(&1), Some(&typed), "the edit is kept");
+        assert_eq!(refusing.presets().live_time, Some(300.0), "still held");
+
+        let mut accepting = RemoteMcb::connect(
+            Box::new(Instrument {
+                refuse_clear: false,
+            }),
+            1,
+            "t",
+        )
+        .unwrap();
+        let mut pending = edits();
+        clear_presets(&mut accepting, &mut pending, 1).expect("cleared");
+        assert!(pending.is_empty(), "the edit goes with the presets");
+        assert!(accepting.presets().is_empty());
+    }
+
+    /// A line that logs every command it is sent. `held` is the live preset
+    /// the instrument reports holding (0 for none).
+    struct Logging {
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        held: u32,
+    }
+
+    impl mantaray_device::Transport for Logging {
+        fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+            self.log.lock().unwrap().push(command.to_string());
+            Ok(match command {
+                "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
+                "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
+                "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
+                "SHOW_PRESETS" => {
+                    format!("PRESETS REAL=0.00 LIVE={}.00 PEAK=0 INTEG=0", self.held)
+                }
+                _ => "OK".into(),
+            })
+        }
+
+        fn peer(&self) -> String {
+            "test".into()
+        }
+    }
+
+    fn logging_instrument(
+        held: u32,
+    ) -> (
+        mantaray_device::RemoteMcb,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mcb = mantaray_device::RemoteMcb::connect(
+            Box::new(Logging {
+                log: log.clone(),
+                held,
+            }),
+            1,
+            "t",
+        )
+        .unwrap();
+        log.lock().unwrap().clear();
+        (mcb, log)
+    }
+
+    #[test]
+    fn apply_presets_sends_nothing_for_an_edit_only_the_program_holds() {
+        use mantaray_device::{Mcb, MdaPreset, Presets};
+        let (mut mcb, log) = logging_instrument(300);
+        let mut edited: Presets = *mcb.presets();
+        edited.mda = Some(MdaPreset {
+            target: 10.0,
+            region: mantaray_core::Roi::new(1, 4),
+            efficiency: 0.05,
+            yield_fraction: 0.85,
+        });
+        mcb.apply_presets(edited).expect("applied");
+        // Only the status read goes to the instrument.
+        assert_eq!(*log.lock().unwrap(), vec!["SHOW_STATUS".to_string()]);
+        assert_eq!(mcb.presets().mda, edited.mda, "kept in the program");
+        assert_eq!(mcb.presets().live_time, Some(300.0));
+    }
+
+    #[test]
+    fn apply_presets_with_nothing_changed_re_arms_the_instrument() {
+        use mantaray_device::Mcb;
+        let (mut mcb, log) = logging_instrument(300);
+        let same = *mcb.presets();
+        mcb.apply_presets(same).expect("applied");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "SHOW_STATUS".to_string(),
+                "SET_PRESET_CLEAR".to_string(),
+                "SET_PRESET_LIVE 300".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_presets_sends_a_clear_and_the_presets_when_a_held_one_changed() {
+        use mantaray_device::{Mcb, Presets};
+        let (mut mcb, log) = logging_instrument(300);
+        let edited = Presets {
+            live_time: Some(60.0),
+            ..*mcb.presets()
+        };
+        mcb.apply_presets(edited).expect("applied");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "SHOW_STATUS".to_string(),
+                "SET_PRESET_CLEAR".to_string(),
+                "SET_PRESET_LIVE 60".to_string()
+            ]
+        );
+        assert_eq!(mcb.presets().live_time, Some(60.0));
+    }
+
+    #[test]
+    fn clear_presets_with_an_empty_mirror_still_sends_the_clear() {
+        use mantaray_device::Mcb;
+        let (mut mcb, log) = logging_instrument(0);
+        assert!(mcb.presets().is_empty());
+        let mut pending = std::collections::BTreeMap::new();
+        clear_presets(&mut mcb, &mut pending, 1).expect("cleared");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["SHOW_STATUS".to_string(), "SET_PRESET_CLEAR".to_string()]
+        );
+    }
 
     /// Looking at a half life must not change it.
     ///

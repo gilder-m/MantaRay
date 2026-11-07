@@ -94,9 +94,49 @@ fn parse_line(text: &str, line: usize) -> Result<Command, JobError> {
     };
     let number = |index: usize| -> Result<f64, JobError> {
         let value = text_arg(index)?;
-        value
-            .parse::<f64>()
-            .map_err(|_| bad(format!("{value:?} is not a number")))
+        match value.parse::<f64>() {
+            Ok(parsed) if parsed.is_finite() => Ok(parsed),
+            // `str::parse::<f64>` takes "NaN" and "inf"; no job argument
+            // means either.
+            _ => Err(bad(format!("{value:?} is not a number"))),
+        }
+    };
+    // A preset is a limit the instrument is told to stop at. A negative one
+    // would be clamped to "none" without saying so, which the operator did
+    // not pick; refused here, with the number named.
+    let preset = |index: usize| -> Result<f64, JobError> {
+        let value = number(index)?;
+        if value < 0.0 {
+            return Err(bad(format!(
+                "{value} is not a valid preset (a preset cannot be negative)"
+            )));
+        }
+        Ok(value)
+    };
+
+    // A count preset is whole counts. Zero is how MAESTRO disables a preset
+    // and stays zero (the host turns it into "no preset"). Any fraction is
+    // refused rather than truncated: 1500.7 is not 1500, and 0.4 would become
+    // the zero that disables the preset without saying so.
+    let count_preset = |index: usize| -> Result<u64, JobError> {
+        let value = preset(index)?;
+        if value.fract() != 0.0 {
+            return Err(bad(format!(
+                "{value} is not a valid count preset (it must be a whole number of counts, \
+                 or 0 to disable the preset)"
+            )));
+        }
+        Ok(value as u64)
+    };
+    // A channel is a whole, non-negative number.
+    let channel = |index: usize| -> Result<usize, JobError> {
+        let value = number(index)?;
+        if value < 0.0 || value.fract() != 0.0 {
+            return Err(bad(format!(
+                "{value} is not a channel number (a whole number, 0 or more)"
+            )));
+        }
+        Ok(value as usize)
     };
 
     let command = match upper.as_str() {
@@ -158,17 +198,20 @@ fn parse_line(text: &str, line: usize) -> Result<Command, JobError> {
         "SET_NAME_STRIP" => Command::SetNameStrip(text_arg(0)?),
         "SET_PHA" => Command::SetPha,
         "SET_PRESET_CLEAR" => Command::SetPresetClear,
-        "SET_PRESET_COUNT" => Command::SetPresetCount(number(0)?.max(0.0) as u64),
-        "SET_PRESET_INTEG" | "SET_PRESET_INTEGRAL" => {
-            Command::SetPresetIntegral(number(0)?.max(0.0) as u64)
+        "SET_PRESET_COUNT" => Command::SetPresetCount(count_preset(0)?),
+        "SET_PRESET_INTEG" | "SET_PRESET_INTEGRAL" => Command::SetPresetIntegral(count_preset(0)?),
+        "SET_PRESET_LIVE" => Command::SetPresetLive(preset(0)?),
+        "SET_PRESET_REAL" => Command::SetPresetReal(preset(0)?),
+        "SET_PRESET_UNCERTAINTY" => {
+            let limit = preset(0)?;
+            let (low, high) = (channel(1)?, channel(2)?);
+            if low > high {
+                return Err(bad(format!(
+                    "the channel range {low} to {high} runs backwards (low must not exceed high)"
+                )));
+            }
+            Command::SetPresetUncertainty { limit, low, high }
         }
-        "SET_PRESET_LIVE" => Command::SetPresetLive(number(0)?),
-        "SET_PRESET_REAL" => Command::SetPresetReal(number(0)?),
-        "SET_PRESET_UNCERTAINTY" => Command::SetPresetUncertainty {
-            limit: number(0)?,
-            low: number(1)?.max(0.0) as usize,
-            high: number(2)?.max(0.0) as usize,
-        },
         "SET_RANGE" => match args.len() {
             3 => Command::SetRange(ListSlice::Absolute {
                 date: text_arg(0)?,

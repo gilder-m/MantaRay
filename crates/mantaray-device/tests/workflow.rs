@@ -224,7 +224,8 @@ fn a_low_rate_alarm_catches_a_dead_detector() {
 #[test]
 fn dashboard_tiles_summarise_a_detector() {
     let mut mcb = SimulatedMcb::builder(4, "SIM-04").build();
-    mcb.presets_mut().live_time = Some(100.0);
+    mcb.apply_presets(mantaray_device::Presets::live(100.0))
+        .unwrap();
     mcb.start().unwrap();
     advance(&mut mcb, 25.0).unwrap();
 

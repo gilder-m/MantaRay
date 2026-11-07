@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mantaray_device::{Mcb, advance};
+use mantaray_device::{DeviceError, JobState, Mcb, advance};
 use mantaray_jobs::{BeepSpec, Job, JobError, JobHost, JobVariables, ListSlice, Runner};
 
 use crate::app::{Action, App, Target};
@@ -27,8 +27,17 @@ const COMMANDS_PER_FRAME: usize = 4;
 /// over. (The simulator runs faster than real time and never comes here - its
 /// waits fast-forward it within the frame, as they always have.)
 pub enum JobWait {
-    /// WAIT: until the instrument stops itself (a preset is set).
-    Stop,
+    /// WAIT: until the instrument stops itself (a preset is set). An
+    /// accepted START is not yet a reading that it counts (rule 9), so the
+    /// count is over at the first believed reading taken after the WAIT that
+    /// says idle ([`mantaray_device::CountWatch`], the batch queue's rule
+    /// too); readings that stay unbelievable stop the job with the reason.
+    Stop {
+        /// The detector's number (its identity, not its place in the list).
+        detector: u16,
+        /// The watch on its count.
+        watch: mantaray_device::CountWatch,
+    },
     /// WAIT n: until the wall clock reaches the deadline.
     Until(std::time::Instant),
     /// RUN_AND_WAIT: until the program exits.
@@ -48,10 +57,32 @@ fn wait_over(app: &mut App) -> Result<bool, String> {
         return Ok(true);
     };
     let done = match wait {
-        JobWait::Stop => match app.job_detector() {
-            Some(detector) => !app.detectors[detector].is_active(),
-            None => true,
-        },
+        JobWait::Stop {
+            detector,
+            ref mut watch,
+        } => {
+            let Some(mcb) = app
+                .detectors
+                .iter()
+                .find(|mcb| mcb.identity().number == detector)
+            else {
+                return Err(format!("WAIT: detector {detector} is gone"));
+            };
+            match watch.check(mcb) {
+                mantaray_device::CountState::Counting => false,
+                mantaray_device::CountState::Over => true,
+                mantaray_device::CountState::Unreadable(reason) => {
+                    return Err(format!(
+                        "WAIT: whether detector {detector} counts cannot be told: {reason}"
+                    ));
+                }
+                mantaray_device::CountState::NeverStarted => {
+                    return Err(format!(
+                        "WAIT: detector {detector} accepted START but did not count"
+                    ));
+                }
+            }
+        }
         JobWait::Until(deadline) => std::time::Instant::now() >= deadline,
         JobWait::Program(ref program, ref mut child) => {
             let mut child_done = false;
@@ -89,8 +120,9 @@ pub fn start(app: &mut App, path: &Path) -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("."));
     app.job_variables.current_dir = app.job_directory.display().to_string();
     app.job = Some(Runner::new(job));
-    // A fresh job must not inherit a dead one's pending wait.
+    // A fresh job must not inherit a dead one's pending wait, or its count.
     app.job_wait = None;
+    app.job_count = None;
     Ok(())
 }
 
@@ -136,31 +168,85 @@ pub fn step(app: &mut App) {
 }
 
 /// Counts the next queued sample on the active detector.
+///
+/// Straight-line, inside the click. First the checks that touch no
+/// instrument, always in this order: a sample is waiting and not already
+/// counting, the changer is not moving, a detector window is selected. Then
+/// three steps, each through the detector's one gate: (1) the sample's
+/// presets (refused if the detector is locked, counting - asked of it, once -
+/// or the values are bad), (2) CLEAR, (3) START, confirmed by the detector.
+///
+/// It never stops a count: a detector still counting is refused with "stop it
+/// first". A step that fails ends the attempt there and the message says
+/// which steps were done; the sample stays waiting and pressing again repeats
+/// every step. Nothing survives the click.
 pub fn run_next_sample(app: &mut App) -> Vec<Action> {
+    let status = |text: String| vec![Action::Status(text)];
     let Some(job) = app.queue.current().cloned() else {
-        return vec![Action::Status("the queue is empty".into())];
+        return status("the queue is empty".into());
     };
-    if !app.changer.is_ready() {
-        return vec![Action::Status("the sample changer is still moving".into())];
+    if job.state != JobState::Pending {
+        return status(format!("sample {} is already counting", job.id));
+    }
+    if app
+        .changer
+        .as_ref()
+        .is_some_and(|changer| !changer.is_ready())
+    {
+        return status("the sample changer is still moving".into());
     }
     let Some(index) = app.active else {
-        return vec![Action::Status("open a detector window first".into())];
+        return status("open a detector window first".into());
     };
     let Target::Detector(detector) = app.windows[index].target else {
-        return vec![Action::Status("select a detector window".into())];
+        return status("select a detector window".into());
     };
     let Some(mcb) = app.detectors.get_mut(detector) else {
-        return vec![Action::Status("that detector is gone".into())];
+        return status("that detector is gone".into());
     };
-    let _ = mcb.stop();
-    if let Err(error) = mcb.set_presets(job.presets) {
-        return vec![Action::Status(error.to_string())];
+    // 1. Explicit: every sample re-arms the instrument, so a clear and every
+    // held preset are sent even when they equal the last sample's.
+    match mcb.set_presets(job.presets) {
+        Ok(()) => {}
+        Err(DeviceError::PresetsWhileCounting) => {
+            return status(format!(
+                "the detector is still counting; stop it first ({})",
+                DeviceError::PresetsWhileCounting
+            ));
+        }
+        Err(error) => return status(format!("{error}; sample {} was not started", job.id)),
     }
-    let _ = mcb.clear();
+    let not_started = |applied: &str, step: &str, error: DeviceError| {
+        DeviceError::PartlyApplied {
+            applied: applied.to_string(),
+            failed: format!("{step} failed: {error}; the sample was not started"),
+        }
+        .to_string()
+    };
+    // 2. A CLEAR that fails would count this sample on top of the last one's
+    // spectrum: say so and go no further.
+    if let Err(error) = mcb.clear() {
+        return status(not_started(
+            &format!("presets set for {}", job.id),
+            "CLEAR",
+            error,
+        ));
+    }
+    // 3. START, which succeeds only when the detector says it counts.
     if let Err(error) = mcb.start() {
-        return vec![Action::Status(error.to_string())];
+        return status(not_started(
+            &format!("presets set for {}, spectrum cleared", job.id),
+            "START",
+            error,
+        ));
     }
+    let number = mcb.identity().number;
+    let watch = mantaray_device::CountWatch::started(&*mcb);
     app.queue.begin_current();
+    app.batch_count = Some(BatchCount {
+        detector: number,
+        watch,
+    });
     app.sample.description = format!("{} ({})", job.id, job.description);
     vec![Action::Status(format!(
         "counting {} with {}",
@@ -172,10 +258,134 @@ pub fn run_next_sample(app: &mut App) -> Vec<Action> {
     ))]
 }
 
-/// Finishes the sample being counted and advances the changer.
+/// Finishes the sample being counted and advances the changer, if any.
 pub fn finish_current_sample(app: &mut App) {
     app.queue.complete_current();
-    app.changer.request_change();
+    app.batch_count = None;
+    if let Some(changer) = &mut app.changer {
+        changer.request_change();
+    }
+}
+
+/// The queued sample being counted: which detector, and the watch on its
+/// count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BatchCount {
+    /// The detector's number (its identity, not its place in the list).
+    pub detector: u16,
+    /// The count's end, judged on readings taken after its START.
+    pub watch: mantaray_device::CountWatch,
+}
+
+/// Rule 10: watches the queued sample's count for its end, from the
+/// readings ([`mantaray_device::CountWatch`], the same rule a job's WAIT
+/// uses). When a reading taken after the START says idle, a reached preset -
+/// one this program stopped it at, or one the instrument stopped itself on,
+/// judged as the instrument judges its own clock ([`mantaray_device::Presets::ended_on`]) -
+/// completes the sample and the changer moves; anything else (the
+/// operator's Stop, another client's, a START that never counted) ends it
+/// early, and the sample stays first in the queue to be counted again from
+/// the start or skipped. Readings that stay unbelievable end it early too,
+/// with the reason, rather than leaving it counting forever.
+pub fn watch_batch(app: &mut App) {
+    let Some(mut count) = app.batch_count else {
+        return;
+    };
+    let Some(job) = app.queue.current().cloned() else {
+        app.batch_count = None;
+        return;
+    };
+    if job.state != JobState::Counting {
+        app.batch_count = None;
+        return;
+    }
+    let Some(mcb) = app
+        .detectors
+        .iter()
+        .find(|detector| detector.identity().number == count.detector)
+    else {
+        stopped_early(app, &job.id, "its detector is gone");
+        return;
+    };
+    match count.watch.check(mcb) {
+        mantaray_device::CountState::Counting => {
+            app.batch_count = Some(count);
+            return;
+        }
+        mantaray_device::CountState::Unreadable(reason) => {
+            stopped_early(
+                app,
+                &job.id,
+                &format!("whether the detector counts cannot be told: {reason}"),
+            );
+            return;
+        }
+        mantaray_device::CountState::NeverStarted => {
+            stopped_early(
+                app,
+                &job.id,
+                "the detector accepted START but did not count",
+            );
+            return;
+        }
+        mantaray_device::CountState::Over => {}
+    }
+    let status = mcb.status();
+    let Some(kind) = mcb
+        .presets()
+        .ended_on(mcb.spectrum(), status.real_time, status.live_time)
+    else {
+        stopped_early(app, &job.id, "it stopped before a preset was reached");
+        return;
+    };
+    let number = count.detector;
+    finish_current_sample(app);
+    app.status = format!(
+        "Detector {number} stopped: {} preset reached - sample complete ({}), {} left in the queue{}",
+        kind.label(),
+        job.id,
+        app.queue.remaining(),
+        if app.changer.is_none() && app.queue.remaining() > 0 {
+            "; change the sample by hand"
+        } else {
+            ""
+        }
+    );
+}
+
+/// A count that ended before its preset: the sample waits again at the head
+/// of the queue.
+fn stopped_early(app: &mut App, id: &str, why: &str) {
+    if let Some(job) = app.queue.current_mut() {
+        job.state = JobState::Pending;
+    }
+    app.batch_count = None;
+    app.status = format!(
+        "sample {id} stopped early ({why}); it stays first in the queue - \
+         Run next sample counts it again from the start, or Skip sample moves past it"
+    );
+}
+
+/// Moves past the waiting sample at the head of the queue, marking it
+/// skipped. A sample that is counting is not skipped: stop it first.
+pub fn skip_sample(app: &mut App) -> Vec<Action> {
+    let status = |text: String| vec![Action::Status(text)];
+    let Some(job) = app.queue.current().cloned() else {
+        return status("the queue is empty".into());
+    };
+    if job.state != JobState::Pending {
+        return status(format!("sample {} is counting; stop it first", job.id));
+    }
+    app.queue.fail_current("skipped by the operator");
+    status(format!("sample {} skipped", job.id))
+}
+
+/// The refusal for a changer command when there is no changer.
+fn no_changer(command: &str) -> JobError {
+    JobError::host(format!(
+        "{command}: no sample changer is connected - change the sample by hand, \
+         or run this job from a build that has one"
+    ))
 }
 
 fn device(error: mantaray_device::DeviceError) -> JobError {
@@ -191,6 +401,23 @@ impl App {
         } else {
             self.job_directory.join(candidate)
         }
+    }
+
+    /// Reads, changes and applies the job detector's presets through the one
+    /// road every preset edit takes, so they reach the instrument: editing
+    /// the mirror alone (`presets_mut`) would never arrive at a network
+    /// instrument and would bypass the lock and the counting rules.
+    fn change_presets(
+        &mut self,
+        change: impl FnOnce(&mut mantaray_device::Presets),
+    ) -> Result<(), JobError> {
+        let Some(detector) = self.job_detector() else {
+            return Err(JobError::host("no detector is configured"));
+        };
+        let mcb = &mut self.detectors[detector];
+        let mut presets = *mcb.presets();
+        change(&mut presets);
+        mcb.apply_presets(presets).map_err(device)
     }
 }
 
@@ -231,7 +458,19 @@ impl JobHost for App {
     }
 
     fn start(&mut self) -> Result<(), JobError> {
-        self.apply_action(Action::Start);
+        // On the job's detector, and a refusal stops the job, as on the
+        // command line: a job that went on to WAIT and SAVE after a START
+        // that never happened would save an empty count as a measurement.
+        let Some(detector) = self.job_detector() else {
+            return Err(JobError::host("START: there is no detector"));
+        };
+        let mcb = &mut self.detectors[detector];
+        mcb.start().map_err(device)?;
+        self.job_count = Some((
+            mcb.identity().number,
+            mantaray_device::CountWatch::started(&*mcb),
+        ));
+        self.status = "acquisition started".into();
         Ok(())
     }
 
@@ -259,10 +498,24 @@ impl JobHost for App {
                 advance(&mut self.detectors[detector], 1.0).map_err(device)?;
                 guard += 1;
             }
-        } else if self.detectors[detector].is_active() {
+        } else {
             // A real instrument stops itself in real time; the job waits a
             // frame at a time, so the interface stays alive for the count.
-            self.job_wait = Some(JobWait::Stop);
+            // It waits for a reading taken after this point even when the
+            // mirror reads idle: right after an accepted START no reading has
+            // yet said it counts. The watch the job's START began is used
+            // when there is one for this detector, so a START that never
+            // counts is told from a count that is over.
+            let mcb = &self.detectors[detector];
+            let number = mcb.identity().number;
+            let watch = match self.job_count.take() {
+                Some((started, watch)) if started == number => watch,
+                _ => mantaray_device::CountWatch::begin(mcb),
+            };
+            self.job_wait = Some(JobWait::Stop {
+                detector: number,
+                watch,
+            });
         }
         Ok(())
     }
@@ -291,8 +544,12 @@ impl JobHost for App {
     }
 
     fn wait_changer(&mut self) -> Result<(), JobError> {
+        let changer = self
+            .changer
+            .as_mut()
+            .ok_or_else(|| no_changer("WAIT_CHANGER"))?;
         let mut guard = 0;
-        while !self.changer.poll(1.0) && guard < 1_000 {
+        while !changer.poll(1.0) && guard < 1_000 {
             guard += 1;
         }
         Ok(())
@@ -569,19 +826,19 @@ impl JobHost for App {
     }
 
     fn set_preset_real(&mut self, seconds: f64) -> Result<(), JobError> {
-        self.with_job_detector(|mcb| mcb.presets_mut().real_time = Some(seconds))
+        self.change_presets(|presets| presets.set_real_time(seconds))
     }
 
     fn set_preset_live(&mut self, seconds: f64) -> Result<(), JobError> {
-        self.with_job_detector(|mcb| mcb.presets_mut().live_time = Some(seconds))
+        self.change_presets(|presets| presets.set_live_time(seconds))
     }
 
     fn set_preset_peak(&mut self, counts: u64) -> Result<(), JobError> {
-        self.with_job_detector(|mcb| mcb.presets_mut().roi_peak = Some(counts))
+        self.change_presets(|presets| presets.set_roi_peak(counts))
     }
 
     fn set_preset_integral(&mut self, counts: u64) -> Result<(), JobError> {
-        self.with_job_detector(|mcb| mcb.presets_mut().roi_integral = Some(counts))
+        self.change_presets(|presets| presets.set_roi_integral(counts))
     }
 
     fn set_preset_uncertainty(
@@ -590,17 +847,17 @@ impl JobHost for App {
         low: usize,
         high: usize,
     ) -> Result<(), JobError> {
-        self.with_job_detector(|mcb| {
-            mcb.presets_mut().uncertainty = Some(mantaray_device::UncertaintyPreset {
-                limit_percent: limit,
-                low_channel: low,
-                high_channel: high,
-            })
-        })
+        self.change_presets(|presets| presets.set_uncertainty(limit, low, high))
     }
 
     fn clear_presets(&mut self) -> Result<(), JobError> {
-        self.with_job_detector(|mcb| mcb.presets_mut().clear())
+        // Explicit: always sent, like the command line's.
+        let Some(detector) = self.job_detector() else {
+            return Err(JobError::host("no detector is configured"));
+        };
+        self.detectors[detector]
+            .set_presets(mantaray_device::Presets::default())
+            .map_err(device)
     }
 
     fn set_list_mode(&mut self, list: bool) -> Result<(), JobError> {
@@ -688,9 +945,13 @@ impl JobHost for App {
     }
 
     fn change_sample(&mut self) -> Result<(), JobError> {
-        self.changer.request_change();
+        let changer = self
+            .changer
+            .as_mut()
+            .ok_or_else(|| no_changer("CHANGE_SAMPLE"))?;
+        changer.request_change();
         let mut guard = 0;
-        while !self.changer.poll(1.0) && guard < 1_000 {
+        while !changer.poll(1.0) && guard < 1_000 {
             guard += 1;
         }
         Ok(())

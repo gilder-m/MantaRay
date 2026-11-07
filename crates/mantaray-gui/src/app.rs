@@ -912,8 +912,19 @@ pub struct App {
     pub alarms: AlarmMonitor,
     /// Batch queue.
     pub queue: SampleQueue,
-    /// Simulated sample changer.
-    pub changer: SampleChanger,
+    /// Sample changer, when there is one.
+    ///
+    /// Only a simulator build has one: no real changer is driven yet, and the
+    /// simulated one answered CHANGE_SAMPLE at once in shipped builds, so a
+    /// batch could count one sample over and over believing the rack moved.
+    pub changer: Option<SampleChanger>,
+    /// The queued sample being counted, and on which detector (by number,
+    /// not by list position): watched each frame for the count's end.
+    pub batch_count: Option<crate::jobs::BatchCount>,
+    /// Detectors (by number) whose unbelievable reading has already been
+    /// said in the status line: it is said once when it begins, not every
+    /// frame over whatever the operator was told since.
+    untrusted_said: std::collections::BTreeSet<u16>,
     /// Quality-assurance charts.
     pub qa: Vec<QaChart>,
     /// The last analysis.
@@ -924,6 +935,9 @@ pub struct App {
     pub job: Option<crate::jobs::JobRun>,
     /// A wait the job is in, checked once per frame instead of blocking one.
     pub job_wait: Option<crate::jobs::JobWait>,
+    /// The count a job's START began (detector number and the watch on it),
+    /// for the WAIT that follows.
+    pub job_count: Option<(u16, mantaray_device::CountWatch)>,
     /// Variables a job can read.
     pub job_variables: mantaray_jobs::JobVariables,
     /// Directory a job's relative file names resolve against.
@@ -1162,12 +1176,15 @@ impl App {
             sample: SampleInfo::default(),
             alarms: AlarmMonitor::default(),
             queue: SampleQueue::default(),
-            changer: SampleChanger::new(8),
+            changer: cfg!(feature = "simulator").then(|| SampleChanger::new(8)),
+            batch_count: None,
+            untrusted_said: std::collections::BTreeSet::new(),
             qa: Vec::new(),
             analysis: None,
             report_text: None,
             job: None,
             job_wait: None,
+            job_count: None,
             job_variables: mantaray_jobs::JobVariables::new(),
             job_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             strip_name: None,
@@ -1816,24 +1833,48 @@ impl App {
         }
         for (number, kind) in stopped {
             self.status = format!("Detector {number} stopped: {} preset reached", kind.label());
-            // A queued sample that was counting is finished, and the changer
-            // moves on, so a batch runs unattended.
-            if self
-                .queue
-                .current()
-                .is_some_and(|job| job.state == mantaray_device::JobState::Counting)
-            {
-                crate::jobs::finish_current_sample(self);
-                self.status = format!(
-                    "{self_status} - sample complete, {} left in the queue",
-                    self.queue.remaining(),
-                    self_status = self.status
-                );
+        }
+        // A reading that is not believed is said once, when it begins: the
+        // display shows the last good one meanwhile. Said every frame, it
+        // buried whatever the operator was told after it (a refusal, a
+        // sample complete) for as long as it lasted (review of 21df1c3, #8).
+        for detector in &self.detectors {
+            let number = detector.identity().number;
+            match detector.reading_untrusted() {
+                Some(reason) => {
+                    if self.untrusted_said.insert(number) {
+                        self.status = format!(
+                            "Detector {number}: {reason}; showing the last good reading, and \
+                             changes are refused"
+                        );
+                    }
+                }
+                None => {
+                    self.untrusted_said.remove(&number);
+                }
             }
         }
+        // A draft of presets is not kept over a count (device-spec 2.8): the
+        // form shows what the detector holds while it counts, and a draft
+        // brought back afterwards could be stale - another client may have
+        // changed the presets meanwhile, and Apply would push the old draft
+        // (review of 21df1c3, #9).
+        for detector in &self.detectors {
+            if detector.is_active() {
+                self.dialogs
+                    .presets_edit
+                    .remove(&detector.identity().number);
+            }
+        }
+        // A queued sample's count ends however it ends - stopped here at a
+        // host-side preset, by the instrument on its own preset, or by the
+        // operator - and the readings say which.
+        crate::jobs::watch_batch(self);
         // Keep the changer moving.
-        if !self.changer.is_ready() {
-            self.changer.poll(elapsed);
+        if let Some(changer) = &mut self.changer
+            && !changer.is_ready()
+        {
+            changer.poll(elapsed);
         }
         // Watch the detectors against the alarm limits.
         for detector in &self.detectors {
@@ -1925,11 +1966,13 @@ impl App {
                 },
                 None => self.status = "select a detector window to start a count".into(),
             },
+            // "stopped" only when the detector says it stopped; a refusal
+            // (locked, or it still counts) is shown as it is.
             Action::Stop => match self.active_detector() {
-                Some(detector) => {
-                    let _ = detector.stop();
-                    self.status = "acquisition stopped".into();
-                }
+                Some(detector) => match detector.stop() {
+                    Ok(()) => self.status = "acquisition stopped".into(),
+                    Err(error) => self.status = error.to_string(),
+                },
                 None => self.status = "select a detector window to stop a count".into(),
             },
             Action::Clear => self.clear_active(),
@@ -3404,20 +3447,6 @@ impl App {
         (!self.detectors.is_empty()).then_some(0)
     }
 
-    /// Edits the job's detector, reporting when there is none.
-    pub(crate) fn with_job_detector(
-        &mut self,
-        edit: impl FnOnce(&mut AnyMcb),
-    ) -> Result<(), mantaray_jobs::JobError> {
-        match self.job_detector() {
-            Some(detector) => {
-                edit(&mut self.detectors[detector]);
-                Ok(())
-            }
-            None => Err(mantaray_jobs::JobError::host("no detector is configured")),
-        }
-    }
-
     /// Saves the active spectrum to a path, for jobs.
     pub fn save_active_to(&mut self, path: &std::path::Path) -> Result<(), String> {
         let Some(index) = self.active else {
@@ -3876,6 +3905,9 @@ impl App {
         }
         self.detectors.remove(index);
         self.detector_list.remove(number);
+        // Its pending edits go with it: the number can be given to another
+        // instrument later, and an edit left behind would be waiting for that.
+        self.dialogs.forget_detector(number);
         self.status = format!("Detector {number} removed");
     }
 

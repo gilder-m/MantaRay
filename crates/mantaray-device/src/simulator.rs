@@ -22,8 +22,8 @@ use mantaray_formats::ListModeFile;
 
 use crate::error::DeviceError;
 use crate::mcb::{
-    AdcSettings, AmplifierSettings, Capabilities, HighVoltageSettings, Mcb, McbIdentity,
-    McbProperties, McbStatus, StabilizerSettings,
+    AdcSettings, Admitted, AmplifierSettings, Capabilities, HighVoltageSettings, Mcb, McbIdentity,
+    McbProperties, McbStatus, StabilizerSettings, differs, plain_zero,
 };
 use crate::presets::Presets;
 use crate::rng::Rng;
@@ -202,6 +202,7 @@ impl SimulatedMcbBuilder {
             // Each simulated preamp has its own right answer, so Optimize has
             // something real to find.
             true_pole_zero: 1600 + (self.seed % 800) as u16,
+            readings: 0,
         }
     }
 }
@@ -249,6 +250,9 @@ pub struct SimulatedMcb {
     tuning: Tuning,
     /// Where the pole zero belongs for this detector's (simulated) preamp.
     true_pole_zero: u16,
+    /// Polls so far: each is a reading of a status that is always current
+    /// ([`Mcb::readings`]).
+    readings: u64,
 }
 
 /// The automatic tuning routines an instrument can be running.
@@ -316,24 +320,24 @@ impl SimulatedMcb {
         self.sample_ready = ready;
     }
 
-    fn ensure_unlocked(&self) -> Result<(), DeviceError> {
-        match &self.lock {
-            Some((_, owner)) => Err(DeviceError::Locked {
-                owner: owner.clone(),
-            }),
-            None => Ok(()),
+    /// Erases the data and clocks (CLEAR, and the clear after a store).
+    fn wipe(&mut self) {
+        self.raw.clear();
+        self.corrected.clear();
+        self.error.clear();
+        self.real_time = 0.0;
+        self.live_time = 0.0;
+        self.stored_counts = 0;
+        if let Some(list) = &mut self.list {
+            // Clearing empties the events, not the identity: the description
+            // and calibration set_mode gave the file must survive, as they do
+            // on the histogram side.
+            let mut fresh = ListModeFile::new(list.channel_count);
+            fresh.detector_id = self.identity.number;
+            fresh.detector_description = self.identity.description.clone();
+            fresh.energy_calibration = self.raw.energy_calibration.clone();
+            self.list = Some(fresh);
         }
-    }
-
-    /// What every road to the presets must check: unlocked, and not counting.
-    fn presets_busy_check(&self, command: &str) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
-        if self.active {
-            return Err(DeviceError::Busy {
-                detail: format!("{command}: presets cannot be changed while counting"),
-            });
-        }
-        Ok(())
     }
 
     fn dead_fraction(&self) -> f64 {
@@ -412,8 +416,30 @@ impl Mcb for SimulatedMcb {
         &self.properties
     }
 
-    fn set_properties(&mut self, properties: McbProperties) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
+    fn do_set_properties(
+        &mut self,
+        properties: McbProperties,
+        _admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        // The gate has checked the lock, and `set_properties` that the
+        // presets are the ones held: this is the settings alone.
+        let mut properties = properties;
+        properties.amplifier.coarse_gain = plain_zero(properties.amplifier.coarse_gain);
+        properties.high_voltage.target_volts = plain_zero(properties.high_voltage.target_volts);
+        // What a network instrument refuses, so a test against this one means
+        // something for that one: the values that changed, and only those.
+        if differs(
+            properties.amplifier.coarse_gain,
+            self.properties.amplifier.coarse_gain,
+        ) {
+            AmplifierSettings::check_coarse_gain(properties.amplifier.coarse_gain)?;
+        }
+        if differs(
+            properties.high_voltage.target_volts,
+            self.properties.high_voltage.target_volts,
+        ) {
+            HighVoltageSettings::check_target(properties.high_voltage.target_volts)?;
+        }
         if properties.adc.conversion_gain > self.identity.channels {
             return Err(DeviceError::OutOfRange {
                 setting: "conversion gain".into(),
@@ -429,11 +455,6 @@ impl Mcb for SimulatedMcb {
                 detail: "at least 64 channels are needed".into(),
             });
         }
-        if self.active && properties.presets != self.properties.presets {
-            return Err(DeviceError::Busy {
-                detail: "presets cannot be changed while counting".into(),
-            });
-        }
         let resize = properties.adc.conversion_gain != self.properties.adc.conversion_gain;
         let gain = properties.adc.conversion_gain;
         self.properties = properties;
@@ -443,23 +464,40 @@ impl Mcb for SimulatedMcb {
         Ok(())
     }
 
-    fn presets_mut(&mut self) -> &mut Presets {
-        &mut self.properties.presets
-    }
-
-    fn set_presets(&mut self, presets: Presets) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
-        if self.active {
-            return Err(DeviceError::Busy {
-                detail: "presets cannot be changed while counting".into(),
-            });
-        }
+    fn do_write_presets(
+        &mut self,
+        presets: Presets,
+        _admitted: Admitted,
+    ) -> Result<(), DeviceError> {
         self.properties.presets = presets;
         Ok(())
     }
 
-    fn start(&mut self) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
+    fn do_store_host_presets(
+        &mut self,
+        presets: Presets,
+        _admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        self.properties.presets.uncertainty = presets.uncertainty;
+        self.properties.presets.mda = presets.mda;
+        Ok(())
+    }
+
+    fn read_counting(&mut self) -> Result<bool, DeviceError> {
+        // The simulator's state is its own: there is nothing behind it to ask.
+        Ok(self.active)
+    }
+
+    fn ensure_unlocked(&self) -> Result<(), DeviceError> {
+        match &self.lock {
+            Some((_, owner)) => Err(DeviceError::Locked {
+                owner: owner.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn do_start(&mut self, _admitted: Admitted) -> Result<(), DeviceError> {
         self.active = true;
         if self.raw.start_time.is_none() {
             self.raw.start_time = Some(chrono::Local::now().naive_local());
@@ -469,30 +507,13 @@ impl Mcb for SimulatedMcb {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
+    fn do_stop(&mut self, _admitted: Admitted) -> Result<(), DeviceError> {
         self.active = false;
         Ok(())
     }
 
-    fn clear(&mut self) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
-        self.raw.clear();
-        self.corrected.clear();
-        self.error.clear();
-        self.real_time = 0.0;
-        self.live_time = 0.0;
-        self.stored_counts = 0;
-        if let Some(list) = &mut self.list {
-            // Clearing empties the events, not the identity: the description
-            // and calibration set_mode gave the file must survive, as they do
-            // on the histogram side.
-            let mut fresh = ListModeFile::new(list.channel_count);
-            fresh.detector_id = self.identity.number;
-            fresh.detector_description = self.identity.description.clone();
-            fresh.energy_calibration = self.raw.energy_calibration.clone();
-            self.list = Some(fresh);
-        }
+    fn do_clear(&mut self, _admitted: Admitted) -> Result<(), DeviceError> {
+        self.wipe();
         Ok(())
     }
 
@@ -535,6 +556,7 @@ impl Mcb for SimulatedMcb {
     }
 
     fn poll(&mut self, elapsed_seconds: f64) -> Result<(), DeviceError> {
+        self.readings += 1;
         // The tuning routines run on the instrument's clock whether or not it
         // is counting.
         if elapsed_seconds > 0.0 {
@@ -660,8 +682,11 @@ impl Mcb for SimulatedMcb {
         Ok(())
     }
 
-    fn set_mode(&mut self, mode: AcquisitionMode) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
+    fn do_set_mode(
+        &mut self,
+        mode: AcquisitionMode,
+        _admitted: Admitted,
+    ) -> Result<(), DeviceError> {
         match mode {
             AcquisitionMode::List if !self.identity.capabilities.list_mode => {
                 return Err(DeviceError::NotSupported {
@@ -712,8 +737,7 @@ impl Mcb for SimulatedMcb {
         matches!(self.mode, AcquisitionMode::Zdt | AcquisitionMode::Ltc).then_some(&self.error)
     }
 
-    fn start_optimize(&mut self) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
+    fn do_start_optimize(&mut self, _admitted: Admitted) -> Result<(), DeviceError> {
         if self.active {
             return Err(DeviceError::Busy {
                 detail: "stop the acquisition before optimising".into(),
@@ -729,8 +753,11 @@ impl Mcb for SimulatedMcb {
         matches!(self.tuning, Tuning::Optimize { .. })
     }
 
-    fn set_pole_zero_running(&mut self, run: bool) -> Result<(), DeviceError> {
-        self.ensure_unlocked()?;
+    fn do_set_pole_zero_running(
+        &mut self,
+        run: bool,
+        _admitted: Admitted,
+    ) -> Result<(), DeviceError> {
         if run {
             if self.active {
                 return Err(DeviceError::Busy {
@@ -762,28 +789,33 @@ impl Mcb for SimulatedMcb {
         self.stored.get(index)
     }
 
-    fn store_spectrum(&mut self) -> Result<usize, DeviceError> {
+    fn do_store_spectrum(&mut self, _admitted: Admitted) -> Result<usize, DeviceError> {
         if self.is_active() {
             return Err(DeviceError::Busy {
                 detail: "stop the acquisition before storing".into(),
             });
         }
-        // The clear at the end refuses a locked instrument; refusing here
-        // keeps store-and-clear one action, not a store that half happened.
-        self.ensure_unlocked()?;
         let mut snapshot = self.spectrum().clone();
         snapshot.real_time = self.real_time;
         snapshot.live_time = self.live_time;
         self.stored.push(snapshot);
-        self.clear()?;
+        self.wipe();
         Ok(self.stored.len())
     }
 
-    fn erase_stored(&mut self) {
+    fn do_erase_stored(&mut self, _admitted: Admitted) -> Result<(), DeviceError> {
         self.stored.clear();
+        Ok(())
     }
 
-    fn send_message(&mut self, command: &str) -> Result<String, DeviceError> {
+    fn do_send_message(
+        &mut self,
+        command: &str,
+        admitted: Admitted,
+    ) -> Result<String, DeviceError> {
+        // The gate has checked the lock for anything but a read. Each verb
+        // that changes something is the simulator's own `do_*`, given the
+        // token this command was admitted with.
         let trimmed = command.trim();
         let (verb, argument) = match trimmed.split_once(char::is_whitespace) {
             Some((verb, rest)) => (verb.to_ascii_uppercase(), rest.trim().to_string()),
@@ -840,16 +872,20 @@ impl Mcb for SimulatedMcb {
                 }
                 Ok(line)
             }
-            "START" => self.start().map(|_| "OK".to_string()),
-            "STOP" => self.stop().map(|_| "OK".to_string()),
-            "CLEAR" => self.clear().map(|_| "OK".to_string()),
+            "START" => self.do_start(admitted).map(|_| "OK".to_string()),
+            "STOP" => self.do_stop(admitted).map(|_| "OK".to_string()),
+            "CLEAR" => self.do_clear(admitted).map(|_| "OK".to_string()),
             "STORE" => self
-                .store_spectrum()
+                .do_store_spectrum(admitted)
                 .map(|count| format!("OK {count} stored")),
             "SHOW_STORED" => Ok(format!("STORED={}", self.stored.len())),
-            "START_OPTIMIZE" => self.start_optimize().map(|_| "OK".to_string()),
-            "START_PZ" => self.set_pole_zero_running(true).map(|_| "OK".to_string()),
-            "STOP_PZ" => self.set_pole_zero_running(false).map(|_| "OK".to_string()),
+            "START_OPTIMIZE" => self.do_start_optimize(admitted).map(|_| "OK".to_string()),
+            "START_PZ" => self
+                .do_set_pole_zero_running(true, admitted)
+                .map(|_| "OK".to_string()),
+            "STOP_PZ" => self
+                .do_set_pole_zero_running(false, admitted)
+                .map(|_| "OK".to_string()),
             "SHOW_PZ" => Ok(format!(
                 "PZ={} RUNNING={}",
                 self.properties.amplifier.pole_zero,
@@ -857,42 +893,17 @@ impl Mcb for SimulatedMcb {
             )),
             "SET_GAIN_FINE" => {
                 // Real units take 0..4095 across the fine-gain range.
-                self.ensure_unlocked()?;
                 self.properties.amplifier.fine_gain = number()? / 4096.0;
                 Ok("OK".to_string())
             }
             "SET_GAIN_COARSE" => {
-                self.ensure_unlocked()?;
-                self.properties.amplifier.coarse_gain = number()?;
+                let gain = number()?;
+                AmplifierSettings::check_coarse_gain(gain)?;
+                self.properties.amplifier.coarse_gain = plain_zero(gain);
                 Ok("OK".to_string())
             }
-            // Through `presets_busy_check`, so the wire cannot do what
-            // `set_presets` refuses: changing presets mid-count.
-            "SET_PRESET_REAL" => {
-                self.presets_busy_check(trimmed)?;
-                self.properties.presets.real_time = Some(number()?);
-                Ok("OK".to_string())
-            }
-            "SET_PRESET_LIVE" => {
-                self.presets_busy_check(trimmed)?;
-                self.properties.presets.live_time = Some(number()?);
-                Ok("OK".to_string())
-            }
-            "SET_PRESET_COUNT" => {
-                self.presets_busy_check(trimmed)?;
-                self.properties.presets.roi_peak = Some(number()? as u64);
-                Ok("OK".to_string())
-            }
-            "SET_PRESET_INTEG" | "SET_PRESET_INTEGRAL" => {
-                self.presets_busy_check(trimmed)?;
-                self.properties.presets.roi_integral = Some(number()? as u64);
-                Ok("OK".to_string())
-            }
-            "SET_PRESET_CLEAR" => {
-                self.presets_busy_check(trimmed)?;
-                self.properties.presets.clear();
-                Ok("OK".to_string())
-            }
+            // SET_PRESET_* never arrives here: the gate refuses a raw preset
+            // command (presets go through the preset rules).
             "SET_OUTPUT_HIGH" => {
                 self.output_high = true;
                 Ok("OK".to_string())
@@ -902,8 +913,9 @@ impl Mcb for SimulatedMcb {
                 Ok("OK".to_string())
             }
             "SET_HV" => {
-                self.ensure_unlocked()?;
-                self.properties.high_voltage.target_volts = number()?;
+                let volts = number()?;
+                HighVoltageSettings::check_target(volts)?;
+                self.properties.high_voltage.target_volts = plain_zero(volts);
                 Ok("OK".to_string())
             }
             other => Err(DeviceError::Command {
@@ -934,6 +946,10 @@ impl Mcb for SimulatedMcb {
 
     fn is_locked(&self) -> bool {
         self.lock.is_some()
+    }
+
+    fn readings(&self) -> u64 {
+        self.readings
     }
 }
 
@@ -978,5 +994,32 @@ mod tests {
             );
         }
         assert!(mcb.sample_channel(0.0).is_none());
+    }
+
+    #[test]
+    fn a_strange_value_the_settings_already_hold_does_not_block_an_unrelated_edit() {
+        // The settings can come to hold a gain or bias that cannot be sent
+        // from here (an older state, a readback). Editing the rise time must
+        // not be refused for it; changing that value to another strange one
+        // still is.
+        let mut mcb = SimulatedMcb::new(1, "t");
+        mcb.properties.amplifier.coarse_gain = 20.4;
+        mcb.properties.high_voltage.target_volts = f64::NAN;
+        let mut properties = mcb.properties().clone();
+        properties.amplifier.rise_time_us = 4.0;
+        mcb.set_properties(properties).expect("an unrelated edit");
+        assert_eq!(mcb.properties().amplifier.rise_time_us, 4.0);
+        assert_eq!(mcb.properties().amplifier.coarse_gain, 20.4);
+        assert!(mcb.properties().high_voltage.target_volts.is_nan());
+
+        let mut properties = mcb.properties().clone();
+        properties.amplifier.coarse_gain = 20.5;
+        assert!(mcb.set_properties(properties).is_err());
+        let mut properties = mcb.properties().clone();
+        properties.high_voltage.target_volts = 1500.5;
+        assert!(mcb.set_properties(properties).is_err());
+        // What is applied is always checked, whatever the settings hold.
+        assert!(mcb.set_coarse_gain(20.4).is_err());
+        assert!(mcb.set_high_voltage(f64::NAN).is_err());
     }
 }

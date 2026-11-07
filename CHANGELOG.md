@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+**Instrument control, built against an end-to-end rig (2026-11-07).** Every
+command that changes a detector goes through one gate: locked first, then
+(presets only) whether it is counting, asked of the detector right then, then
+the values. Presets cannot change while a detector counts, as in MAESTRO
+("Presets can't be changed during acquisition."), and a status that cannot be
+read refuses the change instead of guessing idle. Zero disables a preset;
+negative, infinite, sub-tick (< 0.02 s) and fractional-count presets are
+refused by name. START is refused before it is sent when a held preset is
+already reached ("Preset already reached"); STOP succeeds only when the
+detector says it stopped (ten reads, 100 ms apart), and an idle detector that
+answers STOP with ERR is already stopped. Run next sample never stops a count
+("stop it first"), stops at the step that failed and says which steps were
+done, and a sample stopped by the operator stays at the head of the queue. A
+job's WAIT and the batch queue judge a count's end on readings taken after its
+START, so a WAIT on an idle detector returns at once, a START the detector
+accepted but did not count is reported, and readings that stay unreadable end
+the wait with the reason. **Instrument commands:** a SHOW_STATUS now precedes
+every preset change and every START; a STOP is followed by status reads until
+the detector agrees; settings send SET_HV / SET_GAIN_COARSE only when they
+change and never a preset; a raw SET_PRESET_* (SEND_MESSAGE, `mantaray serve`)
+is a preset change through the same rules; the batch no longer sends STOP.
+The rules are pinned by a scripted rig instrument (test builds only) with
+faults seen on the bench: a reply stream that slips, ACTIVE lagging after
+STOP, ERR replies, odd status lines, front-panel changes and locks.
+
 The analysis, report and file-format fixes of the November audit, without
 the instrument-control changes, which come later. Two of them change what
 other programs read. **CSV:** the results CSV gains a thirteenth column,

@@ -514,13 +514,14 @@ fn a_preset_being_typed_survives_the_next_frame() {
         live_time: Some(0.0),
         ..Default::default()
     };
-    app.dialogs.presets_edit = Some((0, typed));
+    // Kept by the detector's number, 1 for the headless instrument.
+    app.dialogs.presets_edit.insert(1, typed);
 
     for _ in 0..3 {
         frame(&mut app, &ctx, [1400.0, 900.0]);
         assert_eq!(
-            app.dialogs.presets_edit,
-            Some((0, typed)),
+            app.dialogs.presets_edit.get(&1),
+            Some(&typed),
             "the half-finished preset was erased by a redraw"
         );
     }
@@ -528,12 +529,141 @@ fn a_preset_being_typed_survives_the_next_frame() {
     // Applying it is what sends it to the instrument, and ends the edit.
     let applied = mantaray_device::Mcb::set_presets(&mut app.detectors[0], typed);
     assert!(applied.is_ok(), "{applied:?}");
-    app.dialogs.presets_edit = None;
+    app.dialogs.presets_edit.clear();
     frame(&mut app, &ctx, [1400.0, 900.0]);
-    assert_eq!(
-        app.dialogs.presets_edit, None,
+    assert!(
+        app.dialogs.presets_edit.is_empty(),
         "what the instrument already holds is not an unsaved edit"
     );
+}
+
+#[test]
+fn a_bias_being_typed_does_not_reach_the_instrument_until_applied() {
+    // Bias went to the instrument as the field changed: a drag sent every
+    // voltage it crossed, and typing 1500 sent 1, 15 and 150 first.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 3;
+    let applied = mantaray_device::Mcb::properties(&app.detectors[0])
+        .high_voltage
+        .target_volts;
+    app.dialogs.hv_edit.insert(1, applied - 500.0);
+
+    for _ in 0..3 {
+        let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+        assert!(
+            painted_text(&output).contains("not applied yet"),
+            "the tab says the typed target is pending"
+        );
+        assert_eq!(app.dialogs.hv_edit.get(&1), Some(&(applied - 500.0)));
+        assert_eq!(
+            mantaray_device::Mcb::properties(&app.detectors[0])
+                .high_voltage
+                .target_volts,
+            applied,
+            "a target nobody applied reached the instrument"
+        );
+    }
+
+    // Apply is what sends it, and the edit ends there.
+    click_text(&mut app, &ctx, "Apply");
+    assert_eq!(
+        mantaray_device::Mcb::properties(&app.detectors[0])
+            .high_voltage
+            .target_volts,
+        applied - 500.0
+    );
+    assert!(app.dialogs.hv_edit.is_empty());
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(!painted_text(&output).contains("not applied yet"));
+}
+
+#[test]
+fn a_bias_edit_belongs_to_its_detector_and_its_dialog() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 3;
+
+    // Typed for a detector that does not exist: not shown here, not kept.
+    app.dialogs.hv_edit.insert(99, 1200.0);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(!painted_text(&output).contains("not applied yet"));
+    assert!(app.dialogs.hv_edit.is_empty());
+
+    // Closing the dialog drops a pending edit.
+    app.dialogs.hv_edit.insert(1, 1200.0);
+    app.dialogs.set(Dialog::McbProperties, false);
+    assert!(app.dialogs.hv_edit.is_empty());
+}
+
+#[test]
+fn a_constant_efficiency_of_zero_is_refused() {
+    // Zero passed for a curve and reported every nuclide found at 0 Bq.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Efficiency);
+    app.dialogs.efficiency_constant = 0.0;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(app.efficiency, None);
+    assert!(app.status.contains("efficiency of 0"), "{}", app.status);
+
+    app.dialogs.efficiency_constant = 0.05;
+    click_text(&mut app, &ctx, "Use");
+    assert_eq!(
+        app.efficiency,
+        Some(mantaray_core::EfficiencyCalibration::constant(0.05))
+    );
+}
+
+#[test]
+fn the_batch_dialog_says_whether_there_is_a_sample_changer() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.dialogs.open(Dialog::Batch);
+    let with = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(with.contains("changer at position"), "{with}");
+    assert!(with.contains("Change sample"));
+
+    app.changer = None;
+    let without = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(without.contains("no sample changer"), "{without}");
+    assert!(
+        !without.contains("Change sample"),
+        "no button for a changer that is not there"
+    );
+}
+
+/// Clicks the first piece of painted text that reads exactly `text`, then
+/// draws one more frame so whatever the click queued is applied.
+fn click_text(app: &mut App, ctx: &egui::Context, text: &str) {
+    let output = frame(app, ctx, [1400.0, 900.0]);
+    let at = text_rect(&output, text)
+        .unwrap_or_else(|| panic!("no {text:?} on screen"))
+        .center();
+    frame_with_events(
+        app,
+        ctx,
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    frame(app, ctx, [1400.0, 900.0]);
 }
 
 #[test]
@@ -1846,52 +1976,308 @@ fn a_saved_scheme_is_kept_and_comes_back() {
     assert!(persisted.schemes.is_empty());
 }
 
-#[test]
-fn a_constant_efficiency_of_zero_is_refused() {
-    // Zero passed for a curve and reported every nuclide found at 0 Bq.
-    let ctx = egui::Context::default();
-    let mut app = App::headless();
-    app.dialogs.open(Dialog::Efficiency);
-    app.dialogs.efficiency_constant = 0.0;
-    click_text(&mut app, &ctx, "Use");
-    assert_eq!(app.efficiency, None);
-    assert!(app.status.contains("efficiency of 0"), "{}", app.status);
-
-    app.dialogs.efficiency_constant = 0.05;
-    click_text(&mut app, &ctx, "Use");
-    assert_eq!(
-        app.efficiency,
-        Some(mantaray_core::EfficiencyCalibration::constant(0.05))
-    );
-}
-
-/// Clicks the first piece of painted text that reads exactly `text`, then
-/// draws one more frame so whatever the click queued is applied.
-fn click_text(app: &mut App, ctx: &egui::Context, text: &str) {
+/// Types `typed` into the field that now reads `shown`, and presses Enter.
+fn type_into_field(app: &mut App, ctx: &egui::Context, shown: &str, typed: &str) {
     let output = frame(app, ctx, [1400.0, 900.0]);
-    let at = text_rect(&output, text)
-        .unwrap_or_else(|| panic!("no {text:?} on screen"))
+    let at = text_rect(&output, shown)
+        .unwrap_or_else(|| panic!("no field reading {shown:?} on screen"))
         .center();
+    type_into(app, ctx, [1400.0, 900.0], at, typed);
     frame_with_events(
         app,
         ctx,
-        vec![
-            egui::Event::PointerMoved(at),
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::default(),
-            },
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::default(),
-            },
-        ],
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
     );
     frame(app, ctx, [1400.0, 900.0]);
+}
+
+#[test]
+fn a_coarse_gain_typed_into_the_field_does_not_reach_the_instrument_until_applied() {
+    // The coarse gain went to the instrument as the field changed: typing 40
+    // sent 4 and then 40, and a drag from 20 to 40 every gain it crossed. This
+    // drives the real field, the way a hand does, rather than seeding the edit.
+    let ctx = still_context();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 0;
+    let gain = || {
+        |app: &App| {
+            mantaray_device::Mcb::properties(&app.detectors[0])
+                .amplifier
+                .coarse_gain
+        }
+    };
+    let applied = gain()(&app);
+    assert_eq!(applied, 20.0, "the field reads 20 to start with");
+    type_into_field(&mut app, &ctx, "20", "40");
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(
+        painted_text(&output).contains("not applied yet"),
+        "the tab says the typed gain is pending"
+    );
+    assert_eq!(app.dialogs.coarse_edit.get(&1), Some(&40.0));
+    assert_eq!(
+        gain()(&app),
+        applied,
+        "a gain nobody applied reached the instrument"
+    );
+
+    // Apply is what sends it, and the edit ends there.
+    click_text(&mut app, &ctx, "Apply");
+    assert_eq!(gain()(&app), 40.0);
+    assert!(app.dialogs.coarse_edit.is_empty());
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(!painted_text(&output).contains("not applied yet"));
+}
+
+#[test]
+fn a_pending_edit_survives_a_switch_to_another_detector_and_back() {
+    let ctx = still_context();
+    let mut app = App::headless();
+    app.detectors
+        .push(mantaray_device::SimulatedMcb::new(2, "SIM-02").into());
+    app.apply_action(Action::OpenDetector(0));
+    app.apply_action(Action::OpenDetector(1));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 0;
+    let windows_for = |app: &App, detector: usize| {
+        app.windows
+            .iter()
+            .position(
+                |w| matches!(w.target, mantaray_gui::app::Target::Detector(d) if d == detector),
+            )
+            .expect("a window for the detector")
+    };
+    app.active = Some(windows_for(&app, 0));
+    app.dialogs.coarse_edit.insert(1, 64.0);
+    app.dialogs.hv_edit.insert(1, 1200.0);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(painted_text(&output).contains("not applied yet"));
+
+    // The other detector has no edit of its own: nothing pending there, and
+    // looking at it does not throw detector 0's away.
+    app.active = Some(windows_for(&app, 1));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(!painted_text(&output).contains("not applied yet"));
+    assert_eq!(app.dialogs.coarse_edit.get(&1), Some(&64.0));
+    assert_eq!(app.dialogs.hv_edit.get(&1), Some(&1200.0));
+
+    app.active = Some(windows_for(&app, 0));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(painted_text(&output).contains("not applied yet"));
+}
+
+/// The index of the detector window that looks at `detector`.
+fn window_of(app: &App, detector: usize) -> usize {
+    app.windows
+        .iter()
+        .position(|w| matches!(w.target, mantaray_gui::app::Target::Detector(d) if d == detector))
+        .expect("a window for the detector")
+}
+
+fn simulated_entry(number: u16) -> mantaray_device::DetectorEntry {
+    mantaray_device::DetectorEntry {
+        number,
+        name: format!("SIM-{number:02}"),
+        model: "simulated".into(),
+        kind: mantaray_device::DetectorKind::Simulated,
+        channels: 2048,
+        description: String::new(),
+        serial: String::new(),
+    }
+}
+
+#[test]
+fn removing_a_detector_never_moves_a_pending_edit_onto_another_instrument() {
+    // Three instruments, numbers 1, 2 and 3. A coarse gain is typed for the
+    // second and not applied. The first is removed, so the third moves up to
+    // the second's old place in the list. An edit kept by place would now be
+    // waiting on the third instrument.
+    let ctx = still_context();
+    let mut app = App::headless();
+    app.add_detector(simulated_entry(2));
+    app.add_detector(simulated_entry(3));
+    for detector in 0..3 {
+        app.apply_action(Action::OpenDetector(detector));
+    }
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 0;
+    app.active = Some(window_of(&app, 1));
+    type_into_field(&mut app, &ctx, "20", "64");
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(painted_text(&output).contains("not applied yet"));
+
+    app.apply_action(Action::RemoveDetector(0));
+    assert_eq!(app.detectors.len(), 2);
+    assert_eq!(mantaray_device::Mcb::identity(&app.detectors[1]).number, 3);
+    app.dialogs.open(Dialog::McbProperties);
+    app.active = Some(window_of(&app, 1));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(
+        !painted_text(&output).contains("not applied yet"),
+        "instrument 3 shows an edit that was typed for instrument 2"
+    );
+    // Applying what it shows sends its own number, never the stranger's 64.
+    click_text(&mut app, &ctx, "Apply");
+    let gain = |app: &App, index: usize| {
+        mantaray_device::Mcb::properties(&app.detectors[index])
+            .amplifier
+            .coarse_gain
+    };
+    assert_eq!(gain(&app, 1), 20.0);
+    assert_eq!(gain(&app, 0), 20.0, "instrument 2 was never applied");
+    // The edit is still instrument 2's.
+    assert_eq!(app.dialogs.coarse_edit.get(&2), Some(&64.0));
+    app.active = Some(window_of(&app, 0));
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(painted_text(&output).contains("not applied yet"));
+}
+
+#[test]
+fn removing_a_detector_drops_its_pending_edits() {
+    let mut app = App::headless();
+    app.add_detector(simulated_entry(2));
+    app.dialogs.coarse_edit.insert(1, 64.0);
+    app.dialogs.hv_edit.insert(1, 1200.0);
+    app.dialogs
+        .presets_edit
+        .insert(1, mantaray_device::Presets::default());
+    app.dialogs.coarse_edit.insert(2, 65.0);
+    app.apply_action(Action::RemoveDetector(0));
+    assert!(app.dialogs.hv_edit.is_empty());
+    assert!(app.dialogs.presets_edit.is_empty());
+    assert_eq!(app.dialogs.coarse_edit.get(&2), Some(&65.0));
+    assert_eq!(app.dialogs.coarse_edit.len(), 1);
+}
+
+#[test]
+fn the_not_applied_note_is_under_the_table_not_a_cell_of_the_coarse_gain_row() {
+    let ctx = still_context();
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 0;
+    type_into_field(&mut app, &ctx, "20", "64");
+    let mut output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    for _ in 0..2 {
+        output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    }
+    let row = text_rect(&output, "Coarse gain").expect("the row's label");
+    let note = text_rect(&output, "not applied yet").expect("the note");
+    assert!(
+        note.min.y >= row.max.y,
+        "the note ({note:?}) sits in the row of the field ({row:?}) instead of under the table"
+    );
+}
+
+/// Draws a pending-apply field for a mirror that holds `mirror`, as the
+/// dialog does, `frames` times, and returns what it reported and painted.
+fn draw_pending_field(
+    mirror: f64,
+    pending: &mut mantaray_gui::dialogs::PendingEdits,
+    frames: usize,
+) -> (mantaray_gui::dialogs::PendingField, String) {
+    let ctx = still_context();
+    let mut last = None;
+    let mut text = String::new();
+    for _ in 0..frames {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let field = mantaray_gui::dialogs::pending_field(
+                ui,
+                pending,
+                1,
+                mirror,
+                mantaray_device::AmplifierSettings::COARSE_GAIN_MIN
+                    ..=mantaray_device::AmplifierSettings::COARSE_GAIN_MAX,
+                mantaray_device::AmplifierSettings::check_coarse_gain,
+            );
+            mantaray_gui::dialogs::pending_notes(ui, &field);
+            last = Some(field);
+        });
+        text = painted_text(&output);
+    }
+    (last.expect("a frame was drawn"), text)
+}
+
+#[test]
+fn a_mirror_that_is_not_a_whole_number_in_range_is_shown_as_it_is_with_a_warning() {
+    let mut pending = mantaray_gui::dialogs::PendingEdits::new();
+    // A fraction keeps its decimals: 20 would be a number the settings do not hold.
+    let (field, text) = draw_pending_field(20.4, &mut pending, 3);
+    assert!(text.contains("20.4"), "{text}");
+    assert!(field.warning.is_some() && !field.differs);
+    assert!(pending.is_empty());
+    // Out of the range, not clamped into it.
+    let (field, text) = draw_pending_field(5000.0, &mut pending, 3);
+    assert!(text.contains("5000"), "{text}");
+    assert!(field.warning.is_some() && !field.differs);
+    // A whole, in-range mirror has neither.
+    let (field, _) = draw_pending_field(40.0, &mut pending, 3);
+    assert!(field.warning.is_none() && !field.differs);
+}
+
+#[test]
+fn an_edit_is_compared_with_the_mirror_exactly() {
+    // The mirror holds 20.4 and the field has 20 in it: that is a pending
+    // edit, though both round to 20.
+    let mut pending = mantaray_gui::dialogs::PendingEdits::new();
+    pending.insert(1, 20.0);
+    let (field, text) = draw_pending_field(20.4, &mut pending, 3);
+    assert!(field.differs, "20 is not 20.4");
+    assert!(text.contains("not applied yet"), "{text}");
+    assert_eq!(pending.get(&1), Some(&20.0));
+}
+
+#[test]
+fn a_mirror_that_is_nan_warns_and_is_never_a_pending_edit() {
+    let mut pending = mantaray_gui::dialogs::PendingEdits::new();
+    let (field, text) = draw_pending_field(f64::NAN, &mut pending, 3);
+    assert!(!field.differs, "NaN against NaN is no edit");
+    assert!(field.warning.is_some());
+    assert!(!text.contains("not applied yet"), "{text}");
+    assert!(pending.is_empty(), "a NaN mirror became a pending edit");
+}
+
+#[test]
+fn a_fraction_typed_into_the_field_is_rounded_while_the_mirror_can_be_sent() {
+    // A 20.4 left in the field could never be applied (the command carries a
+    // whole number): it would show "not applied yet" forever. When the
+    // settings hold a sendable value the field holds only whole numbers.
+    let mut pending = mantaray_gui::dialogs::PendingEdits::new();
+    pending.insert(1, 20.4);
+    let (field, text) = draw_pending_field(40.0, &mut pending, 3);
+    assert_eq!(pending.get(&1), Some(&20.0), "the edit was not rounded");
+    assert!(field.differs && field.warning.is_none());
+    assert!(!text.contains("20.4"), "{text}");
+    // Rounding to the mirror itself is no edit at all.
+    pending.insert(1, 40.3);
+    let (field, _) = draw_pending_field(40.0, &mut pending, 3);
+    assert!(!field.differs, "40.3 rounds to the 40 the settings hold");
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn negative_zero_is_zero_in_the_field() {
+    let mut pending = mantaray_gui::dialogs::PendingEdits::new();
+    pending.insert(1, -0.0);
+    let (field, text) = draw_pending_field(0.0, &mut pending, 3);
+    assert!(!field.differs, "-0 is 0");
+    assert!(pending.is_empty());
+    assert!(!text.contains("-0"), "{text}");
 }
 
 /// A spectrum with one Cs-137 peak, counted 1000 s, and an app that has
@@ -2073,4 +2459,560 @@ fn a_new_analysis_clears_the_last_export_message() {
     assert!(app.dialogs.csv_export.is_none());
     let flat = analysis_dialog_text(&mut app);
     assert!(!flat.contains("could not write"), "{flat}");
+}
+
+/// An instrument line that keeps a log of every command it is sent and
+/// reports a 300 s live preset already in its registers.
+struct Logged {
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    counting: bool,
+}
+
+impl mantaray_device::Transport for Logged {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        self.log.lock().expect("log").push(command.to_string());
+        // The instrument follows START and STOP, as a real one does.
+        match command {
+            "STOP" => self.counting = false,
+            "START" => self.counting = true,
+            _ => {}
+        }
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=64".into(),
+            "SHOW_STATUS" => format!(
+                "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE={} TOTAL=0",
+                u8::from(self.counting)
+            ),
+            "SHOW_DATA" => format!("DATA 64{}", " 0".repeat(64)),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "logged".into()
+    }
+}
+
+#[test]
+fn apply_presets_with_only_a_new_mda_target_sends_nothing_to_the_instrument() {
+    // Through the button the operator presses, with the detector idle: the
+    // Presets tab's "Apply presets" used to send SET_PRESET_CLEAR and every
+    // preset again for an MDA target the instrument never held.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote = mantaray_device::RemoteMcb::connect(
+        Box::new(Logged {
+            log: log.clone(),
+            counting: false,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 2;
+
+    let mut typed = *mantaray_device::Mcb::presets(&app.detectors[0]);
+    assert_eq!(typed.live_time, Some(300.0), "the instrument's own preset");
+    typed.mda = Some(mantaray_device::MdaPreset {
+        target: 5.0,
+        region: mantaray_core::Roi::new(1, 10),
+        efficiency: 0.05,
+        yield_fraction: 0.85,
+    });
+    app.dialogs.presets_edit.insert(1, typed);
+
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let button = text_rect(&output, "Apply presets").expect("the Apply presets button is painted");
+    log.lock().expect("log").clear();
+    let at = button.center();
+    let events = vec![
+        egui::Event::PointerMoved(at),
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        },
+    ];
+    frame_with_events(&mut app, &ctx, events);
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+
+    let sent: Vec<String> = log
+        .lock()
+        .expect("log")
+        .iter()
+        .filter(|line| line.starts_with("SET_"))
+        .cloned()
+        .collect();
+    assert_eq!(sent, Vec::<String>::new(), "nothing for a host-side change");
+    assert_eq!(
+        mantaray_device::Mcb::presets(&app.detectors[0])
+            .mda
+            .map(|m| m.target),
+        Some(5.0),
+        "the Apply button was really pressed"
+    );
+}
+
+#[test]
+fn a_batch_sample_with_presets_equal_to_the_mirror_still_re_arms_the_instrument() {
+    // The instrument already holds 300 s live and so does the sample: the
+    // queue is an explicit action and sends a clear and every held preset
+    // anyway, or a second sample would never be armed. The detector is idle:
+    // a counting one is refused ("stop it first").
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote = mantaray_device::RemoteMcb::connect(
+        Box::new(Logged {
+            log: log.clone(),
+            counting: false,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let mut app = App::headless();
+    app.changer = None;
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.queue
+        .push(mantaray_device::SampleJob::new("S001", 300.0));
+    log.lock().expect("log").clear();
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    let sent: Vec<String> = log
+        .lock()
+        .expect("log")
+        .iter()
+        .filter(|line| line.starts_with("SET_"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            "SET_PRESET_CLEAR".to_string(),
+            "SET_PRESET_LIVE 300".to_string()
+        ],
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn the_presets_tab_is_disabled_while_the_detector_is_counting() {
+    // MAESTRO: "The presets can only be set on an MCB that is not acquiring
+    // data (during acquisition the preset field backgrounds are gray
+    // indicating that they are inactive)." Apply and Clear presets are
+    // disabled too: pressing them does nothing, not even raise the refusal.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote = mantaray_device::RemoteMcb::connect(
+        Box::new(Logged {
+            log: log.clone(),
+            counting: true,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 2;
+
+    let mut typed = *mantaray_device::Mcb::presets(&app.detectors[0]);
+    typed.live_time = Some(60.0);
+    app.dialogs.presets_edit.insert(1, typed);
+
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(
+        painted_text(&output)
+            .contains("Presets can only be set while the detector is not acquiring."),
+        "the one-line note is missing"
+    );
+    let click = |app: &mut App, ctx: &egui::Context, at: egui::Pos2| {
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame_with_events(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(at), press(true), press(false)],
+        );
+        frame(app, ctx, [1400.0, 900.0]);
+    };
+    let apply = text_rect(&output, "Apply presets").expect("Apply presets is painted");
+    let clear = text_rect(&output, "Clear presets").expect("Clear presets is painted");
+    log.lock().expect("log").clear();
+    app.status.clear();
+    click(&mut app, &ctx, apply.center());
+    click(&mut app, &ctx, clear.center());
+    assert_eq!(
+        app.status, "",
+        "a disabled button does nothing: {}",
+        app.status
+    );
+    let sent: Vec<String> = log
+        .lock()
+        .expect("log")
+        .iter()
+        .filter(|line| line.starts_with("SET_"))
+        .cloned()
+        .collect();
+    assert_eq!(sent, Vec::<String>::new());
+    assert_eq!(
+        mantaray_device::Mcb::presets(&app.detectors[0]).live_time,
+        Some(300.0),
+        "the mirror is untouched"
+    );
+
+    // Stopped, the same button works (on an edit typed now: the one typed
+    // before was dropped when counting was seen).
+    mantaray_device::Mcb::stop(&mut app.detectors[0]).expect("stop");
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(
+        !painted_text(&output).contains("Presets can only be set while"),
+        "the note goes away when the detector stops"
+    );
+    app.dialogs.presets_edit.insert(1, typed);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let apply = text_rect(&output, "Apply presets").expect("Apply presets is painted");
+    click(&mut app, &ctx, apply.center());
+    assert_eq!(
+        mantaray_device::Mcb::presets(&app.detectors[0]).live_time,
+        Some(60.0)
+    );
+}
+
+#[test]
+fn t32_a_counting_detectors_gray_presets_form_shows_the_instrument_and_drops_the_draft() {
+    // T32: while the detector counts the form is gray and says what the
+    // instrument holds (300 s live), never an unapplied edit (77 s) that is
+    // not in force; fields, Apply and Clear are off and the note is shown.
+    // The half-typed draft is gone when counting is seen (device-spec 2.8):
+    // kept and brought back after the count it could be older than presets
+    // another client set meanwhile (review of 21df1c3, #9).
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote = mantaray_device::RemoteMcb::connect(
+        Box::new(Logged {
+            log: log.clone(),
+            counting: true,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 2;
+
+    let mut typed = *mantaray_device::Mcb::presets(&app.detectors[0]);
+    typed.live_time = Some(77.0);
+    app.dialogs.presets_edit.insert(1, typed);
+
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let shown = painted_text(&output);
+    assert!(shown.contains("300"), "the instrument's preset: {shown}");
+    assert!(!shown.contains("77"), "an unapplied edit is shown: {shown}");
+    assert!(
+        shown.contains("Presets can only be set while the detector is not acquiring."),
+        "the note"
+    );
+    assert_eq!(
+        app.dialogs.presets_edit.get(&1),
+        None,
+        "the draft is dropped when the count is seen"
+    );
+    // Disabled: a click on Apply sends nothing and says nothing. (Time is
+    // frozen so no poll lands in the log either.)
+    app.time_scale = 0.0;
+    let apply = text_rect(&output, "Apply presets").expect("Apply presets is painted");
+    log.lock().expect("log").clear();
+    app.status.clear();
+    press_at(&mut app, &ctx, apply.center());
+    assert_eq!(app.status, "");
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+
+    mantaray_device::Mcb::stop(&mut app.detectors[0]).expect("stop");
+    let shown = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(!shown.contains("77"), "the draft came back: {shown}");
+    assert_eq!(app.dialogs.presets_edit.get(&1), None);
+    assert_eq!(
+        mantaray_device::Mcb::presets(&app.detectors[0]).live_time,
+        Some(300.0),
+        "and is still not applied"
+    );
+}
+
+/// Presses and releases the primary button at `at`, then draws a frame.
+fn press_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    };
+    frame_with_events(
+        app,
+        ctx,
+        vec![egui::Event::PointerMoved(at), press(true), press(false)],
+    );
+    frame(app, ctx, [1400.0, 900.0]);
+}
+
+/// A network instrument on a [`Logged`] line, its log cleared.
+fn logged_remote(
+    counting: bool,
+) -> (
+    mantaray_device::RemoteMcb,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let remote = mantaray_device::RemoteMcb::connect(
+        Box::new(Logged {
+            log: log.clone(),
+            counting,
+        }),
+        1,
+        "BENCH",
+    )
+    .expect("connect");
+    log.lock().expect("log").clear();
+    (remote, log)
+}
+
+/// An app showing the Presets tab of detector 0, with time frozen so frames
+/// poll nothing on their own.
+fn presets_tab(remote: mantaray_device::RemoteMcb) -> App {
+    let mut app = App::headless();
+    app.time_scale = 0.0;
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.dialogs.open(Dialog::McbProperties);
+    app.dialogs.properties_tab = 2;
+    app
+}
+
+/// T17: Stop on a locked detector shows the lock, never "acquisition stopped".
+#[test]
+fn t17_stop_on_a_locked_detector_says_so() {
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.apply_action(Action::Start);
+    mantaray_device::Mcb::lock(&mut app.detectors[0], "pw", "Ann").expect("lock");
+    app.apply_action(Action::Stop);
+    assert_eq!(app.status, "the detector is locked by Ann");
+    assert!(
+        mantaray_device::Mcb::is_active(&app.detectors[0]),
+        "still counting"
+    );
+    mantaray_device::Mcb::unlock(&mut app.detectors[0], "pw").expect("unlock");
+    app.apply_action(Action::Stop);
+    assert_eq!(app.status, "acquisition stopped");
+}
+
+/// T18: Start all and Stop all name every detector that refused; the others
+/// go ahead.
+#[test]
+fn t18_start_all_and_stop_all_name_each_refusal() {
+    use mantaray_device::Mcb;
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.time_scale = 0.0;
+    app.detectors
+        .push(mantaray_device::SimulatedMcb::new(2, "SIM-02").into());
+    let locked = app.detectors[0].identity().number;
+    let free = app.detectors[1].identity().number;
+    assert_ne!(locked, free);
+    app.detectors[0].start().expect("start");
+    app.detectors[0].lock("pw", "Ann").expect("lock");
+    app.dialogs.open(Dialog::Dashboard);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let start_all = text_rect(&output, "Start all").expect("Start all is painted");
+    let stop_all = text_rect(&output, "Stop all").expect("Stop all is painted");
+
+    press_at(&mut app, &ctx, start_all.center());
+    assert_eq!(
+        app.status,
+        format!("Detector {locked}: the detector is locked by Ann")
+    );
+    assert!(app.detectors[1].is_active(), "the free detector started");
+
+    press_at(&mut app, &ctx, stop_all.center());
+    assert_eq!(
+        app.status,
+        format!("Detector {locked}: the detector is locked by Ann")
+    );
+    assert!(!app.detectors[1].is_active(), "the free detector stopped");
+    assert!(app.detectors[0].is_active(), "the locked one counts on");
+}
+
+/// T26: an uncertainty limit of 0 and an MDA target of 0 are "off": applied,
+/// they are stored as no preset at all, and the form's checkboxes follow.
+#[test]
+fn t26_a_zero_limit_from_the_form_is_no_preset() {
+    let (remote, log) = logged_remote(false);
+    let ctx = egui::Context::default();
+    let mut app = presets_tab(remote);
+    let mut typed = *mantaray_device::Mcb::presets(&app.detectors[0]);
+    typed.uncertainty = Some(mantaray_device::UncertaintyPreset {
+        limit_percent: 0.0,
+        low_channel: 1,
+        high_channel: 10,
+    });
+    typed.mda = Some(mantaray_device::MdaPreset {
+        target: 0.0,
+        region: mantaray_core::Roi::new(1, 10),
+        efficiency: 0.05,
+        yield_fraction: 0.85,
+    });
+    app.dialogs.presets_edit.insert(1, typed);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    assert!(painted_text(&output).contains("limit %"), "the typed draft");
+    let apply = text_rect(&output, "Apply presets").expect("Apply presets is painted");
+    press_at(&mut app, &ctx, apply.center());
+    let held = *mantaray_device::Mcb::presets(&app.detectors[0]);
+    assert_eq!(held.uncertainty, None, "{held:?}");
+    assert_eq!(held.mda, None, "{held:?}");
+    assert!(
+        log.lock()
+            .expect("log")
+            .contains(&"SHOW_STATUS".to_string())
+    );
+    let shown = painted_text(&frame(&mut app, &ctx, [1400.0, 900.0]));
+    assert!(
+        !shown.contains("limit %") && !shown.contains("target Bq"),
+        "both checkboxes are off: {shown}"
+    );
+}
+
+/// T27 (GUI half): the form's MDA efficiency and yield controls offer
+/// exactly what the device accepts.
+#[test]
+fn t27_the_form_offers_only_fractions_the_device_accepts() {
+    let range = mantaray_gui::dialogs::MDA_FRACTION_RANGE;
+    assert!(*range.start() > 0.0);
+    assert_eq!(*range.end(), 1.0);
+    let with = |fraction: f64| mantaray_device::Presets {
+        mda: Some(mantaray_device::MdaPreset {
+            target: 5.0,
+            region: mantaray_core::Roi::new(1, 10),
+            efficiency: fraction,
+            yield_fraction: fraction,
+        }),
+        ..mantaray_device::Presets::default()
+    };
+    assert!(with(*range.start()).validate().is_ok());
+    assert!(with(*range.end()).validate().is_ok());
+    assert!(with(range.end() + 0.01).validate().is_err());
+    assert!(with(0.0).validate().is_err());
+}
+
+/// T31: a counting detector with its Presets tab open costs nothing on the
+/// wire, frame after frame; an amplifier edit asks nothing; one host-only
+/// Apply asks the status exactly once.
+#[test]
+fn t31_frames_ask_the_instrument_nothing_and_a_click_asks_once() {
+    let (remote, log) = logged_remote(true);
+    let ctx = egui::Context::default();
+    let mut app = presets_tab(remote);
+    for _ in 0..100 {
+        frame(&mut app, &ctx, [1400.0, 900.0]);
+    }
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+    let mut properties = mantaray_device::Mcb::properties(&app.detectors[0]).clone();
+    properties.amplifier.rise_time_us = 4.0;
+    mantaray_device::Mcb::set_properties(&mut app.detectors[0], properties).expect("amplifier");
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+
+    // Idle, one host-only Apply through the button: one status read.
+    mantaray_device::Mcb::stop(&mut app.detectors[0]).expect("stop");
+    frame(&mut app, &ctx, [1400.0, 900.0]);
+    let mut typed = *mantaray_device::Mcb::presets(&app.detectors[0]);
+    typed.mda = Some(mantaray_device::MdaPreset {
+        target: 5.0,
+        region: mantaray_core::Roi::new(1, 10),
+        efficiency: 0.05,
+        yield_fraction: 0.85,
+    });
+    app.dialogs.presets_edit.insert(1, typed);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let apply = text_rect(&output, "Apply presets").expect("Apply presets is painted");
+    log.lock().expect("log").clear();
+    press_at(&mut app, &ctx, apply.center());
+    for _ in 0..20 {
+        frame(&mut app, &ctx, [1400.0, 900.0]);
+    }
+    assert_eq!(*log.lock().expect("log"), vec!["SHOW_STATUS".to_string()]);
+    assert!(
+        mantaray_device::Mcb::presets(&app.detectors[0])
+            .mda
+            .is_some()
+    );
+}
+
+/// A detector that counts and never stops, whatever it is sent.
+struct NeverStops;
+
+impl mantaray_device::Transport for NeverStops {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        Ok(match command {
+            "SHOW_CONFIGURATION" => "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=64".into(),
+            "SHOW_STATUS" => "RT=1.00 LT=1.00 DT=0.0% ICR=0 ACTIVE=1 TOTAL=0".into(),
+            "SHOW_DATA" => format!("DATA 64{}", " 0".repeat(64)),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "never-stops".into()
+    }
+}
+
+/// Review 3: Stop all does not stack the detectors' STOP confirms: three
+/// detectors that never stop cost about one bound (ten reads 100 ms apart,
+/// about a second), not three, and each is named.
+#[test]
+fn review3_stop_all_does_not_stack_the_confirm_waits() {
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.time_scale = 0.0;
+    app.detectors.clear();
+    for number in 1..=3 {
+        let remote = mantaray_device::RemoteMcb::connect(Box::new(NeverStops), number, "STUCK")
+            .expect("connect");
+        app.detectors.push(remote.into());
+    }
+    app.dialogs.open(Dialog::Dashboard);
+    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
+    let stop_all = text_rect(&output, "Stop all").expect("Stop all is painted");
+    let began = std::time::Instant::now();
+    press_at(&mut app, &ctx, stop_all.center());
+    let took = began.elapsed();
+    for number in 1..=3 {
+        assert!(
+            app.status.contains(&format!("Detector {number}: ")),
+            "{}",
+            app.status
+        );
+    }
+    assert!(app.status.contains("did not stop"), "{}", app.status);
+    // One bound is about 0.9 s of pauses; three stacked would be 2.7 s.
+    assert!(took < std::time::Duration::from_millis(1800), "{took:?}");
 }

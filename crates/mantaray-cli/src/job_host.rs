@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use mantaray_core::{
     CalculationSettings, NuclideLibrary, Spectrum, StripFactor, mark_peaks, smooth, strip,
 };
-use mantaray_device::{AnyMcb, Mcb, Presets, UncertaintyPreset, advance};
+use mantaray_device::{AnyMcb, Mcb, Presets, advance};
 use mantaray_formats::{
     ListRange, SpectrumFormat, library, list_mode, load_rois, load_spectrum, save_rois,
     save_spectrum,
@@ -45,6 +45,8 @@ pub struct CliSession {
     strip_name: Option<String>,
     list_file: Option<mantaray_formats::ListModeFile>,
     trace: bool,
+    /// The count the job's last START began, for the WAIT that follows.
+    count: Option<mantaray_device::CountWatch>,
 }
 
 impl CliSession {
@@ -72,6 +74,7 @@ impl CliSession {
             strip_name: None,
             list_file: None,
             trace,
+            count: None,
         }
     }
 
@@ -99,13 +102,14 @@ impl CliSession {
     /// `presets_mut` writes only the client-side mirror: for a remote
     /// instrument the preset would never arrive, the stop would be enforced
     /// purely from this process (and lost with it), and the no-change-while-
-    /// counting rule would be bypassed. `set_presets` is the path that
-    /// transmits.
+    /// counting rule would be bypassed. `apply_presets` is the one road every
+    /// preset edit takes: it refuses a locked instrument, sends nothing for a
+    /// host-side-only edit, and otherwise sends a clear and every held preset.
     fn change_presets(&mut self, change: impl FnOnce(&mut Presets)) -> Result<(), JobError> {
         let mcb = self.instrument()?;
         let mut presets = *mcb.presets();
         change(&mut presets);
-        mcb.set_presets(presets).map_err(device)
+        mcb.apply_presets(presets).map_err(device)
     }
 
     /// The spectrum commands act on.
@@ -172,7 +176,11 @@ impl JobHost for CliSession {
     }
 
     fn start(&mut self) -> Result<(), JobError> {
-        self.instrument()?.start().map_err(device)
+        let instrument = self.instrument()?;
+        instrument.start().map_err(device)?;
+        let watch = mantaray_device::CountWatch::started(&*instrument);
+        self.count = Some(watch);
+        Ok(())
     }
 
     fn stop(&mut self) -> Result<(), JobError> {
@@ -211,8 +219,32 @@ impl JobHost for CliSession {
         } else {
             // A real instrument counts in real time and stops itself when a
             // preset is reached; wait for that a few polls a second, rather
-            // than hammering the wire in a tight loop.
-            while self.instrument()?.is_active() {
+            // than hammering the wire in a tight loop. An accepted START is
+            // not yet a reading that it counts (rule 9), so the count is over
+            // at the first believed reading taken after this point that says
+            // idle - the interface's WAIT and batch queue use the same watch.
+            // Readings that stay unbelievable end the WAIT with the reason.
+            // The watch the job's START began, when there is one, tells a
+            // START that never counted from a count that is over.
+            let mut watch = match self.count.take() {
+                Some(watch) => watch,
+                None => mantaray_device::CountWatch::begin(self.instrument()?),
+            };
+            loop {
+                match watch.check(self.instrument()?) {
+                    mantaray_device::CountState::Over => break,
+                    mantaray_device::CountState::Counting => {}
+                    mantaray_device::CountState::Unreadable(reason) => {
+                        return Err(JobError::host(format!(
+                            "WAIT: whether the detector counts cannot be told: {reason}"
+                        )));
+                    }
+                    mantaray_device::CountState::NeverStarted => {
+                        return Err(JobError::host(
+                            "WAIT: the detector accepted START but did not count",
+                        ));
+                    }
+                }
                 let step = std::time::Duration::from_millis(250);
                 std::thread::sleep(step);
                 advance(self.instrument()?.as_mcb_mut(), step.as_secs_f64()).map_err(device)?;
@@ -423,19 +455,19 @@ impl JobHost for CliSession {
     }
 
     fn set_preset_real(&mut self, seconds: f64) -> Result<(), JobError> {
-        self.change_presets(|presets| presets.real_time = Some(seconds))
+        self.change_presets(|presets| presets.set_real_time(seconds))
     }
 
     fn set_preset_live(&mut self, seconds: f64) -> Result<(), JobError> {
-        self.change_presets(|presets| presets.live_time = Some(seconds))
+        self.change_presets(|presets| presets.set_live_time(seconds))
     }
 
     fn set_preset_peak(&mut self, counts: u64) -> Result<(), JobError> {
-        self.change_presets(|presets| presets.roi_peak = Some(counts))
+        self.change_presets(|presets| presets.set_roi_peak(counts))
     }
 
     fn set_preset_integral(&mut self, counts: u64) -> Result<(), JobError> {
-        self.change_presets(|presets| presets.roi_integral = Some(counts))
+        self.change_presets(|presets| presets.set_roi_integral(counts))
     }
 
     fn set_preset_uncertainty(
@@ -444,17 +476,13 @@ impl JobHost for CliSession {
         low: usize,
         high: usize,
     ) -> Result<(), JobError> {
-        self.change_presets(|presets| {
-            presets.uncertainty = Some(UncertaintyPreset {
-                limit_percent: limit,
-                low_channel: low,
-                high_channel: high,
-            })
-        })
+        self.change_presets(|presets| presets.set_uncertainty(limit, low, high))
     }
 
     fn clear_presets(&mut self) -> Result<(), JobError> {
-        self.change_presets(Presets::clear)
+        // Explicit: always sent, whatever the mirror or the instrument says.
+        let mcb = self.instrument()?;
+        mcb.set_presets(Presets::default()).map_err(device)
     }
 
     fn set_list_mode(&mut self, list: bool) -> Result<(), JobError> {
@@ -609,8 +637,10 @@ mod tests {
             ),
             ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
             ("SHOW_DATA", "DATA 2 0 0"),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
             ("SET_PRESET_CLEAR", "OK"),
             ("SET_PRESET_LIVE 300", "OK"),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
             ("SET_PRESET_CLEAR", "OK"),
             ("SET_PRESET_LIVE 300", "OK"),
             ("SET_PRESET_COUNT 5000", "OK"),
@@ -692,6 +722,24 @@ mod tests {
     }
 
     #[test]
+    fn rig_a_start_that_is_accepted_but_never_counts_fails_the_wait() {
+        // The 926 can answer START and not count. A WAIT that called that
+        // "over" would let the job save an empty spectrum as a measurement.
+        let (mut session, rig) = rig_session();
+        session.set_preset_live(2.0).expect("preset");
+        rig.fault(mantaray_device::rig::Fault::Reply {
+            verb: "START".into(),
+            reply: "OK".into(),
+            count: 1,
+            execute: false,
+        });
+        session.start().expect("START is accepted");
+        let outcome = within(30, "WAIT", move || session.wait_for_stop());
+        let error = outcome.expect_err("a count that never ran is not over");
+        assert!(error.to_string().contains("did not count"), "{error}");
+    }
+
+    #[test]
     fn rig_a_job_preset_on_a_front_panel_count_is_refused() {
         let (mut session, rig) = rig_session();
         rig.front_panel_start();
@@ -703,6 +751,65 @@ mod tests {
             "{error}"
         );
         assert!(rig.violations().is_empty(), "{:?}", rig.violations());
+    }
+
+    #[test]
+    fn a_job_that_sets_a_preset_mid_count_stops_with_maestros_message() {
+        // MAESTRO: "Presets can't be changed during acquisition." The
+        // scripted transport refuses any command it does not expect and the
+        // instrument is counting, so nothing may go out; a host-side preset
+        // is refused as well, as the whole preset change is.
+        let mut session = remote_session(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+            // One status read per refused change, and nothing else.
+            ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+            ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+            ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=0"),
+        ]);
+        let words = "Presets can't be changed during acquisition.";
+        let live = session.set_preset_live(300.0).expect_err("live mid-count");
+        assert!(live.to_string().contains(words), "{live}");
+        let host = session
+            .set_preset_uncertainty(2.0, 0, 1)
+            .expect_err("host-side mid-count");
+        assert!(host.to_string().contains(words), "{host}");
+        let clear = session.clear_presets().expect_err("clear mid-count");
+        assert!(clear.to_string().contains(words), "{clear}");
+        let held = *session.instrument().expect("instrument").presets();
+        assert!(held.uncertainty.is_none(), "the mirror is untouched");
+    }
+
+    #[test]
+    fn a_locked_instrument_refuses_a_job_s_host_side_preset() {
+        let mut session = remote_session(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+        ]);
+        session
+            .instrument()
+            .expect("instrument")
+            .lock("pw", "someone")
+            .expect("lock");
+        session
+            .set_preset_uncertainty(2.0, 0, 1)
+            .expect_err("locked");
+        assert!(
+            session
+                .instrument()
+                .expect("instrument")
+                .presets()
+                .uncertainty
+                .is_none()
+        );
     }
 
     #[test]
@@ -728,5 +835,44 @@ mod tests {
             "WAIT 0.6 returned after {:?}",
             before.elapsed()
         );
+    }
+
+    #[test]
+    fn start_then_wait_waits_for_the_detector_to_stop_itself() {
+        // T16 (rule 9 as amended): START is decided by its reply, with no
+        // reading after it, so the WAIT after it waits for readings: one
+        // that says stopped with the clock run - not for a flag the program
+        // wrote itself. The script refuses anything else.
+        let mut session = remote_session(&[
+            (
+                "SHOW_CONFIGURATION",
+                "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+            ),
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SHOW_DATA", "DATA 2 0 0"),
+            // SET_PRESET_LIVE 10: the gate's read, the clear, the preset.
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("SET_PRESET_CLEAR", "OK"),
+            ("SET_PRESET_LIVE 10", "OK"),
+            // START, after the read that says no held preset is reached.
+            ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+            ("START", "OK"),
+            // WAIT: still counting, then stopped on its own preset.
+            ("SHOW_STATUS", "RT=5 LT=5 DT=0% ICR=0 ACTIVE=1 TOTAL=3"),
+            ("SHOW_DATA", "DATA 2 1 2"),
+            ("SHOW_STATUS", "RT=10 LT=10 DT=0% ICR=0 ACTIVE=0 TOTAL=7"),
+            ("SHOW_DATA", "DATA 2 3 4"),
+        ]);
+        session.set_preset_live(10.0).expect("preset");
+        session.start().expect("start");
+        assert!(
+            !session.instrument().expect("instrument").is_active(),
+            "no reading has said it counts yet"
+        );
+        session.wait_for_stop().expect("wait");
+        let instrument = session.instrument().expect("instrument");
+        assert!(!instrument.is_active());
+        assert_eq!(instrument.status().total_counts, 7);
+        assert_eq!(instrument.spectrum().total_counts(), 7);
     }
 }

@@ -927,6 +927,111 @@ fn a_job_can_run_a_real_program_and_wait_for_it() {
 }
 
 #[test]
+fn a_changer_command_with_no_changer_stops_the_job_by_name() {
+    // A simulated changer answered at once in shipped builds, so a batch job
+    // could count one sample over and over believing the rack had moved.
+    for command in ["CHANGE_SAMPLE", "WAIT_CHANGER"] {
+        let mut app = App::headless();
+        app.changer = None;
+        let job = scratch(&format!("no-changer-{command}.job"));
+        std::fs::write(&job, format!("{command}\nSTART\n")).expect("write");
+        mantaray_gui::jobs::start(&mut app, &job).expect("parse");
+        for _ in 0..10 {
+            mantaray_gui::jobs::step(&mut app);
+            if app.job.is_none() {
+                break;
+            }
+        }
+        assert!(app.job.is_none(), "{command}: the job should stop");
+        assert!(
+            app.status.contains("job stopped")
+                && app.status.contains(command)
+                && app.status.contains("no sample changer"),
+            "{command}: {}",
+            app.status
+        );
+        assert!(
+            !app.detectors.iter().any(|mcb| mcb.is_active()),
+            "{command}: the job went on to count"
+        );
+    }
+}
+
+#[test]
+fn a_batch_without_a_changer_still_runs_sample_by_sample() {
+    let mut app = App::headless();
+    app.changer = None;
+    app.apply_action(Action::OpenDetector(0));
+    app.queue.push(mantaray_device::SampleJob::new("S001", 5.0));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(app.detectors[0].is_active(), "{actions:?}");
+    mantaray_gui::jobs::finish_current_sample(&mut app);
+    assert_eq!(app.queue.completed(), 1);
+}
+
+#[test]
+fn a_batch_with_a_changer_waits_for_it_and_moves_it_on() {
+    // The simulator build's changer: a ready one lets the sample count, and
+    // finishing the sample sets it moving.
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.queue.push(mantaray_device::SampleJob::new("S001", 5.0));
+    app.queue.push(mantaray_device::SampleJob::new("S002", 5.0));
+    assert!(app.changer.as_ref().is_some_and(|c| c.is_ready()));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(app.detectors[0].is_active(), "a ready changer: {actions:?}");
+    mantaray_gui::jobs::finish_current_sample(&mut app);
+    assert!(app.changer.as_ref().is_some_and(|c| !c.is_ready()));
+    let _ = mantaray_device::Mcb::stop(&mut app.detectors[0]);
+    let refused = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(
+        format!("{refused:?}").contains("still moving"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn the_running_application_keeps_a_moving_changer_moving() {
+    let mut app = App::headless();
+    let changer = app.changer.as_mut().expect("simulator build");
+    let before = changer.position();
+    changer.request_change();
+    for _ in 0..10 {
+        app.advance_by(0.5);
+    }
+    let changer = app.changer.as_ref().unwrap();
+    assert!(changer.is_ready(), "five seconds is past a two-second move");
+    assert_eq!(changer.position(), before + 1);
+}
+
+#[test]
+fn a_changer_command_with_a_changer_waits_until_it_has_moved() {
+    for command in ["CHANGE_SAMPLE", "WAIT_CHANGER"] {
+        let mut app = App::headless();
+        if command == "WAIT_CHANGER" {
+            app.changer
+                .as_mut()
+                .expect("simulator build")
+                .request_change();
+        }
+        let before = app.changer.as_ref().unwrap().position();
+        let job = scratch(&format!("with-changer-{command}.job"));
+        std::fs::write(&job, format!("{command}\n")).expect("write");
+        mantaray_gui::jobs::start(&mut app, &job).expect("parse");
+        for _ in 0..10 {
+            mantaray_gui::jobs::step(&mut app);
+            if app.job.is_none() {
+                break;
+            }
+        }
+        assert!(app.status.contains("job finished"), "{}", app.status);
+        let changer = app.changer.as_ref().unwrap();
+        assert!(changer.is_ready(), "{command}: still moving");
+        assert_eq!(changer.position(), before + 1, "{command}: one slot on");
+    }
+}
+
+#[test]
 fn a_job_can_maximise_and_restore_the_window() {
     let mut app = with_spectrum(64);
     let job = scratch("zoom.job");
@@ -2238,4 +2343,462 @@ fn a_calibration_not_in_kev_is_refused_a_clb_file() {
         "the refusal names both units: {}",
         app.status
     );
+}
+
+/// A batch instrument a test scripts: it logs every command, counts from
+/// START (unless START is answered ERR) until STOP, answers CLEAR and START
+/// as told, and keeps saying ACTIVE=1 for `stop_lag` status reads after a
+/// STOP (the bench 926's slow replies).
+#[derive(Default)]
+struct BatchBench {
+    log: Vec<String>,
+    counting: bool,
+    clear_answer: Option<&'static str>,
+    start_answer: Option<&'static str>,
+    stop_lag: usize,
+    lag_left: usize,
+    /// The clocks SHOW_STATUS reports (RT and LT alike).
+    clock: f64,
+}
+
+#[derive(Clone)]
+struct BatchLine(std::sync::Arc<std::sync::Mutex<BatchBench>>);
+
+impl mantaray_device::Transport for BatchLine {
+    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
+        let mut bench = self.0.lock().unwrap();
+        bench.log.push(command.to_string());
+        Ok(match command {
+            "START" => match bench.start_answer {
+                Some(answer) => answer.into(),
+                None => {
+                    bench.counting = true;
+                    "OK".into()
+                }
+            },
+            "STOP" => {
+                if bench.counting {
+                    bench.lag_left = bench.stop_lag;
+                }
+                bench.counting = false;
+                "OK".into()
+            }
+            "CLEAR" => {
+                if bench.clear_answer.is_none() {
+                    bench.clock = 0.0;
+                }
+                bench.clear_answer.unwrap_or("OK").into()
+            }
+            "SHOW_CONFIGURATION" => "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=64".into(),
+            "SHOW_STATUS" => {
+                let active = bench.counting || bench.lag_left > 0;
+                bench.lag_left = bench.lag_left.saturating_sub(1);
+                format!(
+                    "RT={c:.2} LT={c:.2} DT=0.0% ICR=0 ACTIVE={} TOTAL=0",
+                    u8::from(active),
+                    c = bench.clock
+                )
+            }
+            "SHOW_DATA" => format!("DATA 64{}", " 0".repeat(64)),
+            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0".into(),
+            _ => "OK".into(),
+        })
+    }
+
+    fn peer(&self) -> String {
+        "batch-bench".into()
+    }
+}
+
+impl BatchLine {
+    /// A connected remote on this bench, with the connection's own commands
+    /// dropped from the log and START/STOP confirmed without sleeping.
+    fn connect(counting: bool) -> (mantaray_device::RemoteMcb, BatchLine) {
+        let line = BatchLine(std::sync::Arc::new(std::sync::Mutex::new(BatchBench {
+            counting,
+            ..BatchBench::default()
+        })));
+        let mut remote = mantaray_device::RemoteMcb::connect(Box::new(line.clone()), 1, "BENCH")
+            .expect("connect");
+        remote.set_confirm_step(std::time::Duration::ZERO);
+        line.0.lock().unwrap().log.clear();
+        (remote, line)
+    }
+
+    fn sent(&self) -> Vec<String> {
+        self.0.lock().unwrap().log.clone()
+    }
+
+    fn forget(&self) {
+        self.0.lock().unwrap().log.clear();
+    }
+
+    fn set(&self, change: impl FnOnce(&mut BatchBench)) {
+        change(&mut self.0.lock().unwrap());
+    }
+}
+
+fn strs(commands: &[&str]) -> Vec<String> {
+    commands.iter().map(|c| c.to_string()).collect()
+}
+
+/// A headless session counting on `remote`, its window open, no changer, and
+/// one sample with a 300 s live preset waiting.
+fn batch_app_with(remote: mantaray_device::RemoteMcb) -> App {
+    let mut app = App::headless();
+    app.changer = None;
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.queue
+        .push(mantaray_device::SampleJob::new("S001", 300.0));
+    app
+}
+
+fn first_state(app: &App) -> mantaray_device::JobState {
+    app.queue.jobs()[0].state.clone()
+}
+
+/// A sample's steps (rule 9 as amended): the presets' counting check, the
+/// presets, CLEAR, START's fresh read (is a held preset already reached?)
+/// and START. Nothing after START: its reply decides.
+const A_SAMPLE: [&str; 6] = [
+    "SHOW_STATUS",
+    "SET_PRESET_CLEAR",
+    "SET_PRESET_LIVE 300",
+    "CLEAR",
+    "SHOW_STATUS",
+    "START",
+];
+
+/// T35: an idle detector is asked once, armed, cleared and started, and the
+/// start is the detector saying it counts.
+#[test]
+fn t35_a_batch_sample_on_an_idle_detector_sends_exactly_its_steps() {
+    let (remote, line) = BatchLine::connect(false);
+    let mut app = batch_app_with(remote);
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert_eq!(line.sent(), strs(&A_SAMPLE), "{actions:?}");
+    assert_eq!(first_state(&app), mantaray_device::JobState::Counting);
+    assert!(
+        format!("{actions:?}").contains("counting S001 with 300 s live"),
+        "{actions:?}"
+    );
+}
+
+/// T36: a counting detector is never stopped by Run next sample.
+#[test]
+fn t36_a_batch_sample_on_a_counting_detector_says_stop_it_first() {
+    let (remote, line) = BatchLine::connect(true);
+    let mut app = batch_app_with(remote);
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(
+        format!("{actions:?}").contains("stop it first"),
+        "{actions:?}"
+    );
+    assert_eq!(line.sent(), strs(&["SHOW_STATUS"]));
+    assert_eq!(first_state(&app), mantaray_device::JobState::Pending);
+    assert!(app.detectors[0].is_active(), "the count goes on");
+}
+
+/// T37: every check that needs no instrument comes first, and a locked
+/// detector is not even asked.
+#[test]
+fn t37_each_batch_pre_check_refuses_before_any_command() {
+    type Setup = fn(&mut App);
+    let cases: [(&str, Setup, &str); 5] = [
+        (
+            "changer moving",
+            |app| {
+                let mut changer = mantaray_device::SampleChanger::new(8);
+                changer.request_change();
+                app.changer = Some(changer);
+            },
+            "still moving",
+        ),
+        (
+            "queue empty",
+            |app| app.queue = Default::default(),
+            "the queue is empty",
+        ),
+        (
+            "already counting",
+            |app| app.queue.begin_current(),
+            "already counting",
+        ),
+        (
+            "no window",
+            |app| app.active = None,
+            "open a detector window",
+        ),
+        (
+            "locked",
+            |app| mantaray_device::Mcb::lock(&mut app.detectors[0], "pw", "someone").expect("lock"),
+            "lock",
+        ),
+    ];
+    for (name, setup, says) in cases {
+        let (remote, line) = BatchLine::connect(false);
+        let mut app = batch_app_with(remote);
+        setup(&mut app);
+        let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+        assert!(
+            format!("{actions:?}").to_lowercase().contains(says),
+            "{name}: {actions:?}"
+        );
+        assert!(line.sent().is_empty(), "{name}: {:?}", line.sent());
+    }
+}
+
+/// T38: a second click, even after the detector list shifted under it, never
+/// reaches another detector or repeats the sample.
+#[test]
+fn t38_a_second_click_is_refused_and_touches_no_other_detector() {
+    let (other, other_line) = BatchLine::connect(false);
+    let (remote, line) = BatchLine::connect(false);
+    let mut app = App::headless();
+    app.changer = None;
+    app.detectors[0] = other.into();
+    app.detectors.push(remote.into());
+    app.apply_action(Action::OpenDetector(1));
+    app.queue
+        .push(mantaray_device::SampleJob::new("S001", 300.0));
+    mantaray_gui::jobs::run_next_sample(&mut app);
+    assert_eq!(line.sent(), strs(&A_SAMPLE));
+    line.forget();
+    let again = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(
+        format!("{again:?}").contains("already counting"),
+        "{again:?}"
+    );
+    app.apply_action(Action::RemoveDetector(0));
+    assert_eq!(app.detectors.len(), 1, "{}", app.status);
+    let after = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(
+        format!("{after:?}").contains("already counting"),
+        "{after:?}"
+    );
+    assert!(line.sent().is_empty(), "{:?}", line.sent());
+    assert!(other_line.sent().is_empty(), "{:?}", other_line.sent());
+}
+
+/// T39: a CLEAR or START that fails leaves the sample waiting, says which
+/// steps were done, and the next click repeats every step.
+#[test]
+fn t39_a_failed_clear_or_start_leaves_the_sample_waiting_and_a_retry_works() {
+    for step in ["CLEAR", "START"] {
+        let (remote, line) = BatchLine::connect(false);
+        line.set(|bench| match step {
+            "CLEAR" => bench.clear_answer = Some("ERR the memory is busy"),
+            _ => bench.start_answer = Some("ERR the memory is busy"),
+        });
+        let mut app = batch_app_with(remote);
+        let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+        let shown = format!("{actions:?}");
+        assert!(
+            shown.contains("presets set for S001")
+                && shown.contains(&format!("{step} failed"))
+                && shown.contains("the memory is busy")
+                && shown.contains("not started"),
+            "{step}: {shown}"
+        );
+        if step == "CLEAR" {
+            assert!(
+                !line.sent().contains(&"START".to_string()),
+                "{:?}",
+                line.sent()
+            );
+        } else {
+            assert!(shown.contains("spectrum cleared"), "{shown}");
+        }
+        assert_eq!(
+            first_state(&app),
+            mantaray_device::JobState::Pending,
+            "{step}"
+        );
+        line.set(|bench| {
+            bench.clear_answer = None;
+            bench.start_answer = None;
+        });
+        line.forget();
+        let retry = mantaray_gui::jobs::run_next_sample(&mut app);
+        assert_eq!(line.sent(), strs(&A_SAMPLE), "{step}: {retry:?}");
+        assert_eq!(
+            first_state(&app),
+            mantaray_device::JobState::Counting,
+            "{step}"
+        );
+    }
+}
+
+/// T40: the operator's Stop waits out the detector's lag, so the next sample
+/// starts at once afterwards.
+#[test]
+fn t40_after_an_operator_stop_with_lag_the_next_sample_starts() {
+    let (remote, line) = BatchLine::connect(true);
+    line.set(|bench| bench.stop_lag = 3);
+    let mut app = batch_app_with(remote);
+    app.apply_action(Action::Stop);
+    assert_eq!(app.status, "acquisition stopped");
+    line.forget();
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert_eq!(line.sent(), strs(&A_SAMPLE), "{actions:?}");
+    assert_eq!(first_state(&app), mantaray_device::JobState::Counting);
+}
+
+/// T41 (with rule 9 as amended): one status read decides whether the
+/// presets may change, one whether START may go (after the CLEAR, so on the
+/// cleared clocks), and none follows START.
+#[test]
+fn t41_a_batch_sample_reads_the_status_once_per_decision() {
+    let (remote, line) = BatchLine::connect(false);
+    let mut app = batch_app_with(remote);
+    mantaray_gui::jobs::run_next_sample(&mut app);
+    let sent = line.sent();
+    let at = |word: &str| sent.iter().position(|c| c == word).expect(word);
+    let reads =
+        |range: std::ops::Range<usize>| sent[range].iter().filter(|c| *c == "SHOW_STATUS").count();
+    assert_eq!(reads(0..at("SET_PRESET_CLEAR")), 1, "{sent:?}");
+    assert_eq!(reads(at("CLEAR")..at("START")), 1, "{sent:?}");
+    assert_eq!(reads(at("START")..sent.len()), 0, "{sent:?}");
+}
+
+/// T42: a preset that is reached stops the detector, even a locked one,
+/// completes the sample and moves the changer; nothing else starts.
+#[test]
+fn t42_a_reached_preset_completes_the_sample_and_moves_the_changer() {
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.queue.push(mantaray_device::SampleJob::new("S001", 5.0));
+    app.queue.push(mantaray_device::SampleJob::new("S002", 5.0));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert!(app.detectors[0].is_active(), "{actions:?}");
+    mantaray_device::Mcb::lock(&mut app.detectors[0], "pw", "someone").expect("lock");
+    for _ in 0..20 {
+        app.advance_by(0.5);
+        if app.queue.completed() > 0 {
+            break;
+        }
+    }
+    assert!(!app.detectors[0].is_active(), "{}", app.status);
+    assert_eq!(app.queue.completed(), 1, "{}", app.status);
+    assert!(app.status.contains("sample complete"), "{}", app.status);
+    assert!(app.changer.as_ref().is_some_and(|c| !c.is_ready()));
+    assert_eq!(
+        app.queue.jobs()[1].state,
+        mantaray_device::JobState::Pending
+    );
+}
+
+/// T43: a sample whose presets are not usable is refused by name and arms
+/// nothing.
+#[test]
+fn t43_a_sample_with_unusable_presets_is_refused_by_name() {
+    let (remote, line) = BatchLine::connect(false);
+    let mut app = App::headless();
+    app.changer = None;
+    app.detectors[0] = remote.into();
+    app.apply_action(Action::OpenDetector(0));
+    app.queue
+        .push(mantaray_device::SampleJob::new("S001", f64::NAN));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    let shown = format!("{actions:?}");
+    assert!(shown.contains("live-time preset"), "{shown}");
+    assert!(shown.contains("S001 was not started"), "{shown}");
+    assert_eq!(
+        line.sent(),
+        strs(&["SHOW_STATUS"]),
+        "nothing but the question"
+    );
+    assert_eq!(first_state(&app), mantaray_device::JobState::Pending);
+}
+
+/// MAESTRO: "A zero value disables a preset". A job's zero is no preset,
+/// never a stored limit of zero.
+#[test]
+fn a_job_preset_of_zero_disables_the_preset() {
+    use mantaray_jobs::JobHost;
+    let mut app = App::headless();
+    app.apply_action(Action::OpenDetector(0));
+    app.set_preset_live(30.0).expect("live");
+    app.set_preset_peak(500).expect("peak");
+    assert_eq!(app.detectors[0].presets().live_time, Some(30.0));
+    app.set_preset_live(0.0).expect("live off");
+    app.set_preset_peak(0).expect("peak off");
+    app.set_preset_real(0.0).expect("real off");
+    app.set_preset_integral(0).expect("integ off");
+    app.set_preset_uncertainty(0.0, 0, 9)
+        .expect("uncertainty off");
+    let presets = *app.detectors[0].presets();
+    assert!(presets.is_empty(), "{presets:?}");
+}
+
+/// Rule 10 (amended): an instrument that stops itself on its own time preset
+/// completes the sample, seen from the readings alone, and the changer moves.
+#[test]
+fn rule10_a_sample_the_instrument_ends_on_its_preset_is_complete() {
+    let (remote, line) = BatchLine::connect(false);
+    let mut app = batch_app_with(remote);
+    app.changer = Some(mantaray_device::SampleChanger::new(8));
+    app.queue
+        .push(mantaray_device::SampleJob::new("S002", 300.0));
+    let actions = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert_eq!(
+        first_state(&app),
+        mantaray_device::JobState::Counting,
+        "{actions:?}"
+    );
+    line.set(|bench| {
+        bench.counting = false;
+        bench.clock = 300.5;
+    });
+    for _ in 0..4 {
+        app.advance_by(1.0);
+        if app.queue.completed() > 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        first_state(&app),
+        mantaray_device::JobState::Complete,
+        "{}",
+        app.status
+    );
+    assert!(app.status.contains("sample complete"), "{}", app.status);
+    assert!(
+        app.changer.as_ref().is_some_and(|c| !c.is_ready()),
+        "{}",
+        app.status
+    );
+    assert_eq!(
+        app.queue.jobs()[1].state,
+        mantaray_device::JobState::Pending
+    );
+}
+
+/// Rule 10 (amended): the operator's Stop ends the count early: the sample
+/// stays at the head of the queue, waiting, and Run next sample counts it
+/// again from the start.
+#[test]
+fn rule10_an_operator_stop_leaves_the_sample_at_the_head_to_count_again() {
+    let (remote, line) = BatchLine::connect(false);
+    let mut app = batch_app_with(remote);
+    mantaray_gui::jobs::run_next_sample(&mut app);
+    line.set(|bench| bench.clock = 12.0);
+    app.advance_by(1.0);
+    app.apply_action(Action::Stop);
+    for _ in 0..4 {
+        app.advance_by(1.0);
+    }
+    assert_eq!(
+        first_state(&app),
+        mantaray_device::JobState::Pending,
+        "{}",
+        app.status
+    );
+    assert!(app.status.contains("stopped early"), "{}", app.status);
+    assert_eq!(app.queue.completed(), 0);
+    line.forget();
+    let again = mantaray_gui::jobs::run_next_sample(&mut app);
+    assert_eq!(line.sent(), strs(&A_SAMPLE), "{again:?}");
+    assert_eq!(first_state(&app), mantaray_device::JobState::Counting);
 }

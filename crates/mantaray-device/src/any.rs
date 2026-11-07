@@ -8,7 +8,7 @@
 use mantaray_core::{AcquisitionMode, Spectrum};
 
 use crate::error::DeviceError;
-use crate::mcb::{Mcb, McbIdentity, McbProperties, McbStatus};
+use crate::mcb::{Admitted, Mcb, McbIdentity, McbProperties, McbStatus};
 use crate::presets::Presets;
 use crate::remote::RemoteMcb;
 use crate::simulator::SimulatedMcb;
@@ -73,6 +73,10 @@ macro_rules! delegate {
     };
 }
 
+/// Only the backends' own methods are passed on: the accessors, the readings
+/// and the `do_*` steps. Every command method (start, stop, presets,
+/// settings, raw messages) is the trait's provided one, so a command to an
+/// `AnyMcb` passes the same gate as one to the backend itself.
 impl Mcb for AnyMcb {
     fn identity(&self) -> &McbIdentity {
         delegate!(self, mcb => mcb.identity())
@@ -86,28 +90,56 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.properties())
     }
 
-    fn set_properties(&mut self, properties: McbProperties) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.set_properties(properties))
+    fn do_set_properties(
+        &mut self,
+        properties: McbProperties,
+        admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_set_properties(properties, admitted))
     }
 
-    fn presets_mut(&mut self) -> &mut Presets {
-        delegate!(self, mcb => mcb.presets_mut())
+    fn do_set_high_voltage(&mut self, volts: f64, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_set_high_voltage(volts, admitted))
     }
 
-    fn set_presets(&mut self, presets: Presets) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.set_presets(presets))
+    fn do_set_coarse_gain(&mut self, gain: f64, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_set_coarse_gain(gain, admitted))
     }
 
-    fn start(&mut self) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.start())
+    fn do_write_presets(
+        &mut self,
+        presets: Presets,
+        admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_write_presets(presets, admitted))
     }
 
-    fn stop(&mut self) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.stop())
+    fn do_store_host_presets(
+        &mut self,
+        presets: Presets,
+        admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_store_host_presets(presets, admitted))
     }
 
-    fn clear(&mut self) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.clear())
+    fn read_counting(&mut self) -> Result<bool, DeviceError> {
+        delegate!(self, mcb => mcb.read_counting())
+    }
+
+    fn ensure_unlocked(&self) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.ensure_unlocked())
+    }
+
+    fn do_start(&mut self, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_start(admitted))
+    }
+
+    fn do_stop(&mut self, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_stop(admitted))
+    }
+
+    fn do_clear(&mut self, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_clear(admitted))
     }
 
     fn is_active(&self) -> bool {
@@ -134,8 +166,12 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.poll_freshened())
     }
 
-    fn set_mode(&mut self, mode: AcquisitionMode) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.set_mode(mode))
+    fn do_set_mode(
+        &mut self,
+        mode: AcquisitionMode,
+        admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_set_mode(mode, admitted))
     }
 
     fn mode(&self) -> AcquisitionMode {
@@ -154,16 +190,20 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.error_spectrum())
     }
 
-    fn start_optimize(&mut self) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.start_optimize())
+    fn do_start_optimize(&mut self, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_start_optimize(admitted))
     }
 
     fn optimizing(&self) -> bool {
         delegate!(self, mcb => mcb.optimizing())
     }
 
-    fn set_pole_zero_running(&mut self, run: bool) -> Result<(), DeviceError> {
-        delegate!(self, mcb => mcb.set_pole_zero_running(run))
+    fn do_set_pole_zero_running(
+        &mut self,
+        run: bool,
+        admitted: Admitted,
+    ) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_set_pole_zero_running(run, admitted))
     }
 
     fn pole_zeroing(&self) -> bool {
@@ -182,16 +222,20 @@ impl Mcb for AnyMcb {
         delegate!(self, mcb => mcb.stored_spectrum(index))
     }
 
-    fn store_spectrum(&mut self) -> Result<usize, DeviceError> {
-        delegate!(self, mcb => mcb.store_spectrum())
+    fn do_store_spectrum(&mut self, admitted: Admitted) -> Result<usize, DeviceError> {
+        delegate!(self, mcb => mcb.do_store_spectrum(admitted))
     }
 
-    fn erase_stored(&mut self) {
-        delegate!(self, mcb => mcb.erase_stored())
+    fn do_erase_stored(&mut self, admitted: Admitted) -> Result<(), DeviceError> {
+        delegate!(self, mcb => mcb.do_erase_stored(admitted))
     }
 
-    fn send_message(&mut self, command: &str) -> Result<String, DeviceError> {
-        delegate!(self, mcb => mcb.send_message(command))
+    fn do_send_message(
+        &mut self,
+        command: &str,
+        admitted: Admitted,
+    ) -> Result<String, DeviceError> {
+        delegate!(self, mcb => mcb.do_send_message(command, admitted))
     }
 
     fn lock(&mut self, password: &str, owner: &str) -> Result<(), DeviceError> {
@@ -204,5 +248,13 @@ impl Mcb for AnyMcb {
 
     fn is_locked(&self) -> bool {
         delegate!(self, mcb => mcb.is_locked())
+    }
+
+    fn reading_untrusted(&self) -> Option<&str> {
+        delegate!(self, mcb => mcb.reading_untrusted())
+    }
+
+    fn readings(&self) -> u64 {
+        delegate!(self, mcb => mcb.readings())
     }
 }

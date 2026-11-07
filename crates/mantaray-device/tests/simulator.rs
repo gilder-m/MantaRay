@@ -263,7 +263,11 @@ fn hardware_messages_set_properties() {
     assert!((mcb.properties().amplifier.coarse_gain - 100.0).abs() < 1e-6);
     assert!((mcb.properties().amplifier.gain() - 50.0).abs() < 1e-6);
 
+    // A raw preset is a preset change: through the preset rules, into the
+    // presets (and refused, like any other, with a bad value).
     mcb.send_message("SET_PRESET_REAL 300").unwrap();
+    assert_eq!(mcb.properties().presets.real_time, Some(300.0));
+    assert!(mcb.send_message("SET_PRESET_REAL -1").is_err());
     assert_eq!(mcb.properties().presets.real_time, Some(300.0));
 
     assert!(matches!(
@@ -305,4 +309,78 @@ fn discriminators_reject_events_outside_the_window() {
     assert_eq!(spectrum.sum_range(0, 699), 0, "below the LLD");
     assert_eq!(spectrum.sum_range(1201, 2047), 0, "above the ULD");
     assert!(spectrum.sum_range(700, 1200) > 0);
+}
+
+#[test]
+fn every_preset_road_is_refused_with_maestros_words_while_counting() {
+    use mantaray_device::Presets;
+    let mut mcb = detector();
+    mcb.start().unwrap();
+    let before = *mcb.presets();
+    let text = "Presets can't be changed during acquisition.";
+    let mda = Presets {
+        mda: Some(mantaray_device::MdaPreset {
+            target: 10.0,
+            region: mantaray_core::Roi::new(1, 4),
+            efficiency: 0.05,
+            yield_fraction: 0.85,
+        }),
+        ..before
+    };
+    let live = Presets {
+        live_time: Some(60.0),
+        ..before
+    };
+    assert_eq!(mcb.apply_presets(mda).unwrap_err().to_string(), text);
+    assert_eq!(mcb.apply_presets(live).unwrap_err().to_string(), text);
+    assert_eq!(mcb.set_presets(live).unwrap_err().to_string(), text);
+    assert_eq!(
+        mcb.set_presets(Presets::default()).unwrap_err().to_string(),
+        text
+    );
+    // The Properties dialog is no road to a preset at all, counting or not.
+    for change in [
+        Presets {
+            mda: mda.mda,
+            ..before
+        },
+        live,
+    ] {
+        let mut properties = mcb.properties().clone();
+        properties.presets = change;
+        let refused = mcb.set_properties(properties).unwrap_err().to_string();
+        assert!(refused.contains("Apply presets"), "{refused}");
+    }
+    assert_eq!(*mcb.presets(), before);
+    mcb.stop().unwrap();
+    mcb.apply_presets(live).expect("idle again");
+}
+
+#[test]
+fn a_non_finite_or_negative_preset_is_refused_by_the_simulator_too() {
+    use mantaray_device::Presets;
+    let mut mcb = detector();
+    for bad in [f64::NAN, f64::INFINITY, -1.0] {
+        let presets = Presets {
+            live_time: Some(bad),
+            ..*mcb.presets()
+        };
+        assert!(mcb.apply_presets(presets).is_err(), "{bad}");
+        assert!(mcb.set_presets(presets).is_err(), "{bad}");
+        let mut properties = mcb.properties().clone();
+        properties.presets.real_time = Some(bad);
+        assert!(mcb.set_properties(properties).is_err(), "{bad}");
+    }
+    assert_eq!(*mcb.presets(), Presets::default());
+}
+
+#[test]
+fn a_counting_simulator_with_untouched_presets_accepts_an_edit() {
+    let mut mcb = detector();
+    mcb.apply_presets(mantaray_device::Presets::live(100.0))
+        .unwrap();
+    mcb.start().unwrap();
+    let mut properties = mcb.properties().clone();
+    properties.amplifier.coarse_gain = 4.0;
+    mcb.set_properties(properties).expect("presets untouched");
 }

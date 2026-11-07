@@ -1,5 +1,6 @@
 //! Presets: the conditions that stop an acquisition (MAESTRO §4.2.8).
 
+use crate::error::DeviceError;
 use mantaray_core::CalculationSettings;
 use mantaray_core::{Roi, Spectrum, mda_currie, peak_info, statistical_uncertainty};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,11 @@ pub struct MdaPreset {
     pub yield_fraction: f64,
 }
 
+/// The shortest real- or live-time preset, in seconds: one tick of the
+/// instrument's clock (`mantaray-mcb` counts presets in 20 ms ticks). A
+/// shorter one would be sent as zero ticks, which means no limit.
+pub const PRESET_TICK_SECONDS: f64 = 0.02;
+
 /// The Presets tab of the MCB Properties dialog.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Presets {
@@ -82,6 +88,194 @@ impl Presets {
         *self = Self::default();
     }
 
+    /// The presets the instrument itself holds: `SET_PRESET_REAL`,
+    /// `SET_PRESET_LIVE`, `SET_PRESET_COUNT` and `SET_PRESET_INTEG`. The
+    /// uncertainty and MDA presets are worked out host-side and never leave
+    /// this program.
+    pub fn held_by_the_instrument(&self) -> Self {
+        Self {
+            real_time: self.real_time,
+            live_time: self.live_time,
+            roi_peak: self.roi_peak,
+            roi_integral: self.roi_integral,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the presets the instrument holds differ between the two; a
+    /// change to the host-side ones alone is not one, and a NaN that is still
+    /// NaN is not a change.
+    pub fn held_differ(&self, other: &Self) -> bool {
+        fn seconds(a: Option<f64>, b: Option<f64>) -> bool {
+            match (a, b) {
+                (Some(a), Some(b)) => mantaray_core::differs(a, b),
+                (None, None) => false,
+                _ => true,
+            }
+        }
+        seconds(self.real_time, other.real_time)
+            || seconds(self.live_time, other.live_time)
+            || self.roi_peak != other.roi_peak
+            || self.roi_integral != other.roi_integral
+    }
+
+    /// Whether the presets the program itself holds (uncertainty, MDA)
+    /// differ; a NaN that is still NaN is not a change.
+    pub fn host_differ(&self, other: &Self) -> bool {
+        let uncertainty = match (&self.uncertainty, &other.uncertainty) {
+            (Some(a), Some(b)) => {
+                mantaray_core::differs(a.limit_percent, b.limit_percent)
+                    || a.low_channel != b.low_channel
+                    || a.high_channel != b.high_channel
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        let mda = match (&self.mda, &other.mda) {
+            (Some(a), Some(b)) => {
+                mantaray_core::differs(a.target, b.target)
+                    || a.region != b.region
+                    || mantaray_core::differs(a.efficiency, b.efficiency)
+                    || mantaray_core::differs(a.yield_fraction, b.yield_fraction)
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        uncertainty || mda
+    }
+
+    /// Whether any preset differs between the two. The one comparison for
+    /// "is this edit a preset change": derived `!=` on these f64 fields calls
+    /// a NaN that is still NaN a change.
+    pub fn differ(&self, other: &Self) -> bool {
+        self.held_differ(other) || self.host_differ(other)
+    }
+
+    /// The same presets with every zero turned into "not set": MAESTRO's "To
+    /// disable a preset, enter a value of zero". A zero time or count, an
+    /// uncertainty limit of zero and an MDA target of zero are each `None`, so
+    /// a zero is never stored or sent as a limit. Every preset change runs
+    /// through this before the gate ([`crate::Mcb::apply_presets`],
+    /// [`crate::Mcb::set_presets`]).
+    pub fn normalized(self) -> Self {
+        let seconds = |value: Option<f64>| value.filter(|seconds| *seconds != 0.0);
+        let counts = |value: Option<u64>| value.filter(|counts| *counts != 0);
+        Self {
+            real_time: seconds(self.real_time),
+            live_time: seconds(self.live_time),
+            roi_peak: counts(self.roi_peak),
+            roi_integral: counts(self.roi_integral),
+            uncertainty: self
+                .uncertainty
+                .filter(|preset| preset.limit_percent != 0.0),
+            mda: self.mda.filter(|preset| preset.target != 0.0),
+        }
+    }
+
+    /// Refuses a preset that is not a usable limit, by name, rounding or
+    /// truncating nothing. Run by the gate on the [`Self::normalized`] value
+    /// (a zero is already "not set"):
+    /// - every number is finite and not negative;
+    /// - a time preset is at least one tick of the instrument's clock,
+    ///   [`PRESET_TICK_SECONDS`] (shorter would be sent as zero ticks, which
+    ///   the instrument reads as no limit at all);
+    /// - an uncertainty range runs from low to high (channels are whole by
+    ///   type);
+    /// - an MDA efficiency and yield are fractions above zero and at most one
+    ///   (the MDA divides by both; 85 typed for 85 % would stop at once).
+    pub fn validate(&self) -> Result<(), DeviceError> {
+        fn refuse(setting: &str, detail: String) -> Result<(), DeviceError> {
+            Err(DeviceError::OutOfRange {
+                setting: setting.into(),
+                detail,
+            })
+        }
+        fn number(setting: &str, value: f64) -> Result<(), DeviceError> {
+            if value.is_finite() && value >= 0.0 {
+                return Ok(());
+            }
+            refuse(
+                setting,
+                format!("{value} is not a valid preset (it must be a number, not negative)"),
+            )
+        }
+        for (setting, seconds) in [
+            ("real-time preset", self.real_time),
+            ("live-time preset", self.live_time),
+        ] {
+            if let Some(seconds) = seconds {
+                number(setting, seconds)?;
+                if seconds > 0.0 && seconds < PRESET_TICK_SECONDS {
+                    refuse(
+                        setting,
+                        format!(
+                            "{seconds} s is shorter than the instrument's clock tick of \
+                             {PRESET_TICK_SECONDS} s (0 disables the preset)"
+                        ),
+                    )?;
+                }
+            }
+        }
+        if let Some(preset) = &self.uncertainty {
+            number("uncertainty preset", preset.limit_percent)?;
+            if preset.low_channel > preset.high_channel {
+                refuse(
+                    "uncertainty preset",
+                    format!(
+                        "the channel range {} to {} runs backwards (low must not exceed high)",
+                        preset.low_channel, preset.high_channel
+                    ),
+                )?;
+            }
+        }
+        if let Some(preset) = &self.mda {
+            number("MDA preset target", preset.target)?;
+            for (setting, value) in [
+                ("MDA preset efficiency", preset.efficiency),
+                ("MDA preset yield", preset.yield_fraction),
+            ] {
+                number(setting, value)?;
+                if value <= 0.0 || value > 1.0 {
+                    refuse(
+                        setting,
+                        format!("{value} is not usable (a fraction above 0 and at most 1)"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets the real-time preset; zero disables it, as in MAESTRO ("a zero
+    /// value disables a preset"), and is never stored as a limit of zero.
+    pub fn set_real_time(&mut self, seconds: f64) {
+        self.real_time = (seconds != 0.0).then_some(seconds);
+    }
+
+    /// Sets the live-time preset; zero disables it.
+    pub fn set_live_time(&mut self, seconds: f64) {
+        self.live_time = (seconds != 0.0).then_some(seconds);
+    }
+
+    /// Sets the ROI peak-count preset; zero disables it.
+    pub fn set_roi_peak(&mut self, counts: u64) {
+        self.roi_peak = (counts != 0).then_some(counts);
+    }
+
+    /// Sets the ROI integral preset; zero disables it.
+    pub fn set_roi_integral(&mut self, counts: u64) {
+        self.roi_integral = (counts != 0).then_some(counts);
+    }
+
+    /// Sets the uncertainty preset; a zero limit disables it.
+    pub fn set_uncertainty(&mut self, limit_percent: f64, low_channel: usize, high_channel: usize) {
+        self.uncertainty = (limit_percent != 0.0).then_some(UncertaintyPreset {
+            limit_percent,
+            low_channel,
+            high_channel,
+        });
+    }
+
     /// True when nothing will stop the acquisition.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
@@ -101,6 +295,30 @@ impl Presets {
             live_time: Some(seconds),
             ..Self::default()
         }
+    }
+
+    /// Which preset a count that has ended ended on, if any: the batch
+    /// queue's "complete or stopped early".
+    ///
+    /// The instrument decides its own time presets on its own clock, in
+    /// [`PRESET_TICK_SECONDS`] ticks, and the clocks it reports can read a
+    /// tick short of the preset it stopped on (LT=299.99 on a 300 s preset).
+    /// Judged exactly, that count read as stopped early and the batch
+    /// stalled (review of 21df1c3, #5). So a held time preset counts as
+    /// reached within one tick; everything else as [`Self::reached`] says.
+    pub fn ended_on(
+        &self,
+        spectrum: &Spectrum,
+        real_time: f64,
+        live_time: f64,
+    ) -> Option<PresetKind> {
+        self.reached(spectrum, real_time, live_time).or_else(|| {
+            self.held_by_the_instrument().reached(
+                spectrum,
+                real_time + PRESET_TICK_SECONDS,
+                live_time + PRESET_TICK_SECONDS,
+            )
+        })
     }
 
     /// Which preset, if any, is satisfied.

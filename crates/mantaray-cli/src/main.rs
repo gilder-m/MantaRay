@@ -771,7 +771,7 @@ fn acquire(args: AcquireArgs) -> Result<()> {
         .seed(args.seed)
         .build();
     detector
-        .set_presets(Presets {
+        .apply_presets(Presets {
             live_time: args.live,
             real_time: args.real,
             ..Presets::default()

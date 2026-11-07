@@ -14,7 +14,7 @@ const CHANNELS: usize = 64;
 /// call and nothing else, so it is the single seam between these tests and
 /// the method the code under test names it by.
 fn apply(mcb: &mut dyn Mcb, presets: Presets) -> Result<(), mantaray_device::DeviceError> {
-    mcb.set_presets(presets)
+    mcb.apply_presets(presets)
 }
 
 /// Connected on the direct line, log emptied.
@@ -93,6 +93,25 @@ fn step_fresh(
         );
         std::thread::yield_now();
     }
+}
+
+/// The commands the rig received since the last call, without the regular
+/// fetches (a SHOW_STATUS directly followed by SHOW_DATA): over a courier a
+/// fetch asked for by the last poll can land between a test's commands.
+fn commands(rig: &Rig) -> Vec<String> {
+    let sent = rig.take_sent();
+    let mut kept = Vec::new();
+    let mut words = sent.iter().peekable();
+    while let Some(command) = words.next() {
+        if command == "SHOW_DATA" {
+            continue;
+        }
+        if command == "SHOW_STATUS" && words.peek().is_some_and(|next| *next == "SHOW_DATA") {
+            continue;
+        }
+        kept.push(command.clone());
+    }
+    kept
 }
 
 fn live(seconds: f64) -> Presets {
@@ -266,7 +285,7 @@ fn rule3_t06_a_count_that_stopped_itself_does_not_block_a_change() {
         rig.take_sent();
         apply(&mut mcb, live(5.0)).unwrap_or_else(|error| panic!("{line}: {error}"));
         assert_eq!(
-            rig.take_sent(),
+            commands(rig),
             vec!["SHOW_STATUS", "SET_PRESET_CLEAR", "SET_PRESET_LIVE 5"],
             "{line}"
         );
@@ -782,7 +801,7 @@ fn amendment_an_odd_status_line_keeps_the_last_values_and_the_fetch_goes_on() {
         rig.tick(1.0);
         rig.fault(Fault::StatusWithout {
             key: "RT".into(),
-            count: 1,
+            count: 2,
         });
         fresh(&mut mcb);
         assert_eq!(

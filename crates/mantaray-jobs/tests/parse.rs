@@ -259,6 +259,108 @@ fn an_unknown_command_reports_its_line() {
 }
 
 #[test]
+fn a_preset_that_is_not_a_finite_non_negative_number_is_a_job_error() {
+    for line in [
+        "SET_PRESET_UNCERTAINTY NaN 0 100",
+        "SET_PRESET_UNCERTAINTY 1.5 0 NaN",
+        "SET_PRESET_UNCERTAINTY inf 0 100",
+        "SET_PRESET_UNCERTAINTY -1 0 100",
+        "SET_PRESET_UNCERTAINTY 1.5 -3 100",
+        "SET_PRESET_REAL NaN",
+        "SET_PRESET_REAL inf",
+        "SET_PRESET_REAL -5",
+        "SET_PRESET_LIVE nan",
+        "SET_PRESET_LIVE -infinity",
+        "SET_PRESET_COUNT NaN",
+        "SET_PRESET_COUNT -1",
+        "SET_PRESET_INTEG inf",
+        "SET_PRESET_INTEG -20000",
+    ] {
+        let error = Job::parse(&format!("{line}\n")).unwrap_err();
+        assert!(
+            matches!(error, JobError::BadArgument { line: 1, .. }),
+            "{line}: {error:?}"
+        );
+    }
+    // Zero is still a preset value (MAESTRO's "none").
+    assert!(matches!(only("SET_PRESET_REAL 0"), Command::SetPresetReal(t) if t == 0.0));
+}
+
+#[test]
+fn a_count_preset_below_one_is_refused_and_zero_stays_zero() {
+    for line in ["SET_PRESET_COUNT 0.5", "SET_PRESET_INTEG 0.99"] {
+        let error = Job::parse(&format!("REM x\n{line}\n")).unwrap_err();
+        assert!(
+            matches!(error, JobError::BadArgument { line: 2, .. }),
+            "{line}: {error:?}"
+        );
+    }
+    // Zero reaches the host as zero; the host turns it into "no preset".
+    assert!(matches!(
+        only("SET_PRESET_COUNT 0"),
+        Command::SetPresetCount(0)
+    ));
+    assert!(matches!(
+        only("SET_PRESET_INTEG 0"),
+        Command::SetPresetIntegral(0)
+    ));
+}
+
+/// T25: a count preset is whole counts: 1500.7 is refused, not truncated to
+/// 1500, and so is 0.4 (which would truncate to the zero that disables it).
+/// The uncertainty range is whole channels that run from low to high.
+#[test]
+fn t25_no_count_preset_or_channel_is_truncated() {
+    for line in [
+        "SET_PRESET_COUNT 1500.7",
+        "SET_PRESET_COUNT 0.4",
+        "SET_PRESET_INTEG 20000.5",
+        "SET_PRESET_UNCERTAINTY 5 10 5",
+        "SET_PRESET_UNCERTAINTY 5 1.5 9",
+        "SET_PRESET_UNCERTAINTY 5 -1 9",
+    ] {
+        let error = Job::parse(&format!("REM x\nREM y\n{line}\n")).unwrap_err();
+        assert!(
+            matches!(error, JobError::BadArgument { line: 3, .. }),
+            "{line}: {error:?}"
+        );
+        assert!(error.to_string().contains("line 3"), "{error}");
+    }
+    assert!(matches!(
+        only("SET_PRESET_COUNT 1500"),
+        Command::SetPresetCount(1500)
+    ));
+}
+
+#[test]
+fn the_uncertainty_preset_checks_its_channels_as_channels() {
+    for line in [
+        "SET_PRESET_UNCERTAINTY 1.5 10.5 100",
+        "SET_PRESET_UNCERTAINTY 1.5 10 100.2",
+        "SET_PRESET_UNCERTAINTY 1.5 200 100",
+    ] {
+        let error = Job::parse(&format!("{line}\n")).unwrap_err();
+        match error {
+            JobError::BadArgument {
+                line: 1, detail, ..
+            } => assert!(
+                detail.contains("channel"),
+                "{line}: the message names channels: {detail}"
+            ),
+            other => panic!("{line}: {other:?}"),
+        }
+    }
+    assert!(matches!(
+        only("SET_PRESET_UNCERTAINTY 1.5,100,100"),
+        Command::SetPresetUncertainty {
+            low: 100,
+            high: 100,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_bad_argument_reports_its_line() {
     let error = Job::parse("SET_PRESET_REAL abc\n").unwrap_err();
     assert!(

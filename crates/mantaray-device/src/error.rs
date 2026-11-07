@@ -17,6 +17,21 @@ pub enum DeviceError {
         /// What is in the way.
         detail: String,
     },
+    /// A preset change was attempted while the detector is counting.
+    ///
+    /// MAESTRO's error list: "Presets can't be changed during acquisition.
+    /// Changes in the preset condition(s) are not allowed while the Detector
+    /// is actively acquiring." The text is MAESTRO's, word for word.
+    #[error("Presets can't be changed during acquisition.")]
+    PresetsWhileCounting,
+    /// The instrument could not say whether it is counting: the status read
+    /// failed, or its reply was not a status line with the counting flag.
+    /// The change that needed the answer is refused rather than guessed.
+    #[error("cannot tell whether the detector is counting ({reason}); nothing was sent")]
+    CountingUnknown {
+        /// Why the answer could not be had.
+        reason: String,
+    },
     /// A setting was outside the instrument's range.
     #[error("{setting} out of range: {detail}")]
     OutOfRange {
@@ -38,6 +53,17 @@ pub enum DeviceError {
         command: String,
         /// Why it failed.
         detail: String,
+    },
+    /// Some of a set of changes reached the instrument and a later one did
+    /// not. The instrument is not rolled back; the message says what it now
+    /// holds and what it does not, e.g. `bias set to 1200 V; presets not set:
+    /// ...`.
+    #[error("{applied}; {failed}")]
+    PartlyApplied {
+        /// What was applied before the failure.
+        applied: String,
+        /// What was not, and why.
+        failed: String,
     },
     /// Communication with the instrument failed.
     #[error("communication failure: {detail}")]
