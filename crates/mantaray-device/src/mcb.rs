@@ -355,10 +355,13 @@ enum Op<'a> {
 /// ```compile_fail
 /// use mantaray_device::{Mcb, Presets, SimulatedMcb};
 /// let mut detector = SimulatedMcb::new(1, "SIM");
-/// detector.do_write_presets(Presets::live(1.0)).unwrap();
+/// // The arguments are right; only the token cannot be made.
+/// detector
+///     .do_write_presets(Presets::live(1.0), mantaray_device::mcb::Admitted(()))
+///     .unwrap();
 /// ```
 ///
-/// What the two above try by the back door, the front door does:
+/// What the ones above try by the back door, the front door does:
 ///
 /// ```
 /// use mantaray_device::{Mcb, Presets, SimulatedMcb};
@@ -472,7 +475,7 @@ fn raw_presets(current: &Presets, command: &str) -> Result<Option<Presets>, Devi
     // Counts are whole: a fraction is refused, never truncated (rule 6).
     let count = |setting: &str| -> Result<Option<u64>, DeviceError> {
         let value = number()?;
-        if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+        if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= u64::MAX as f64 {
             return Err(DeviceError::OutOfRange {
                 setting: setting.into(),
                 detail: format!("{value} is not a whole number of counts"),
@@ -524,8 +527,10 @@ pub trait Mcb: Send {
     /// program. Never the presets: an edit whose presets differ from what the
     /// detector holds is refused, and presets change through
     /// [`Self::apply_presets`]. Fails while locked, or on out-of-range values.
-    fn set_properties(&mut self, properties: McbProperties) -> Result<(), DeviceError> {
+    fn set_properties(&mut self, mut properties: McbProperties) -> Result<(), DeviceError> {
         let admitted = admit(self, Op::Setting)?;
+        // Zero disables a preset, so a zero is the same preset as none.
+        properties.presets = properties.presets.normalized();
         if properties.presets.differ(self.presets()) {
             return Err(DeviceError::NotSupported {
                 feature: "changing presets with the other settings - presets are changed \
@@ -842,12 +847,37 @@ pub trait Mcb: Send {
     fn send_message(&mut self, command: &str) -> Result<String, DeviceError> {
         raw_allowed(command)?;
         // The lock is the gate's first question, before the value is read.
-        if verb(command).starts_with("SET_PRESET") {
+        let word = verb(command);
+        if word.starts_with("SET_PRESET") || word == "SET_HV" || word == "SET_GAIN_COARSE" {
             self.ensure_unlocked()?;
         }
         if let Some(presets) = raw_presets(self.presets(), command)? {
             self.set_presets(presets)?;
             return Ok("OK".into());
+        }
+        // The other commands the typed methods own take the same door, so a
+        // raw one is checked, confirmed and mirrored like its typed twin.
+        let words: Vec<&str> = command.split_whitespace().collect();
+        let value = || -> Result<f64, DeviceError> {
+            match words.as_slice() {
+                [_, word] => word.parse::<f64>().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| DeviceError::Command {
+                command: command.trim().to_string(),
+                detail: "the value is not a number; nothing was sent".into(),
+            })
+        };
+        let typed = match (verb(command).as_str(), words.len()) {
+            ("START", 1) => Some(self.start()),
+            ("STOP", 1) => Some(self.stop()),
+            ("CLEAR", 1) => Some(self.clear()),
+            ("SET_HV", _) => Some(self.set_high_voltage(value()?)),
+            ("SET_GAIN_COARSE", _) => Some(self.set_coarse_gain(value()?)),
+            _ => None,
+        };
+        if let Some(outcome) = typed {
+            return outcome.map(|()| "OK".into());
         }
         let admitted = admit(self, Op::Raw(command))?;
         self.do_send_message(command, admitted)
@@ -874,11 +904,13 @@ pub trait Mcb: Send {
         None
     }
 
-    /// How many status readings the mirror has taken so far, believed or
-    /// not: every poll that worked in a fetch, and every status read the
-    /// gate made. It only grows. A count's end is judged on a reading taken
-    /// after the START ([`crate::CountWatch`]), and this is how a watcher
-    /// tells one from a reading older than its own question.
+    /// How many status readings the mirror's polls have worked in so far,
+    /// believed or not. It only grows. A count's end is judged on a reading
+    /// taken after the START ([`crate::CountWatch`]), and this is how a
+    /// watcher tells one from a reading older than its own question. The
+    /// gate's own status reads are not counted: they come in bursts (a STOP
+    /// confirmation, a refused preset), and the watch's bounds are in polls,
+    /// which come at the fetch pace.
     fn readings(&self) -> u64;
 
     /// Which preset, if any, has been satisfied.

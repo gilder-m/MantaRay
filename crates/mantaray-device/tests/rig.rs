@@ -877,3 +877,30 @@ fn the_rig_served_over_tcp_runs_the_same_rules() {
     );
     no_violations(&rig, "tcp");
 }
+
+/// Review of 45f02cf: the never-started call is made on fetches, not on the
+/// gate's own status reads, so a burst of refused or checked commands right
+/// after an accepted START does not end a count the detector is about to
+/// begin.
+#[test]
+fn review_45f02cf_gate_reads_do_not_hurry_the_never_started_call() {
+    both(|rig, mut mcb, line| {
+        apply(&mut mcb, Presets::live(30.0)).expect("preset");
+        rig.fault(Fault::Reply {
+            verb: "START".into(),
+            reply: "OK".into(),
+            count: 1,
+            execute: false,
+        });
+        mcb.start().expect("START is accepted");
+        let mut watch = mantaray_device::CountWatch::started(&mcb);
+        for _ in 0..(mantaray_device::NEVER_STARTED_READINGS * 2) {
+            mcb.read_counting().expect("a gate read");
+        }
+        assert_eq!(
+            watch.check(&mcb),
+            mantaray_device::CountState::Counting,
+            "{line}: gate reads called the count never started"
+        );
+    });
+}

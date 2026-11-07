@@ -83,7 +83,7 @@ pub struct RemoteMcb {
     /// Why the last status reply was not believed, while it is not: the
     /// display keeps the last good values meanwhile.
     untrusted: Option<String>,
-    /// Status readings taken so far ([`Mcb::readings`]).
+    /// Status readings the polls have worked in so far ([`Mcb::readings`]).
     readings: u64,
 }
 
@@ -913,7 +913,6 @@ impl Mcb for RemoteMcb {
             .map_err(|error| DeviceError::CountingUnknown {
                 reason: format!("the status read failed: {error}"),
             })?;
-        self.readings += 1;
         let Some(reading) = parse_status(&reply) else {
             let reason = format!("the status reply is not a status line: {reply:.60?}");
             self.untrusted = Some(reason.clone());

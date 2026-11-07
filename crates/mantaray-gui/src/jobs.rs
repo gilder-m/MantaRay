@@ -475,12 +475,33 @@ impl JobHost for App {
     }
 
     fn stop(&mut self) -> Result<(), JobError> {
-        self.apply_action(Action::Stop);
+        // On the job's detector, like START, and a STOP that did not take
+        // stops the job: going on would CLEAR or SAVE a count still running.
+        // The START it ends is over, so a later WAIT does not watch it.
+        self.job_count = None;
+        let Some(detector) = self.job_detector() else {
+            return Err(JobError::host("STOP: there is no detector"));
+        };
+        self.detectors[detector].stop().map_err(device)?;
+        self.status = "acquisition stopped".into();
         Ok(())
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
-        self.apply_action(Action::Clear);
+        self.job_count = None;
+        if self.active_is_buffer() {
+            self.apply_action(Action::Clear);
+            return Ok(());
+        }
+        // A detector that refused CLEAR still holds its counts; a START after
+        // it would count on top of them, so the job stops here.
+        let Some(detector) = self.job_detector() else {
+            return Err(JobError::host("CLEAR: there is no detector"));
+        };
+        self.push_undo("Clear");
+        self.detectors[detector].clear().map_err(device)?;
+        self.mark_modified();
+        self.status = "cleared - Edit/Undo recovers the data".into();
         Ok(())
     }
 

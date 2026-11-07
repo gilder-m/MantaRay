@@ -59,12 +59,25 @@ jobs:
         shell: bash
         run: |
           cargo build -p mantaray-gui -p mantaray-cli
-          ! cargo tree -p mantaray-gui -e features | grep -q 'mantaray-gui feature "simulator"'
-          ! cargo tree -p mantaray-cli -e features | grep -q 'mantaray-cli feature "simulator"'
-          # Nor the test rig: it is a dev-dependency feature, so the dev
-          # edges are left out of the tree that is checked.
-          ! cargo tree -p mantaray-gui -e normal,build,features | grep -q 'mantaray-device feature "rig"'
-          ! cargo tree -p mantaray-cli -e normal,build,features | grep -q 'mantaray-device feature "rig"'
+          # Each tree is written out whole and then searched: `bash -e`
+          # ignores a `!` pipeline, and under pipefail `grep -q` ending early
+          # would kill cargo tree and pass on a match. A failed cargo tree
+          # fails the step (the file is never searched).
+          refuse() {  # $1 = package, $2 = edges, $3 = what must be absent
+            cargo tree -p "$1" -e "$2" > tree.txt
+            if grep -qF "$3" tree.txt; then
+              echo "::error::$1 ships with $3"
+              exit 1
+            fi
+          }
+          # Tests turn both on through dev-dependencies (the crate depends on
+          # itself), so the dev edges are left out of the tree that is
+          # checked: it is the shipped build's.
+          refuse mantaray-gui normal,build,features 'mantaray-gui feature "simulator"'
+          refuse mantaray-cli normal,build,features 'mantaray-cli feature "simulator"'
+          # Nor the test rig.
+          refuse mantaray-gui normal,build,features 'mantaray-device feature "rig"'
+          refuse mantaray-cli normal,build,features 'mantaray-device feature "rig"'
 
       # The libraries and the command-line tool must build with no system
       # libraries at all, so they work in containers and on servers.

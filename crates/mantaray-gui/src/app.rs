@@ -2329,14 +2329,14 @@ impl App {
             .unwrap_or(0)
     }
 
-    fn active_is_buffer(&self) -> bool {
+    pub(crate) fn active_is_buffer(&self) -> bool {
         self.active
             .and_then(|index| self.windows.get(index))
             .map(|window| window.is_buffer())
             .unwrap_or(false)
     }
 
-    fn mark_modified(&mut self) {
+    pub(crate) fn mark_modified(&mut self) {
         if let Some(index) = self.active {
             self.windows[index].modified = true;
         }

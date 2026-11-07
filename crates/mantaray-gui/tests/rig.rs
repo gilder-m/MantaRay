@@ -451,3 +451,61 @@ fn rule3_a_front_panel_count_blocks_the_job_preset() {
     assert!(rig.violations().is_empty(), "{:?}", rig.violations());
     let _ = Mcb::presets(&app.detectors[index]);
 }
+
+// ------------------------------------------- review 45f02cf, job STOP/CLEAR
+
+#[test]
+fn review1_a_job_stop_that_did_not_take_stops_the_job() {
+    let (mut app, rig, index) = rig_app();
+    rig.fault(Fault::StopLag { reads: 1000 });
+    let _ = commands(&rig);
+    let status = run_job(
+        &mut app,
+        &rig,
+        index,
+        "SET_PRESET_LIVE 100\nSTART\nSTOP\nCLEAR\n",
+        6,
+    );
+    assert!(app.job.is_none(), "the job went on: {status}");
+    assert!(status.contains("did not stop"), "{status}");
+    assert!(
+        !commands(&rig).iter().any(|command| command == "CLEAR"),
+        "the job cleared a detector that is still counting"
+    );
+}
+
+#[test]
+fn review1_a_job_clear_the_detector_refused_stops_the_job() {
+    let (mut app, rig, index) = rig_app();
+    rig.err("CLEAR", "busy", 1);
+    let _ = commands(&rig);
+    let status = run_job(
+        &mut app,
+        &rig,
+        index,
+        "CLEAR\nSET_PRESET_LIVE 3\nSTART\n",
+        6,
+    );
+    assert!(app.job.is_none(), "the job went on: {status}");
+    assert!(status.contains("job stopped"), "{status}");
+    assert!(
+        !commands(&rig).iter().any(|command| command == "START"),
+        "the job started on top of a spectrum it could not clear"
+    );
+}
+
+#[test]
+fn review4_a_stopped_start_does_not_haunt_a_later_wait() {
+    let (mut app, rig, index) = rig_app();
+    // START then STOP before any reading saw the count, CLEAR, then a WAIT on
+    // a count that is not the job's: the earlier START's watch is gone.
+    let status = run_job(
+        &mut app,
+        &rig,
+        index,
+        "SET_PRESET_LIVE 3\nSTART\nSTOP\nCLEAR\nWAIT\n",
+        12,
+    );
+    assert!(app.job.is_none(), "the job did not finish: {status}");
+    assert!(status.contains("job finished"), "{status}");
+}

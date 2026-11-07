@@ -318,6 +318,10 @@ fn t25_no_count_preset_or_channel_is_truncated() {
         "SET_PRESET_UNCERTAINTY 5 10 5",
         "SET_PRESET_UNCERTAINTY 5 1.5 9",
         "SET_PRESET_UNCERTAINTY 5 -1 9",
+        // Too large to hold: refused, never saturated to the largest count.
+        "SET_PRESET_COUNT 1e30",
+        "SET_PRESET_INTEG 18446744073709551616",
+        "SET_PRESET_UNCERTAINTY 5 1 1e30",
     ] {
         let error = Job::parse(&format!("REM x\nREM y\n{line}\n")).unwrap_err();
         assert!(

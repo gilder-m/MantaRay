@@ -184,10 +184,13 @@ impl JobHost for CliSession {
     }
 
     fn stop(&mut self) -> Result<(), JobError> {
+        // The START this ends is over: a later WAIT does not watch it.
+        self.count = None;
         self.instrument()?.stop().map_err(device)
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
+        self.count = None;
         match self.target {
             Target::Buffer => {
                 self.buffer.clear();
@@ -737,6 +740,19 @@ mod tests {
         let outcome = within(30, "WAIT", move || session.wait_for_stop());
         let error = outcome.expect_err("a count that never ran is not over");
         assert!(error.to_string().contains("did not count"), "{error}");
+    }
+
+    #[test]
+    fn rig_review4_a_stopped_start_does_not_haunt_a_later_wait() {
+        // START, STOP before any reading saw the count, CLEAR: a later WAIT
+        // is on whatever counts next, not on the START that was stopped.
+        let (mut session, _rig) = rig_session();
+        session.set_preset_live(3.0).expect("preset");
+        session.start().expect("START");
+        session.stop().expect("STOP");
+        session.clear().expect("CLEAR");
+        let outcome = within(30, "WAIT", move || session.wait_for_stop());
+        outcome.expect("WAIT on an idle detector is over at once");
     }
 
     #[test]

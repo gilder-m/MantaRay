@@ -120,7 +120,9 @@ fn parse_line(text: &str, line: usize) -> Result<Command, JobError> {
     // the zero that disables the preset without saying so.
     let count_preset = |index: usize| -> Result<u64, JobError> {
         let value = preset(index)?;
-        if value.fract() != 0.0 {
+        // Too large to hold is refused too, never saturated to the largest
+        // count (2^64 itself would saturate).
+        if value.fract() != 0.0 || value >= u64::MAX as f64 {
             return Err(bad(format!(
                 "{value} is not a valid count preset (it must be a whole number of counts, \
                  or 0 to disable the preset)"
@@ -131,7 +133,7 @@ fn parse_line(text: &str, line: usize) -> Result<Command, JobError> {
     // A channel is a whole, non-negative number.
     let channel = |index: usize| -> Result<usize, JobError> {
         let value = number(index)?;
-        if value < 0.0 || value.fract() != 0.0 {
+        if value < 0.0 || value.fract() != 0.0 || value >= usize::MAX as f64 {
             return Err(bad(format!(
                 "{value} is not a channel number (a whole number, 0 or more)"
             )));

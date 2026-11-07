@@ -1458,6 +1458,7 @@ fn review6_a_raw_preset_command_goes_through_the_preset_rules() {
         for message in [
             "set_preset_real NaN",
             "SET_PRESET_COUNT 1500.7",
+            "SET_PRESET_COUNT 18446744073709551616",
             "SET_PRESET_LIVE",
             "SET_PRESET_UNCERTAINTY 5 10 20",
         ] {
@@ -1481,6 +1482,64 @@ fn review6_a_raw_preset_command_goes_through_the_preset_rules() {
             .send_message("SET_PRESET_CLEAR")
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(rig.mcb.presets(), &Presets::default(), "{name}");
+    }
+}
+
+/// Review of 45f02cf: a raw bias or gain is the same change as the typed
+/// one, checked and mirrored, on every backend; one out of range is refused
+/// before anything is sent.
+#[test]
+fn review_45f02cf_a_raw_bias_or_gain_goes_through_the_setting_rules() {
+    for mut rig in Rig::both() {
+        let name = rig.name;
+        rig.clear_log();
+        for message in [
+            "SET_HV 99999",
+            "SET_HV 1200.7",
+            "SET_HV",
+            "SET_GAIN_COARSE 1e9",
+        ] {
+            rig.mcb
+                .send_message(message)
+                .expect_err(&format!("{name}: {message}"));
+        }
+        assert!(
+            !rig.log()
+                .iter()
+                .any(|command| command.starts_with("SET_HV") || command.starts_with("SET_GAIN")),
+            "{name}: {:?}",
+            rig.log()
+        );
+        rig.mcb
+            .send_message("SET_HV 1200")
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            rig.mcb.properties().high_voltage.target_volts,
+            1200.0,
+            "{name}: the mirror does not hold the bias that was sent"
+        );
+    }
+}
+
+/// Review of 45f02cf: a zero preset is the same as none (MAESTRO's zero
+/// disables), so settings that carry one where the mirror holds none are
+/// not a preset change and go through.
+#[test]
+fn review_45f02cf_a_zero_preset_in_the_settings_is_not_a_preset_change() {
+    for mut rig in Rig::both() {
+        let name = rig.name;
+        let mut properties = rig.mcb.properties().clone();
+        properties.presets.real_time = Some(0.0);
+        properties.presets.roi_peak = Some(0);
+        properties.high_voltage.target_volts = 1100.0;
+        rig.mcb
+            .set_properties(properties)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            rig.mcb.properties().high_voltage.target_volts,
+            1100.0,
+            "{name}"
+        );
     }
 }
 
