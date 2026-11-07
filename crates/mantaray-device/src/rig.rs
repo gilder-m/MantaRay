@@ -434,7 +434,8 @@ impl Instrument {
             && let Fault::StartLag { reads } = self.faults.remove(at)
             && reads > 0
         {
-            self.starting = reads;
+            // `reads` idle status reads, then the one that finds it counting.
+            self.starting = reads + 1;
             return;
         }
         self.begin();

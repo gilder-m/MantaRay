@@ -1037,3 +1037,27 @@ fn gilder_a_start_stopped_before_it_counted_does_not_date_the_count() {
         );
     });
 }
+
+/// A count that ran and was stopped before any reading saw it running keeps
+/// the date START gave it: a resume without Clear is not redated from a
+/// clock that includes the first run (medium review of 69b72a6).
+#[test]
+fn gilder_a_resume_after_an_unseen_run_keeps_its_date() {
+    both(|rig, mut mcb, line| {
+        mcb.set_confirm_step(std::time::Duration::ZERO);
+        apply(&mut mcb, Presets::live(30.0)).expect("preset");
+        let first = chrono::Local::now().naive_local();
+        mcb.start().expect("START");
+        let dated = mcb.spectrum().start_time.expect("a provisional date");
+        rig.tick(3.0);
+        mcb.stop().expect("STOP");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        mcb.start().expect("resume");
+        until_counting(&mut mcb, line);
+        assert_eq!(
+            mcb.spectrum().start_time,
+            Some(dated),
+            "{line}: redated on the resume (first START {first})"
+        );
+    });
+}

@@ -512,9 +512,8 @@ fn review4_a_stopped_start_does_not_haunt_a_later_wait() {
 
 #[test]
 fn review_r2_a_job_stop_on_a_buffer_stops_no_detector() {
-    // The job's detector with a buffer active is the first one (the
-    // simulator here), what its START would count on; never the rig the
-    // buffer was copied from.
+    // A job that started no count, with a buffer active: its STOP acts on
+    // the buffer (nothing to stop), as on main (Gilder 11/7, #10: keep).
     let (mut app, rig, index) = rig_app();
     app.apply_action(Action::Start);
     settle(&mut app, index);
@@ -523,15 +522,15 @@ fn review_r2_a_job_stop_on_a_buffer_stops_no_detector() {
     let _ = run_job(&mut app, &rig, index, "STOP\n", 3);
     assert!(
         rig.counting(),
-        "a job STOP with a buffer active stopped a detector its START would not count on"
+        "a job STOP with a buffer active stopped a detector the job never started"
     );
+    assert!(!app.detectors[0].is_active());
 }
 
 #[test]
 fn review_r3_a_raw_stop_is_the_jobs_own_stop() {
-    // SEND_MESSAGE "STOP" takes the job's door: with a buffer active it
-    // stops the job's detector (the first one), as the job's STOP does,
-    // never the rig the buffer was copied from.
+    // SEND_MESSAGE "STOP" takes the job's door: with a buffer active and
+    // no START in the job it stops nothing, as the job's STOP does not.
     let (mut app, rig, index) = rig_app();
     app.apply_action(Action::Start);
     settle(&mut app, index);
@@ -540,7 +539,7 @@ fn review_r3_a_raw_stop_is_the_jobs_own_stop() {
     let _ = run_job(&mut app, &rig, index, "SEND_MESSAGE \"STOP\"\n", 3);
     assert!(
         rig.counting(),
-        "a raw STOP with a buffer active stopped a detector its START would not count on"
+        "a raw STOP with a buffer active stopped a detector the job never started"
     );
 }
 
@@ -665,5 +664,32 @@ fn high_review_a_stop_after_selecting_a_buffer_stops_what_start_counted_on() {
             sent.iter().any(|command| command == verb),
             "{verb} did not reach the rig: {sent:?}"
         );
+    }
+}
+
+#[test]
+fn medium_review_a_buffer_clear_in_a_job_that_started_nothing_clears_the_buffer() {
+    // Gilder 11/7, #9 "Yes": with a buffer active and no START in the job,
+    // CLEAR (typed or raw) clears the buffer and touches no detector.
+    for clear in ["CLEAR", "SEND_MESSAGE \"CLEAR\""] {
+        let (mut app, rig, index) = rig_app();
+        app.apply_action(Action::Start);
+        settle(&mut app, index);
+        rig.tick(2.0);
+        settle(&mut app, index);
+        app.apply_action(Action::CopyToBuffer);
+        assert!(app.active_spectrum().is_some_and(|s| s.total_counts() > 0));
+        let _ = commands(&rig);
+        let status = run_job(&mut app, &rig, index, &format!("{clear}\n"), 3);
+        assert_eq!(
+            app.active_spectrum().map(|s| s.total_counts()),
+            Some(0),
+            "{clear} left the buffer full: {status}"
+        );
+        assert!(
+            !commands(&rig).iter().any(|command| command == "CLEAR"),
+            "{clear} cleared the rig the job never started"
+        );
+        assert!(rig.counting(), "{clear}");
     }
 }

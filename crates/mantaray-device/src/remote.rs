@@ -464,8 +464,10 @@ impl RemoteMcb {
             self.start_unseen = None;
         } else if reading.real_time > unseen.real_time {
             // Counted and over between two readings: it began, but when
-            // cannot be read back, so the date stays the moment START was sent.
+            // cannot be read back, so the date stays the moment START was
+            // sent, for good (a resume's clock would include this run).
             self.start_unseen = None;
+            self.provisional_start = false;
         } else if fetch {
             unseen.idle_fetches += 1;
             if unseen.idle_fetches >= crate::NEVER_STARTED_READINGS {
@@ -550,6 +552,15 @@ impl RemoteMcb {
                 self.untrusted = Some(format!(
                     "the status reply is not a status line: {status:.60?}"
                 ));
+                // An unbelievable fetch is still a fetch towards the bound
+                // on an unseen START: the hold never outlasts the wait a
+                // WAIT gives up on (UNREADABLE_READINGS, the same count).
+                if let Some(unseen) = self.start_unseen.as_mut() {
+                    unseen.idle_fetches += 1;
+                    if unseen.idle_fetches >= crate::NEVER_STARTED_READINGS {
+                        self.start_unseen = None;
+                    }
+                }
             }
         }
 
@@ -1066,10 +1077,14 @@ impl Mcb for RemoteMcb {
             // moment START was sent, as before.
             self.provisional_start = self.status.real_time == 0.0;
         }
-        self.start_unseen = Some(StartUnseen {
-            real_time: self.status.real_time,
-            idle_fetches: 0,
-        });
+        // A second START on one still unseen keeps the first one's bound, so
+        // the hold ends when a WAIT on the first would call it never started.
+        if self.start_unseen.is_none() {
+            self.start_unseen = Some(StartUnseen {
+                real_time: self.status.real_time,
+                idle_fetches: 0,
+            });
+        }
         Ok(())
     }
 
@@ -1082,7 +1097,14 @@ impl Mcb for RemoteMcb {
         // The START is ended, seen to count or not: the confirm asks the
         // detector alone.
         self.start_unseen = None;
-        if self.confirm_stopped()? {
+        let stopped = self.confirm_stopped();
+        // A provisional date whose count ran (the clocks moved) but was never
+        // seen running stays the moment START was sent: a resume's clock
+        // would include this run. One that never ran stays provisional.
+        if self.provisional_start && self.status.real_time > 0.0 {
+            self.provisional_start = false;
+        }
+        if stopped? {
             return Ok(());
         }
         Err(match checked(reply) {

@@ -37,12 +37,13 @@ exactly, as decimals, never through floating point: a fraction however
 close to whole (`4.9999999999999999`), one too large to hold, or one with a
 sign (`+5`, `-0`, still refused in job files) is refused instead of rounded
 or guessed, and `9007199254740993.0` is now read exactly instead of refused.
-**Job files:** with a buffer window active, a job's START, STOP and CLEAR
-(and SEND_MESSAGE "STOP" / "CLEAR") and WAIT all act on one detector: the
-one the job's last START counted on, or the first detector before any START.
-A job never leaves a detector counting, and never stops or clears one its
-START did not count on; before, STOP did nothing and CLEAR cleared the
-buffer. **Start time:** a spectrum's start time
+**Job files:** with a buffer window active, once a job has STARTed a count,
+its STOP, CLEAR (and SEND_MESSAGE "STOP" / "CLEAR"), WAIT, presets and raw
+commands act on the detector that START counted on (the first detector when
+the START ran with the buffer active), so a job never leaves a detector
+counting; before, STOP did nothing and CLEAR cleared the buffer. A job that
+has started nothing still has STOP do nothing and CLEAR clear the buffer.
+`CLEAR_ALL` sent raw is refused too (it clears the presets). **Start time:** a spectrum's start time
 is when the detector began counting (the first reading that shows it
 counting, less its real time), not when START was sent, so a detector slow to
 begin is dated right; every file format writes the same field as before.

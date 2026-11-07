@@ -452,11 +452,20 @@ fn raw_allowed(command: &str) -> Result<(), DeviceError> {
 /// Refuses the instrument's own preset verbs sent raw (`SET_LIVE_PRESET`,
 /// `SET_TRUE_PRESET`, `SET_PEAK_PRESET`, `SET_INTEGRAL_PRESET`,
 /// `SET_UNCERTAINTY_PRESET`, `CLEAR_PRESETS`, `ENABLE_`/`DISABLE_OVERFLOW_PRESET`,
-/// and any other verb naming a preset that is not a read or this program's
+/// `CLEAR_ALL`, and any other verb naming a preset that is not a read or this program's
 /// `SET_PRESET_*`). The bridge passes them to the 926 verbatim, so sent they
 /// would change a preset with no counting check and the mirror would keep
 /// the old one. Refused rather than routed: their values are in ticks.
 fn native_preset_refused(command: &str, verb: &str) -> Result<(), DeviceError> {
+    // CLEAR_ALL clears the presets with the data and the clocks.
+    if verb == "CLEAR_ALL" {
+        return Err(DeviceError::Command {
+            command: command.trim().to_string(),
+            detail: "CLEAR_ALL clears the presets outside the preset rules; use CLEAR and \
+                     SET_PRESET_CLEAR (SET_PRESET_*) instead; nothing was sent"
+                .into(),
+        });
+    }
     if verb.contains("PRESET") && !verb.starts_with("SHOW_") && !verb.starts_with("SET_PRESET") {
         return Err(DeviceError::Command {
             command: command.trim().to_string(),

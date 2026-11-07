@@ -2084,6 +2084,7 @@ fn a_native_preset_verb_is_refused_and_points_to_set_preset() {
         "CLEAR_PRESETS",
         "ENABLE_OVERFLOW_PRESET",
         "DISABLE_OVERFLOW_PRESET",
+        "CLEAR_ALL",
     ] {
         let reply = mcb.send_message(native);
         assert!(

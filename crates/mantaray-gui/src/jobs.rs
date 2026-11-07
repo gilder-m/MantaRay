@@ -94,11 +94,11 @@ fn wait_over(app: &mut App) -> Result<bool, String> {
             }
             child_done
         }
-        JobWait::Optimize => match app.job_detector() {
+        JobWait::Optimize => match app.job_target() {
             Some(detector) => !app.detectors[detector].optimizing(),
             None => true,
         },
-        JobWait::PoleZero => match app.job_detector() {
+        JobWait::PoleZero => match app.job_target() {
             Some(detector) => !app.detectors[detector].pole_zeroing(),
             None => true,
         },
@@ -128,11 +128,11 @@ pub fn start(app: &mut App, path: &Path) -> Result<(), String> {
 }
 
 impl App {
-    /// What a job's START, STOP, CLEAR and WAIT act on: the job's detector
+    /// What a job's commands act on: the job's detector
     /// ([`App::job_detector`]), except that with a buffer window active it
     /// is the detector the job's last START counted on, when there was one.
-    /// One target for all four, so a job never leaves a detector counting
-    /// and never stops or clears one its START did not count on.
+    /// So a job's STOP and CLEAR act on what its START counted on, and a job
+    /// never leaves a detector counting.
     fn job_target(&self) -> Option<usize> {
         if self.active_is_buffer()
             && let Some(number) = self.job_started_on
@@ -144,6 +144,18 @@ impl App {
             return Some(index);
         }
         self.job_detector()
+    }
+
+    /// A buffer window is active and the job has started no count: its STOP
+    /// and CLEAR act on the buffer, as before (Gilder 11/7, QUESTIONS #9
+    /// and #10), and no detector the job never started is touched.
+    fn job_on_buffer_alone(&self) -> bool {
+        self.active_is_buffer()
+            && !self.job_started_on.is_some_and(|number| {
+                self.detectors
+                    .iter()
+                    .any(|mcb| mcb.identity().number == number)
+            })
     }
 }
 
@@ -432,7 +444,7 @@ impl App {
         &mut self,
         change: impl FnOnce(&mut mantaray_device::Presets),
     ) -> Result<(), JobError> {
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("no detector is configured"));
         };
         let mcb = &mut self.detectors[detector];
@@ -500,7 +512,11 @@ impl JobHost for App {
         // The START it ends is over, so a later WAIT does not watch it.
         // With a buffer active this is the detector START counted on
         // ([`App::job_target`]), so a START/STOP job never leaves a count
-        // running.
+        // running; with no START in the job, a buffer has no count to stop.
+        if self.job_on_buffer_alone() {
+            self.apply_action(Action::Stop);
+            return Ok(());
+        }
         let Some(detector) = self.job_target() else {
             return Err(JobError::host("STOP: there is no detector"));
         };
@@ -511,8 +527,12 @@ impl JobHost for App {
     }
 
     fn clear(&mut self) -> Result<(), JobError> {
-        // On what START counts on ([`App::job_target`]), even with a buffer
-        // active (a buffer is cleared from the menu, not by a job).
+        // On what START counted on ([`App::job_target`]), even with a buffer
+        // active; with no START in the job, the buffer, as before.
+        if self.job_on_buffer_alone() {
+            self.apply_action(Action::Clear);
+            return Ok(());
+        }
         // A detector that refused CLEAR still holds its counts; a START after
         // it would count on top of them, so the job stops here.
         let Some(detector) = self.job_target() else {
@@ -563,7 +583,7 @@ impl JobHost for App {
         if !seconds.is_finite() || seconds <= 0.0 {
             return Ok(());
         }
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Ok(());
         };
         if self.detectors[detector].as_simulated().is_some() {
@@ -788,14 +808,14 @@ impl JobHost for App {
 
     fn start_optimize(&mut self) -> Result<(), JobError> {
         let detector = self
-            .job_detector()
+            .job_target()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
         self.detectors[detector].start_optimize().map_err(device)
     }
 
     fn pole_zero(&mut self, start: bool) -> Result<(), JobError> {
         let detector = self
-            .job_detector()
+            .job_target()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
         self.detectors[detector]
             .set_pole_zero_running(start)
@@ -804,7 +824,7 @@ impl JobHost for App {
 
     fn wait_optimize(&mut self) -> Result<(), JobError> {
         let detector = self
-            .job_detector()
+            .job_target()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
         if self.detectors[detector].as_simulated().is_some() {
             let mut guard = 0;
@@ -820,7 +840,7 @@ impl JobHost for App {
 
     fn wait_pole_zero(&mut self) -> Result<(), JobError> {
         let detector = self
-            .job_detector()
+            .job_target()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
         if self.detectors[detector].as_simulated().is_some() {
             let mut guard = 0;
@@ -837,7 +857,7 @@ impl JobHost for App {
     fn view_stored(&mut self, index: usize) -> Result<(), JobError> {
         // The manual's VIEW is one-based; 0 means the live spectrum.
         let detector = self
-            .job_detector()
+            .job_target()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
         if index == 0 {
             self.apply_action(Action::OpenDetector(detector));
@@ -859,7 +879,7 @@ impl JobHost for App {
 
     fn stored_spectra(&mut self) -> Result<usize, JobError> {
         let detector = self
-            .job_detector()
+            .job_target()
             .ok_or_else(|| JobError::host("no detector is configured"))?;
         Ok(self.detectors[detector].stored_spectra())
     }
@@ -891,7 +911,7 @@ impl JobHost for App {
 
     fn clear_presets(&mut self) -> Result<(), JobError> {
         // Explicit: always sent, like the command line's.
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("no detector is configured"));
         };
         self.detectors[detector]
@@ -905,7 +925,7 @@ impl JobHost for App {
         } else {
             mantaray_device::AcquisitionMode::Pha
         };
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("no detector selected"));
         };
         self.detectors[detector].set_mode(mode).map_err(device)
@@ -952,7 +972,7 @@ impl JobHost for App {
     }
 
     fn send_message(&mut self, command: &str) -> Result<String, JobError> {
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("no detector selected"));
         };
         // A bare START, STOP or CLEAR never arrives here: the job runs its
@@ -963,7 +983,7 @@ impl JobHost for App {
     }
 
     fn lock(&mut self, password: &str, owner: &str, _name: Option<&str>) -> Result<(), JobError> {
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("no detector selected"));
         };
         self.detectors[detector]
@@ -972,7 +992,7 @@ impl JobHost for App {
     }
 
     fn unlock(&mut self, password: &str) -> Result<(), JobError> {
-        let Some(detector) = self.job_detector() else {
+        let Some(detector) = self.job_target() else {
             return Err(JobError::host("no detector selected"));
         };
         self.detectors[detector].unlock(password).map_err(device)
