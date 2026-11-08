@@ -515,13 +515,12 @@ impl RemoteMcb {
         }
         // How long the clocks have read this value, on fetches: a fetch on a
         // new value starts the span afresh.
-        let mut stood_still_ms = 0;
+        let mut stood_still = false;
         if fetch {
             match unseen.last_fetch {
                 Some((value, since)) if value == reading.real_time => {
-                    stood_still_ms =
-                        i64::try_from(read_instant.saturating_duration_since(since).as_millis())
-                            .unwrap_or(i64::MAX);
+                    stood_still =
+                        read_instant.saturating_duration_since(since) >= crate::STOOD_STILL_SPACING;
                 }
                 _ => unseen.last_fetch = Some((reading.real_time, read_instant)),
             }
@@ -546,7 +545,7 @@ impl RemoteMcb {
             // be read back, so the date stays as it is, for good (a resume's
             // clock would include this run). A fetch the gate forced out
             // right behind another decides nothing.
-            if stood_still_ms >= crate::STOOD_STILL_SPACING_MS {
+            if stood_still {
                 self.start_unseen = None;
                 self.provisional_start = false;
             }

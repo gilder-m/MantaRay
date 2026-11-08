@@ -555,6 +555,11 @@ impl JobHost for App {
         let Some(detector) = self.job_target() else {
             return Ok(());
         };
+        // This WAIT ends the watch on its detector's START, whichever way
+        // it goes, so no later WAIT inherits it.
+        let started = self
+            .job_count
+            .remove(&self.detectors[detector].identity().number);
         if self.detectors[detector].presets().is_empty() {
             return Err(JobError::host("WAIT with no preset set would never finish"));
         }
@@ -575,10 +580,7 @@ impl JobHost for App {
             // counts is told from a count that is over.
             let mcb = &self.detectors[detector];
             let number = mcb.identity().number;
-            let watch = self
-                .job_count
-                .remove(&number)
-                .unwrap_or_else(|| mantaray_device::CountWatch::begin(mcb));
+            let watch = started.unwrap_or_else(|| mantaray_device::CountWatch::begin(mcb));
             self.job_wait = Some(JobWait::Stop {
                 detector: number,
                 watch,

@@ -90,7 +90,7 @@ pub const NEVER_STARTED_READINGS: u64 = 20;
 /// them to say a count is over. A running real-time clock moves every 20 ms;
 /// a fetch the gate forced out right behind another can come within that.
 /// Only ever delays the call, by at most a fetch.
-pub(crate) const STOOD_STILL_SPACING_MS: i64 = 250;
+pub(crate) const STOOD_STILL_SPACING: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Watches one count for its end, for a job's `WAIT` and the batch queue
 /// (the one count-over rule, shared by the interface and the command line).
@@ -235,8 +235,7 @@ impl CountWatch {
             // judged on the new clocks.
             let stood_still = match (self.still_since, at) {
                 (Some(since), Some(at)) => {
-                    at.saturating_duration_since(since).as_millis()
-                        >= STOOD_STILL_SPACING_MS.unsigned_abs().into()
+                    at.saturating_duration_since(since) >= STOOD_STILL_SPACING
                 }
                 (None, Some(at)) => {
                     self.still_since = Some(at);
