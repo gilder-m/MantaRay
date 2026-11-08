@@ -640,7 +640,11 @@ mod tests {
         assert_eq!(counts.len(), channels);
         assert!(counts.iter().enumerate().all(|(i, c)| *c == i as u32));
         assert!(regions.iter().enumerate().all(|(i, r)| *r == (i % 2 == 1)));
-        assert_eq!(device.sent.borrow()[0], [READ, 0xFC, 0xFF, HISTOGRAM, 0, 0]);
+        assert_eq!(
+            *device.sent.borrow(),
+            [vec![READ, 0xFC, 0xFF, HISTOGRAM, 0, 0]],
+            "one request frame and no more"
+        );
 
         let device = Scripted::answering(&[]);
         let dpm = Dpm::new(&device);

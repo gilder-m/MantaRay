@@ -2098,11 +2098,13 @@ fn close(got: f64, want: f64) -> bool {
 
 #[test]
 fn a_key_line_under_three_sigma_is_found_but_not_detected() {
-    // Weak-1: a 10-count bump at 100 keV. Net 10, variance 1510 + 3750 =
-    // 5260, sigma 72.53; 10 is not above 3 sigma (217.6), so not detected.
+    // Weak-1: a 200-count bump at 100 keV. Net 200, variance 1700 + 3750 =
+    // 5450, sigma 73.82; 200 is not above 3 sigma (221.5), so not detected -
+    // close enough under the threshold that 3 + sigma (76.8) or 3 / sigma
+    // in its place would call it detected.
     // Strong-1: net 1000, variance 2500 + 3750 = 6250, sigma 79.06; 1000 is
     // above 237.2, so detected. Activities at 5 % and 50 %: net / 25.
-    let mut s = boxed(&[(100, 10), (299, 250), (300, 500), (301, 250)]);
+    let mut s = boxed(&[(100, 200), (299, 250), (300, 500), (301, 250)]);
     s.rois.mark(Roi::new(90, 110));
     s.rois.mark(Roi::new(290, 310));
     let lib = lines_at(&[("Weak-1", 100.0), ("Strong-1", 300.0)]);
@@ -2120,20 +2122,20 @@ fn a_key_line_under_three_sigma_is_found_but_not_detected() {
     };
     let weak = get("Weak-1");
     assert!(
-        close(weak.lines[0].net_area, 10.0),
+        close(weak.lines[0].net_area, 200.0),
         "{}",
         weak.lines[0].net_area
     );
-    assert!(close(weak.lines[0].net_uncertainty, 5260f64.sqrt()));
-    assert!(close(weak.activity, 10.0 / 25.0), "{}", weak.activity);
+    assert!(close(weak.lines[0].net_uncertainty, 5450f64.sqrt()));
+    assert!(close(weak.activity, 200.0 / 25.0), "{}", weak.activity);
     assert!(
         !weak.detected,
-        "10 counts against sigma 72.5 is not a detection"
+        "200 counts against 3 sigma = 221.5 is not a detection"
     );
     let strong = get("Strong-1");
     assert!(close(strong.activity, 1000.0 / 25.0), "{}", strong.activity);
     assert!(strong.detected);
-    // The total counts the detected nuclide only: 40 Bq, not 40.4.
+    // The total counts the detected nuclide only: 40 Bq, not 48.
     let total = report.total_activity().expect("a total");
     assert!(close(total, 40.0), "{total}");
 }
@@ -2225,6 +2227,8 @@ fn an_empty_region_reports_zero_plus_or_minus_zero_and_is_not_withheld() {
     assert!(report.withheld.is_empty(), "{:?}", report.withheld);
     let empty = &report.nuclides[0];
     assert_eq!((empty.activity, empty.uncertainty), (0.0, 0.0));
+    // 0 counts are not above 3 * 0: nothing is detected in an empty region.
+    assert!(!empty.detected);
     assert!(close(empty.mda.expect("a limit"), 2.71 / 25.0));
 }
 
