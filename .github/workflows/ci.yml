@@ -75,7 +75,7 @@ jobs:
           # checked: it is the shipped build's.
           refuse mantaray-gui normal,build,features 'mantaray-gui feature "simulator"'
           refuse mantaray-cli normal,build,features 'mantaray-cli feature "simulator"'
-          # Nor the test rig.
+          # Nor the test rig, which also gates the RecordingTransport line.
           refuse mantaray-gui normal,build,features 'mantaray-device feature "rig"'
           refuse mantaray-cli normal,build,features 'mantaray-device feature "rig"'
 
