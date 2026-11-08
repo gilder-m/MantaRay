@@ -2030,3 +2030,322 @@ fn an_absent_nuclide_whose_limit_is_refused_keeps_the_suffix_and_counts_in_the_g
         .count();
     assert_eq!(said, 1, "the value is said once: {:?}", report.notes);
 }
+
+// ---------------------------------------------------------------------------
+// Mutation-testing gaps (cargo-mutants over d3f5686..39c121b). Every expected
+// number below is worked out by hand from the MAESTRO Peak Info equations
+// (17)-(21) in `analysis::peak_info` and the Currie limit in `mda_currie`,
+// on spectra built so those sums come out exact.
+//
+// The box spectrum: a flat 100 counts per channel, 1 keV per channel, 1000 s
+// live and real, and regions 21 channels wide with 3 background points at
+// each end. For such a region, equations (17)-(21) give:
+//   background B = (300 + 300) * 21 / 6           = 2100
+//   adjusted gross (15 middle channels) G = 1500 + bump
+//   net = G - B * 15 / 21                          = bump
+//   variance = G + B * (15 / 6) * (15 / 21)        = G + 3750
+// ---------------------------------------------------------------------------
+
+/// A flat 100 counts per channel with the given extra counts added, 512
+/// channels, 1 keV per channel from 0 keV, counted 1000 s live and real.
+fn boxed(bumps: &[(usize, u64)]) -> Spectrum {
+    let mut counts = vec![100u64; 512];
+    for &(channel, extra) in bumps {
+        counts[channel] += extra;
+    }
+    let mut s = Spectrum::from_counts(counts);
+    s.live_time = 1000.0;
+    s.real_time = 1000.0;
+    s.energy_calibration = Some(EnergyCalibration::linear(0.0, 1.0));
+    s.start_time = NaiveDate::from_ymd_opt(2026, 7, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0);
+    s
+}
+
+/// A 1000-count peak spread 250/500/250 over three channels centred on
+/// `channel`: a net area of exactly 1000.
+fn thousand_at(channel: usize) -> [(usize, u64); 3] {
+    [(channel - 1, 250), (channel, 500), (channel + 1, 250)]
+}
+
+/// No decay corrections, so every activity is net / (live * eff * yield).
+fn exact_options(efficiency: Option<EfficiencyCalibration>) -> AnalysisOptions {
+    AnalysisOptions {
+        efficiency,
+        correct_decay_during_count: false,
+        decay_correct_to_reference: false,
+        ..AnalysisOptions::default()
+    }
+}
+
+/// One nuclide per (name, keV) with one 50 % key line and a long half-life.
+fn lines_at(lines: &[(&str, f64)]) -> NuclideLibrary {
+    let mut lib = NuclideLibrary::new("box");
+    for &(name, energy) in lines {
+        lib.push(Nuclide::new(
+            name,
+            1.0e9,
+            vec![LibraryPeak::new(energy, 50.0).key()],
+        ));
+    }
+    lib
+}
+
+fn close(got: f64, want: f64) -> bool {
+    (got - want).abs() <= 1e-9 * want.abs().max(1e-300)
+}
+
+#[test]
+fn a_key_line_under_three_sigma_is_found_but_not_detected() {
+    // Weak-1: a 10-count bump at 100 keV. Net 10, variance 1510 + 3750 =
+    // 5260, sigma 72.53; 10 is not above 3 sigma (217.6), so not detected.
+    // Strong-1: net 1000, variance 2500 + 3750 = 6250, sigma 79.06; 1000 is
+    // above 237.2, so detected. Activities at 5 % and 50 %: net / 25.
+    let mut s = boxed(&[(100, 10), (299, 250), (300, 500), (301, 250)]);
+    s.rois.mark(Roi::new(90, 110));
+    s.rois.mark(Roi::new(290, 310));
+    let lib = lines_at(&[("Weak-1", 100.0), ("Strong-1", 300.0)]);
+    let report = analyse(
+        &s,
+        &lib,
+        &exact_options(Some(EfficiencyCalibration::constant(0.05))),
+    );
+    let get = |name: &str| {
+        report
+            .nuclides
+            .iter()
+            .find(|n| n.nuclide == name)
+            .unwrap_or_else(|| panic!("{name}: {:?} {:?}", report.nuclides, report.withheld))
+    };
+    let weak = get("Weak-1");
+    assert!(
+        close(weak.lines[0].net_area, 10.0),
+        "{}",
+        weak.lines[0].net_area
+    );
+    assert!(close(weak.lines[0].net_uncertainty, 5260f64.sqrt()));
+    assert!(close(weak.activity, 10.0 / 25.0), "{}", weak.activity);
+    assert!(
+        !weak.detected,
+        "10 counts against sigma 72.5 is not a detection"
+    );
+    let strong = get("Strong-1");
+    assert!(close(strong.activity, 1000.0 / 25.0), "{}", strong.activity);
+    assert!(strong.detected);
+    // The total counts the detected nuclide only: 40 Bq, not 40.4.
+    let total = report.total_activity().expect("a total");
+    assert!(close(total, 40.0), "{total}");
+}
+
+#[test]
+fn an_absent_nuclides_detection_limit_is_the_currie_limit_at_its_yield() {
+    // Nothing found; the MDA row for Absent-1 (200 keV, 50 %) is built from
+    // the counts within 1.5 FWHM (4 channels with no shape calibration, so 6
+    // channels) either side: channels 194..=206, 13 * 100 = 1300 counts.
+    // Currie: (2.71 + 4.65 sqrt(1300)) / (0.05 * 0.50 * 1000 s) = 6.8147 Bq.
+    let s = boxed(&[]);
+    let lib = lines_at(&[("Absent-1", 200.0)]);
+    let options = AnalysisOptions {
+        report_mda_for_absent_nuclides: true,
+        ..exact_options(Some(EfficiencyCalibration::constant(0.05)))
+    };
+    let report = analyse(&s, &lib, &options);
+    let absent = &report.nuclides[0];
+    assert_eq!(absent.nuclide, "Absent-1");
+    assert!(!absent.detected);
+    let want = (2.71 + 4.65 * 1300f64.sqrt()) / (0.05 * 0.50 * 1000.0);
+    assert!((want - 6.814_725).abs() < 1e-6, "hand value {want}");
+    let mda = absent.mda.expect("a limit");
+    assert!(close(mda, want), "mda {mda}, want {want}");
+}
+
+#[test]
+fn without_a_curve_the_count_rate_uncertainty_is_the_net_area_sigma_per_second() {
+    // Net 1000 +/- sqrt(6250) = 79.057 counts in 1000 s: 1 +/- 0.079057 cps.
+    let mut s = boxed(&thousand_at(100));
+    s.rois.mark(Roi::new(90, 110));
+    let report = analyse(&s, &lines_at(&[("Rate-1", 100.0)]), &exact_options(None));
+    assert_eq!(report.activity_unit(), "cps");
+    let rate = &report.nuclides[0];
+    let sigma = 6250f64.sqrt() / 1000.0;
+    assert!((sigma - 0.079_057).abs() < 1e-6, "hand value {sigma}");
+    assert!(
+        close(rate.lines[0].activity, 1.0),
+        "{}",
+        rate.lines[0].activity
+    );
+    assert!(
+        close(rate.lines[0].activity_uncertainty, sigma),
+        "{}",
+        rate.lines[0].activity_uncertainty
+    );
+    // One line, no library uncertainty: the nuclide's spread is the line's.
+    assert!(close(rate.uncertainty, sigma), "{}", rate.uncertainty);
+}
+
+#[test]
+fn a_region_with_a_net_area_of_exactly_zero_reports_zero_and_is_not_withheld() {
+    // A flat region: net = 1500 - 2100 * 15 / 21 = 0 exactly, a measured
+    // zero. Sigma sqrt(1500 + 3750) = 72.457 counts, / 25 = 2.8983 Bq.
+    let mut s = boxed(&[]);
+    s.rois.mark(Roi::new(90, 110));
+    let report = analyse(
+        &s,
+        &lines_at(&[("Flat-1", 100.0)]),
+        &exact_options(Some(EfficiencyCalibration::constant(0.05))),
+    );
+    assert!(report.withheld.is_empty(), "{:?}", report.withheld);
+    let flat = &report.nuclides[0];
+    assert_eq!(flat.lines[0].net_area, 0.0);
+    assert_eq!(flat.activity, 0.0);
+    assert!(
+        close(flat.uncertainty, 5250f64.sqrt() / 25.0),
+        "{}",
+        flat.uncertainty
+    );
+    assert!(!flat.detected);
+}
+
+#[test]
+fn an_empty_region_reports_zero_plus_or_minus_zero_and_is_not_withheld() {
+    // No counts at all in channels 90..=110: net 0 and variance 0, both
+    // measured zeros. The limit is the Currie constant alone:
+    // 2.71 / (0.05 * 0.50 * 1000 s) = 0.1084 Bq.
+    let mut s = boxed(&[]);
+    for channel in 84..=116 {
+        s.channels[channel] = 0;
+    }
+    s.rois.mark(Roi::new(90, 110));
+    let report = analyse(
+        &s,
+        &lines_at(&[("Empty-1", 100.0)]),
+        &exact_options(Some(EfficiencyCalibration::constant(0.05))),
+    );
+    assert!(report.withheld.is_empty(), "{:?}", report.withheld);
+    let empty = &report.nuclides[0];
+    assert_eq!((empty.activity, empty.uncertainty), (0.0, 0.0));
+    assert!(close(empty.mda.expect("a limit"), 2.71 / 25.0));
+}
+
+#[test]
+fn an_overflow_from_the_count_correction_alone_is_not_blamed_on_a_harmless_reference_date() {
+    // Half-life 1000 s, counted 1000 s: the count correction is
+    // ln2 / (1 - 1/2) = 2 ln2 = 1.3863. The reference date is 250 s before
+    // the count: 2^(1/4) = 1.1892. The sample quantity puts the uncorrected
+    // activity (1000 counts / 25) at 0.8 of the largest double, so:
+    //   x1        = 0.80 max  fine
+    //   x1.3863   = 1.11 max  overflows  <- the count correction breaks it
+    //   x1.1892   = 0.95 max  fine       <- the reference date does not
+    //   x1.6486   = 1.32 max  overflows  (both, as applied)
+    // The blame is the count's alone.
+    let mut s = boxed(&thousand_at(100));
+    s.rois.mark(Roi::new(90, 110));
+    let mut lib = NuclideLibrary::new("fast");
+    lib.push(Nuclide::new(
+        "Fast-1",
+        1000.0,
+        vec![LibraryPeak::new(100.0, 50.0).key()],
+    ));
+    let options = AnalysisOptions {
+        efficiency: Some(EfficiencyCalibration::constant(0.05)),
+        sample: SampleInfo {
+            quantity: 40.0 / (0.8 * f64::MAX),
+            reference_date: s.start_time.map(|t| t - chrono::Duration::seconds(250)),
+            ..SampleInfo::default()
+        },
+        ..AnalysisOptions::default()
+    };
+    let report = analyse(&s, &lib, &options);
+    assert!(report.nuclides.is_empty(), "{:?}", report.nuclides);
+    assert_eq!(report.withheld.len(), 1, "{:?}", report.withheld);
+    assert_eq!(
+        report.withheld[0].reason,
+        "no activity at its 100.0 keV line: its activity is too large to be a number \
+         because of the decay correction for the count; none is reported"
+    );
+}
+
+#[test]
+fn with_no_live_time_and_regions_matching_nothing_the_one_note_says_so() {
+    // Regions marked, none in the library, no MDA rows asked for: nothing is
+    // withheld, so the global note is what says it. With no regions at all
+    // there is nothing to compute and no note.
+    let mut s = boxed(&thousand_at(100));
+    s.live_time = 0.0;
+    s.rois.mark(Roi::new(90, 110));
+    let lib = lines_at(&[("Elsewhere-1", 400.0)]);
+    let options = exact_options(Some(EfficiencyCalibration::constant(0.05)));
+    let report = analyse(&s, &lib, &options);
+    assert!(report.withheld.is_empty(), "{:?}", report.withheld);
+    assert_eq!(
+        report.notes,
+        ["the spectrum has no live time, so no activity or count rate can be computed"]
+    );
+    s.rois = Default::default();
+    let report = analyse(&s, &lib, &options);
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+}
+
+#[test]
+fn a_detection_limit_line_at_channel_zero_is_in_the_spectrum_and_below_it_is_not() {
+    // 50 keV at channel 0 (zero offset 50 keV, 1 keV per channel). The sum
+    // runs from channel max(0 - 6, 0) = 0 to 6: 7 * 100 = 700 counts, so
+    // (2.71 + 4.65 sqrt(700)) / 25 = 5.0295 Bq. 45 keV is channel -5:
+    // outside, no limit.
+    let mut s = boxed(&[]);
+    s.energy_calibration = Some(EnergyCalibration::linear(50.0, 1.0));
+    let lib = lines_at(&[("Edge-0", 50.0), ("Below-1", 45.0)]);
+    let options = AnalysisOptions {
+        report_mda_for_absent_nuclides: true,
+        ..exact_options(Some(EfficiencyCalibration::constant(0.05)))
+    };
+    let report = analyse(&s, &lib, &options);
+    let names: Vec<&str> = report.nuclides.iter().map(|n| n.nuclide.as_str()).collect();
+    assert_eq!(names, ["Edge-0"], "{:?}", report.notes);
+    let want = (2.71 + 4.65 * 700f64.sqrt()) / 25.0;
+    assert!((want - 5.029_497).abs() < 1e-6, "hand value {want}");
+    let mda = report.nuclides[0].mda.expect("a limit");
+    assert!(close(mda, want), "mda {mda}, want {want}");
+    assert_eq!(
+        report.notes,
+        [
+            "no detection limit for 1 library nuclide: the line used for the limit falls \
+          outside the spectrum (Below-1)"
+        ]
+    );
+}
+
+#[test]
+fn an_efficiency_of_exactly_zero_is_no_efficiency_not_a_fault_and_not_a_measurement() {
+    // The curve is 0.1 at 40 keV and 0 from 80 keV up (interpolation holds
+    // the last point beyond it): exactly 0 at both 100 and 200 keV. Zero is
+    // "the curve says nothing here": not a negative number, and no activity.
+    let mut s = boxed(&thousand_at(100));
+    s.rois.mark(Roi::new(90, 110));
+    let lib = lines_at(&[("Zero-1", 100.0), ("Zero-2", 200.0)]);
+    let curve = EfficiencyCalibration::interpolated(vec![
+        EfficiencyPoint::new(40.0, 0.1),
+        EfficiencyPoint::new(80.0, 0.0),
+    ]);
+    assert_eq!(curve.efficiency(100.0), 0.0);
+    let options = AnalysisOptions {
+        report_mda_for_absent_nuclides: true,
+        ..exact_options(Some(curve))
+    };
+    let report = analyse(&s, &lib, &options);
+    assert!(report.nuclides.is_empty(), "{:?}", report.nuclides);
+    assert_eq!(report.withheld.len(), 1, "{:?}", report.withheld);
+    assert_eq!(report.withheld[0].nuclide, "Zero-1");
+    assert_eq!(
+        report.withheld[0].reason,
+        "no activity: the efficiency curve or the library yield is zero at its 100.0 keV line(s)"
+    );
+    assert_eq!(
+        report.notes,
+        [
+            "no detection limit for 1 library nuclide: the efficiency curve gives nothing at \
+          the line used for the limit (Zero-2)"
+        ]
+    );
+}

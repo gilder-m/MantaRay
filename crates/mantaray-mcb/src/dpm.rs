@@ -601,4 +601,57 @@ mod tests {
         assert!(error.contains("address space"), "{error}");
         assert!(device.sent.borrow().is_empty(), "no frame should have gone");
     }
+
+    #[test]
+    fn a_spectrum_read_splits_each_word_into_a_count_and_a_region_flag() {
+        // The four words of the capture (see the test above): the top bit is
+        // the region, the low 31 bits the count. 0x3BFB = 15355, 0x4D7 = 1239,
+        // 0x4DB = 1243, and 0x7FFF_FFFF is the largest count with no flag.
+        // One frame goes out: a read of 4 * 4 = 16 bytes from offset 0 of the
+        // histogram space.
+        let memory: Vec<u8> = [0x8000_3BFBu32, 0x0000_04D7, 0x8000_04DB, 0x7FFF_FFFF]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let device = Scripted::answering(&[&memory]);
+        let dpm = Dpm::new(&device);
+        let (counts, regions) = dpm.read_spectrum(4).expect("read");
+        assert_eq!(counts, [15355, 1239, 1243, 0x7FFF_FFFF]);
+        assert_eq!(regions, [true, false, true, false]);
+        assert_eq!(
+            *device.sent.borrow(),
+            [vec![READ, 0x10, 0x00, HISTOGRAM, 0x00, 0x00]]
+        );
+    }
+
+    #[test]
+    fn a_spectrum_read_is_one_sixteen_bit_frame_and_no_more() {
+        // 16383 channels are 65532 bytes (0xFFFC), which the length field can
+        // count; the answer arrives in 4096-byte transfers. 16384 channels are
+        // 65536 bytes, one more than 0xFFFF: refused before anything is sent.
+        let channels = 16_383;
+        let memory: Vec<u8> = (0..channels as u32)
+            .flat_map(|channel| (channel | ((channel % 2) << 31)).to_le_bytes())
+            .collect();
+        let pieces: Vec<&[u8]> = memory.chunks(4096).collect();
+        let device = Scripted::answering(&pieces);
+        let dpm = Dpm::new(&device);
+        let (counts, regions) = dpm.read_spectrum(channels).expect("read");
+        assert_eq!(counts.len(), channels);
+        assert!(counts.iter().enumerate().all(|(i, c)| *c == i as u32));
+        assert!(regions.iter().enumerate().all(|(i, r)| *r == (i % 2 == 1)));
+        assert_eq!(device.sent.borrow()[0], [READ, 0xFC, 0xFF, HISTOGRAM, 0, 0]);
+
+        let device = Scripted::answering(&[]);
+        let dpm = Dpm::new(&device);
+        let error = dpm
+            .read_spectrum(16_384)
+            .expect_err("too long for one frame");
+        assert!(error.contains("16384 channels"), "{error}");
+        assert!(
+            dpm.read_spectrum(usize::MAX).is_err(),
+            "4 * usize::MAX overflows"
+        );
+        assert!(device.sent.borrow().is_empty(), "no frame should have gone");
+    }
 }

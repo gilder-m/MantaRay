@@ -540,3 +540,55 @@ fn a_curve_that_gives_no_efficiency_prints_no_efficiency_and_no_nan() {
         assert_eq!(row[at], "", "{curve:?}: {csv}");
     }
 }
+
+/// A report holding the given (activity, detected) nuclides in becquerels.
+fn report_of(nuclides: &[(&str, f64, bool)]) -> mantaray_core::QuantitativeReport {
+    mantaray_core::QuantitativeReport {
+        peaks: Vec::new(),
+        nuclides: nuclides
+            .iter()
+            .map(|&(name, activity, detected)| mantaray_core::NuclideResult {
+                nuclide: name.to_string(),
+                activity,
+                uncertainty: activity / 10.0,
+                mda: Some(1.0),
+                detected,
+                half_life_seconds: 1.0e9,
+                lines: Vec::new(),
+            })
+            .collect(),
+        unidentified: Vec::new(),
+        has_efficiency: true,
+        sample_unit: String::new(),
+        live_time: 1000.0,
+        real_time: 1000.0,
+        notes: Vec::new(),
+        withheld: Vec::new(),
+    }
+}
+
+#[test]
+fn the_total_detected_activity_line_sums_the_detected_nuclides_and_is_absent_for_zero() {
+    // 100 + 250 Bq detected; the 1000 Bq nuclide was not detected and is not
+    // part of the total: 350 Bq.
+    let text = nuclide_report(&report_of(&[
+        ("A-1", 100.0, true),
+        ("B-2", 250.0, true),
+        ("C-3", 1000.0, false),
+    ]));
+    let totals: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("Total detected activity"))
+        .collect();
+    assert_eq!(totals.len(), 1, "{text}");
+    let number: f64 = totals[0]
+        .trim_start_matches("Total detected activity: ")
+        .trim_end_matches(" Bq")
+        .parse()
+        .unwrap_or_else(|_| panic!("{:?}", totals[0]));
+    assert_eq!(number, 350.0, "{text}");
+
+    // Nothing detected: a total of 0 is not printed as a line.
+    let text = nuclide_report(&report_of(&[("C-3", 1000.0, false)]));
+    assert!(!text.contains("Total detected activity"), "{text}");
+}

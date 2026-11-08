@@ -3016,3 +3016,111 @@ fn review3_stop_all_does_not_stack_the_confirm_waits() {
     // One bound is about 0.9 s of pauses; three stacked would be 2.7 s.
     assert!(took < std::time::Duration::from_millis(1800), "{took:?}");
 }
+
+/// Every shape a frame painted, with nested lists flattened.
+fn flat_shapes(output: &egui::FullOutput) -> Vec<egui::Shape> {
+    fn collect(shape: &egui::Shape, into: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(inner) => inner.iter().for_each(|s| collect(s, into)),
+            other => into.push(other.clone()),
+        }
+    }
+    let mut shapes = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut shapes);
+    }
+    shapes
+}
+
+/// An analysis with no nuclides and `count` general notes, "caveat 1"...
+fn analysis_with_notes(count: usize) -> mantaray_core::QuantitativeReport {
+    mantaray_core::QuantitativeReport {
+        peaks: Vec::new(),
+        nuclides: Vec::new(),
+        unidentified: Vec::new(),
+        has_efficiency: false,
+        sample_unit: String::new(),
+        live_time: 100.0,
+        real_time: 100.0,
+        notes: (1..=count).map(|n| format!("caveat {n}")).collect(),
+        withheld: Vec::new(),
+    }
+}
+
+#[test]
+fn the_analysis_dialog_shows_five_notes_and_counts_the_rest() {
+    // Five notes are shown as they are; past five the rest are counted.
+    let ctx = egui::Context::default();
+    for (count, more) in [(5, None), (6, Some(1)), (7, Some(2))] {
+        let mut app = App::headless();
+        app.analysis = Some(analysis_with_notes(count));
+        app.dialogs.open(Dialog::Analysis);
+        let _ = frame(&mut app, &ctx, [1400.0, 1600.0]);
+        let text = painted_text(&frame(&mut app, &ctx, [1400.0, 1600.0]));
+        for n in 1..=5 {
+            assert!(text.contains(&format!("caveat {n}")), "{count}: {text}");
+        }
+        assert!(!text.contains("caveat 6"), "{count}: {text}");
+        match more {
+            Some(rest) => assert!(
+                text.contains(&format!("and {rest} more in the nuclide report")),
+                "{count}: {text}"
+            ),
+            None => assert!(!text.contains("more in the nuclide report"), "{text}"),
+        }
+    }
+}
+
+#[test]
+fn the_efficiency_plot_samples_the_curve_evenly_in_log_energy_from_20_to_3000_kev() {
+    // The plot's x axis is ln(E / 20 keV) / ln(3000 / 20) of its width, and
+    // the curve is sampled at 121 energies 20 * 150^(k / 120) keV, so the
+    // samples sit at equal steps across it. The entered points are drawn with
+    // their own x, independent of the sampling: points at 20 keV, at
+    // 20 * 150^(1/2) = 244.949 keV and at 3000 keV fall on samples 0, 60 and
+    // 120 of a flat curve exactly.
+    let ctx = egui::Context::default();
+    let mut app = App::headless();
+    app.efficiency = Some(mantaray_core::EfficiencyCalibration::constant(0.05));
+    let middle = 20.0 * 150f64.sqrt();
+    app.dialogs.efficiency_points = vec![
+        ("20".into(), "0.05".into()),
+        (format!("{middle}"), "0.05".into()),
+        ("3000".into(), "0.05".into()),
+    ];
+    app.dialogs.open(Dialog::Efficiency);
+    let _ = frame(&mut app, &ctx, [1400.0, 2000.0]);
+    let shapes = flat_shapes(&frame(&mut app, &ctx, [1400.0, 2000.0]));
+    let curves: Vec<&Vec<egui::Pos2>> = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Path(path) if path.points.len() == 121 => Some(&path.points),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(curves.len(), 1, "one 121-sample curve");
+    let curve = curves[0];
+    let step = (curve[120].x - curve[0].x) / 120.0;
+    assert!(step > 0.0, "the curve runs left to right: {curve:?}");
+    for pair in curve.windows(2) {
+        let dx = pair[1].x - pair[0].x;
+        assert!((dx - step).abs() < 1e-3, "uneven step {dx} vs {step}");
+    }
+    let circles: Vec<egui::Pos2> = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            egui::Shape::Circle(circle) if circle.radius == 3.0 => Some(circle.center),
+            _ => None,
+        })
+        .collect();
+    for k in [0, 60, 120] {
+        assert!(
+            circles
+                .iter()
+                .any(|centre| (centre.x - curve[k].x).abs() < 1e-2
+                    && (centre.y - curve[k].y).abs() < 1e-2),
+            "sample {k} at {:?} has no entered point on it: {circles:?}",
+            curve[k]
+        );
+    }
+}
