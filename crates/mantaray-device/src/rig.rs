@@ -331,7 +331,10 @@ impl Rig {
 
     /// Someone at the front panel presses Stop.
     pub fn front_panel_stop(&self) {
-        self.state().counting = false;
+        let mut state = self.state();
+        state.counting = false;
+        state.flag_lag = 0;
+        state.starting = 0;
     }
 
     /// Someone at the front panel (or another program) sets the registers.
@@ -516,6 +519,7 @@ impl Instrument {
             }
             if self.reached() {
                 self.counting = false;
+                self.flag_lag = 0;
                 let short = self.faults.iter().find_map(|fault| match fault {
                     Fault::ClockShortfall { seconds } => Some(*seconds),
                     _ => None,

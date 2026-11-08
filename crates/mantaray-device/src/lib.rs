@@ -86,6 +86,12 @@ pub const UNREADABLE_READINGS: u64 = 20;
 /// trips it, never a slow one mid-start. Counted in readings, not in time.
 pub const NEVER_STARTED_READINGS: u64 = 20;
 
+/// How far apart two readings must be for clocks that stood still across
+/// them to say a count is over. A running real-time clock moves every 20 ms;
+/// a fetch the gate forced out right behind another can come within that.
+/// Only ever delays the call, by at most a fetch.
+pub(crate) const STOOD_STILL_SPACING_MS: i64 = 250;
+
 /// Watches one count for its end, for a job's `WAIT` and the batch queue
 /// (the one count-over rule, shared by the interface and the command line).
 ///
@@ -119,6 +125,10 @@ pub struct CountWatch {
     seen_counting: bool,
     /// Whether an idle reading's clocks have moved since the START.
     moved: bool,
+    /// When the clocks were first read at their current value
+    /// ([`Mcb::reading_at`]), so clocks that stood still are judged only
+    /// across readings far enough apart.
+    still_since: Option<chrono::NaiveDateTime>,
     /// The readings count when the current run of unbelieved ones began.
     untrusted_from: Option<u64>,
     /// Believed readings seen idle with the clocks unmoved since the START.
@@ -147,6 +157,7 @@ impl CountWatch {
             started: false,
             seen_counting: false,
             moved: false,
+            still_since: None,
             untrusted_from: None,
             idle_unmoved: 0,
             looked_at: mcb.readings(),
@@ -158,7 +169,16 @@ impl CountWatch {
     /// zero, and the count the watch was told of is still the one it
     /// watches.
     pub fn cleared(&mut self) {
-        self.real_time = 0.0;
+        self.reset_clocks(0.0);
+    }
+
+    /// The clocks were reset under the watch (a CLEAR, whoever sent it):
+    /// two readings decide afresh, and never started is counted anew.
+    fn reset_clocks(&mut self, real_time: f64) {
+        self.real_time = real_time;
+        self.moved = false;
+        self.still_since = None;
+        self.idle_unmoved = 0;
     }
 
     /// Begins watching a count whose START was just accepted.
@@ -197,12 +217,30 @@ impl CountWatch {
         if now > self.looked_at {
             self.looked_at = now;
             let real_time = mcb.status().real_time;
+            let at = mcb.reading_at();
+            if real_time < self.real_time {
+                // Clocks that went back were cleared, by this job or not.
+                self.reset_clocks(real_time);
+            }
+            // Clocks that stood still from a reading far enough back (or
+            // a backend that does not say when it read).
+            let stood_still = match (self.still_since, at) {
+                (Some(since), Some(at)) => {
+                    (at - since).num_milliseconds() >= STOOD_STILL_SPACING_MS
+                }
+                _ => true,
+            };
             self.verdict = if real_time > self.real_time {
                 self.real_time = real_time;
                 self.moved = true;
+                self.still_since = at;
                 Idle::Counting
             } else if self.moved {
-                Idle::Over
+                if stood_still {
+                    Idle::Over
+                } else {
+                    Idle::Counting
+                }
             } else {
                 self.idle_unmoved += 1;
                 if self.idle_unmoved >= NEVER_STARTED_READINGS {

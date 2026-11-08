@@ -257,4 +257,8 @@ impl Mcb for AnyMcb {
     fn readings(&self) -> u64 {
         delegate!(self, mcb => mcb.readings())
     }
+
+    fn reading_at(&self) -> Option<chrono::NaiveDateTime> {
+        delegate!(self, mcb => mcb.reading_at())
+    }
 }

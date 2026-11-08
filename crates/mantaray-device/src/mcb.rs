@@ -968,6 +968,14 @@ pub trait Mcb: Send {
     /// which come at the fetch pace.
     fn readings(&self) -> u64;
 
+    /// When the latest of those readings arrived, on this computer's clock,
+    /// or `None` for a backend that does not say (the simulator). Only the
+    /// spacing of two readings is ever judged from it: clocks that stand
+    /// still across two readings say a count is over only when the readings
+    /// were far enough apart for a running clock to have moved. It never
+    /// ends or extends a count by itself.
+    fn reading_at(&self) -> Option<chrono::NaiveDateTime>;
+
     /// Which preset, if any, has been satisfied.
     fn preset_reached(&self) -> Option<PresetKind> {
         let status = self.status();

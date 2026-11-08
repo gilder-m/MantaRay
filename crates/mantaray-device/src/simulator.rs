@@ -937,6 +937,11 @@ impl Mcb for SimulatedMcb {
     fn readings(&self) -> u64 {
         self.readings
     }
+
+    fn reading_at(&self) -> Option<chrono::NaiveDateTime> {
+        // The simulator's clock is its own, not this computer's.
+        None
+    }
 }
 
 #[cfg(test)]

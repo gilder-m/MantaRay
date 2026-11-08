@@ -2215,11 +2215,86 @@ fn a_flag_trailing_running_clocks_is_not_a_count_over() {
         "a reading 0.4 s into a 10 s live count ended the WAIT"
     );
     assert_eq!(watch.check(&mcb), CountState::Counting, "a second look");
+    // A poll later (wall time apart), the clocks stood still: over.
+    std::thread::sleep(Duration::from_millis(300));
     mcb.poll(0.5).expect("poll");
     assert_eq!(
         watch.check(&mcb),
         CountState::Over,
         "clocks that stood still"
+    );
+}
+
+/// Medium review of 12b4d2a: a fetch forced out right behind another (a
+/// gate read sets the next poll due at once) that reads the same clocks
+/// decides nothing: neither the WAIT nor the preset hold ends on it.
+#[test]
+fn clocks_read_twice_in_a_moment_did_not_stand_still() {
+    use mantaray_device::{CountState, CountWatch};
+    let running = "RT=0.40 LT=0.40 DT=0% ICR=0 ACTIVE=0 TOTAL=3";
+    let mut mcb = connect_live_10(&[
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        ("SHOW_STATUS", running),
+        ("SHOW_DATA", "DATA 2 1 2"),
+        ("SHOW_STATUS", running),
+        ("SHOW_DATA", "DATA 2 1 2"),
+        // The gate read for a preset write.
+        ("SHOW_STATUS", running),
+    ]);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    mcb.poll(0.5).expect("poll");
+    assert_eq!(watch.check(&mcb), CountState::Counting);
+    mcb.poll(0.5).expect("a fetch a moment later");
+    assert_eq!(
+        watch.check(&mcb),
+        CountState::Counting,
+        "two fetches a moment apart ended the WAIT"
+    );
+    let result = mcb.set_presets(Presets {
+        live_time: Some(20.0),
+        ..Presets::default()
+    });
+    assert!(
+        matches!(
+            result,
+            Err(mantaray_device::DeviceError::PresetsWhileCounting)
+        ),
+        "two fetches a moment apart released the hold: {result:?}"
+    );
+}
+
+/// Medium review of 12b4d2a: clocks that go back under a watch were cleared
+/// (by whoever): the readings after decide afresh, never "stood still".
+#[test]
+fn clocks_cleared_under_a_watch_are_not_a_count_over() {
+    use mantaray_device::{CountState, CountWatch};
+    let mut mcb = connect_live_10(&[
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        (
+            "SHOW_STATUS",
+            "RT=0.40 LT=0.40 DT=0% ICR=0 ACTIVE=0 TOTAL=3",
+        ),
+        ("SHOW_DATA", "DATA 2 1 2"),
+        // Someone cleared it; it counts on, flag still trailing.
+        (
+            "SHOW_STATUS",
+            "RT=0.20 LT=0.20 DT=0% ICR=0 ACTIVE=0 TOTAL=1",
+        ),
+        ("SHOW_DATA", "DATA 2 0 1"),
+    ]);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    mcb.poll(0.5).expect("poll");
+    assert_eq!(watch.check(&mcb), CountState::Counting);
+    std::thread::sleep(Duration::from_millis(300));
+    mcb.poll(0.5).expect("poll");
+    assert_eq!(
+        watch.check(&mcb),
+        CountState::Counting,
+        "a clock reset was read as clocks that stood still"
     );
 }
 
@@ -2254,8 +2329,11 @@ fn a_flag_trailing_running_clocks_keeps_the_preset_hold() {
         ),
         "a preset write reached a count whose clocks were running: {result:?}"
     );
-    // Clocks that ran on twice date the count from the second reading:
-    // 0.9 s before it, so before the START was even sent here.
+    // Clocks that ran on twice date the count from the second reading,
+    // 0.9 s before it: before the START here, so no earlier than the START.
     let dated = mcb.spectrum().start_time.expect("a date");
-    assert!(dated < sent, "dated {dated}, START sent {sent}");
+    assert!(
+        dated >= sent && dated <= chrono::Local::now().naive_local(),
+        "dated {dated}, START sent {sent}"
+    );
 }

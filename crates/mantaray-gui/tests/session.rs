@@ -2751,11 +2751,15 @@ fn rule10_a_sample_the_instrument_ends_on_its_preset_is_complete() {
         bench.counting = false;
         bench.clock = 300.5;
     });
+    // Idle with the clocks run on decides nothing until a reading a moment
+    // later finds them where they stood (HIGH review of 4ae6457), so the
+    // frames here are wall time apart, as fetches are.
     for _ in 0..4 {
         app.advance_by(1.0);
         if app.queue.completed() > 0 {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
     assert_eq!(
         first_state(&app),
