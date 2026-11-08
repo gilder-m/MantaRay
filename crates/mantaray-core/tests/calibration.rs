@@ -210,12 +210,12 @@ fn shape_calibration_fits_measured_widths() {
 #[test]
 fn a_tiny_quadratic_term_inverts_correctly_within_a_few_channels_of_zero() {
     // E = 0.37 ch + 1e-40 ch^2: the quadratic term is 9e-40 keV at channel 3,
-    // far below a double's resolution of 1.11 keV, so 1.11 keV is channel
-    // 1.11 / 0.37 = 3 (to rounding; the test allows 1e-12 of it). The
-    // textbook root (-b + sqrt(b^2 + 4cE)) / 2c cancels to exactly 0 here, an
-    // error of 3 channels - small in absolute terms, so only the code's
-    // textbook-versus-stable switch, which is relative to the root
-    // (8 * EPSILON of it), refuses it.
+    // far below a double's resolution at 1.11 keV (about 2e-16 keV), so
+    // 1.11 keV is channel 1.11 / 0.37 = 3 (to rounding; the test allows 1e-12
+    // of it). The textbook root (-b + sqrt(b^2 + 4cE)) / 2c cancels to exactly
+    // 0 here, an error of 3 channels. The code's textbook-versus-stable switch
+    // (8 * EPSILON of the root) refuses it; a tolerance of several channels,
+    // such as 8 + EPSILON * root, would let it through.
     let calibration = EnergyCalibration::new([0.0, 0.37, 1e-40], "keV");
     for (energy, expected) in [(1.11, 3.0), (0.37, 1.0), (2.59, 7.0)] {
         let channel = calibration.channel(energy).expect("invertible");
