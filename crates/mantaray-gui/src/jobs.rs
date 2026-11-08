@@ -538,15 +538,16 @@ impl JobHost for App {
         let Some(detector) = self.job_target() else {
             return Err(JobError::host("CLEAR: there is no detector"));
         };
-        self.clear_detector_for_job(detector).map_err(device)?;
         // A count the job STARTed on this detector is still the one a later
-        // WAIT watches (START / CLEAR / WAIT), its clocks from zero again.
+        // WAIT watches (START / CLEAR / WAIT), its clocks from zero again;
+        // the watch takes what the mirror holds before the CLEAR wipes it.
         let number = self.detectors[detector].identity().number;
         if let Some((watched, watch)) = self.job_count.as_mut()
             && *watched == number
         {
-            watch.cleared();
+            watch.clearing(&self.detectors[detector]);
         }
+        self.clear_detector_for_job(detector).map_err(device)?;
         Ok(())
     }
 

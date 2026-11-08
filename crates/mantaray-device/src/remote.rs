@@ -490,6 +490,13 @@ impl RemoteMcb {
             self.start_unseen = None;
             return;
         }
+        // Clocks that went back were cleared (by whoever): the readings
+        // after decide afresh, as the count watch does. That they had run
+        // is kept.
+        if reading.real_time < unseen.real_time {
+            unseen.real_time = reading.real_time;
+            unseen.last_fetch = None;
+        }
         // How long the clocks have read this value, on fetches: a fetch on a
         // new value starts the span afresh.
         let mut stood_still_ms = 0;
@@ -1083,7 +1090,11 @@ impl Mcb for RemoteMcb {
         self.status.real_time = reading.real_time;
         self.status.live_time = reading.live_time;
         self.since_poll = POLL_INTERVAL;
-        self.see_start(reading, chrono::Local::now().naive_local(), false);
+        // The mirror's clocks are now this read's, so the time of the
+        // reading they are judged by is this read's too.
+        let read_at = chrono::Local::now().naive_local();
+        self.reading_at = Some(read_at);
+        self.see_start(reading, read_at, false);
         // An accepted START no reading has shown begin yet counts as
         // counting: the detector may be about to raise its flag.
         Ok(reading.active || self.start_unseen.is_some())
@@ -1131,6 +1142,8 @@ impl Mcb for RemoteMcb {
         // over before any read could see it. Whether it counts is for the
         // next reading to say - the mirror's flag is only ever a reading - so
         // the next poll fetches at once.
+        // Taken before START goes out: no count it begins starts earlier.
+        let sending = chrono::Local::now().naive_local();
         self.command("START")?;
         self.since_poll = POLL_INTERVAL;
         // The instrument reports no measurement date on this road (only
@@ -1142,7 +1155,7 @@ impl Mcb for RemoteMcb {
         // START stopped before it was seen counting is dated by the count
         // that follows); Clear resets it.
         if self.spectrum.start_time.is_none() {
-            self.spectrum.start_time = Some(chrono::Local::now().naive_local());
+            self.spectrum.start_time = Some(sending);
             // Provisional only on a fresh count: the clocks read zero on the
             // gate's status read just before START. An undated count resumed
             // without Clear (one held when this connected) cannot be dated

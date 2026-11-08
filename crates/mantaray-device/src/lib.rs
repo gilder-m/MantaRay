@@ -165,18 +165,25 @@ impl CountWatch {
         }
     }
 
-    /// The detector was cleared while watched: its clocks start again from
-    /// zero, and the count the watch was told of is still the one it
-    /// watches.
-    pub fn cleared(&mut self) {
+    /// The detector is about to be cleared while watched (call it before
+    /// the CLEAR): what the mirror holds now is taken as evidence first (a
+    /// count whose clocks ran, though no look saw it, did run), then its
+    /// clocks start again from zero, and the count the watch was told of is
+    /// still the one it watches.
+    pub fn clearing(&mut self, mcb: &dyn Mcb) {
+        if mcb.is_active() || mcb.status().real_time > self.real_time {
+            self.moved = true;
+        }
+        self.looked_at = self.looked_at.max(mcb.readings());
         self.reset_clocks(0.0);
     }
 
     /// The clocks were reset under the watch (a CLEAR, whoever sent it):
-    /// two readings decide afresh, and never started is counted anew.
+    /// the readings after decide afresh. That the clocks had run is kept: a
+    /// count that ran and was then cleared is over once they stand still,
+    /// never "never started".
     fn reset_clocks(&mut self, real_time: f64) {
         self.real_time = real_time;
-        self.moved = false;
         self.still_since = None;
         self.idle_unmoved = 0;
     }
@@ -224,11 +231,17 @@ impl CountWatch {
             }
             // Clocks that stood still from a reading far enough back (or
             // a backend that does not say when it read).
+            // After a reset the spacing is counted from the first reading
+            // judged on the new clocks.
             let stood_still = match (self.still_since, at) {
                 (Some(since), Some(at)) => {
                     (at - since).num_milliseconds() >= STOOD_STILL_SPACING_MS
                 }
-                _ => true,
+                (None, Some(at)) => {
+                    self.still_since = Some(at);
+                    false
+                }
+                (_, None) => true,
             };
             self.verdict = if real_time > self.real_time {
                 self.real_time = real_time;

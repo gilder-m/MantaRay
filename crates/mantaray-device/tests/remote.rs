@@ -2337,3 +2337,83 @@ fn a_flag_trailing_running_clocks_keeps_the_preset_hold() {
         "dated {dated}, START sent {sent}"
     );
 }
+
+/// Medium review of e8683de: a job's CLEAR after a count that ran out with
+/// no look at it (START / WAIT 60 / CLEAR / WAIT) leaves a WAIT that ends
+/// on the count being over, never on "did not count".
+#[test]
+fn a_clear_after_an_unwatched_count_is_over_not_never_started() {
+    use mantaray_device::{CountState, CountWatch, NEVER_STARTED_READINGS};
+    let ran = "RT=1.00 LT=1.00 DT=0% ICR=0 ACTIVE=0 TOTAL=5";
+    let mut script = vec![
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        ("SHOW_STATUS", ran),
+        ("SHOW_DATA", "DATA 2 2 3"),
+        ("CLEAR", "OK"),
+    ];
+    for _ in 0..NEVER_STARTED_READINGS + 2 {
+        script.extend([("SHOW_STATUS", IDLE0), ("SHOW_DATA", "DATA 2 0 0")]);
+    }
+    let mut mcb = connect_live_10(&script);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    // WAIT 60: polls, no look.
+    mcb.poll(0.5).expect("poll");
+    watch.clearing(&mcb);
+    mcb.clear().expect("CLEAR");
+    let mut state = CountState::Counting;
+    for _ in 0..NEVER_STARTED_READINGS + 2 {
+        std::thread::sleep(Duration::from_millis(30));
+        mcb.poll(0.5).expect("poll");
+        state = watch.check(&mcb);
+        if state != CountState::Counting {
+            break;
+        }
+    }
+    assert_eq!(state, CountState::Over, "the count ran; it is over");
+}
+
+/// Medium review of e8683de: a gate read's clocks are judged with the gate
+/// read's time, so a fetch the gate forced out right behind it on the same
+/// clocks is not "stood still".
+#[test]
+fn a_gate_read_and_the_fetch_behind_it_did_not_stand_still() {
+    use mantaray_device::{CountState, CountWatch};
+    let mut mcb = connect_live_10(&[
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        (
+            "SHOW_STATUS",
+            "RT=1.00 LT=1.00 DT=0% ICR=0 ACTIVE=0 TOTAL=5",
+        ),
+        ("SHOW_DATA", "DATA 2 2 3"),
+        // The gate read for a refused preset write.
+        (
+            "SHOW_STATUS",
+            "RT=1.40 LT=1.40 DT=0% ICR=0 ACTIVE=0 TOTAL=7",
+        ),
+        // The fetch it forces out, a moment later.
+        (
+            "SHOW_STATUS",
+            "RT=1.40 LT=1.40 DT=0% ICR=0 ACTIVE=0 TOTAL=7",
+        ),
+        ("SHOW_DATA", "DATA 2 3 4"),
+    ]);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    mcb.poll(0.5).expect("poll");
+    std::thread::sleep(Duration::from_millis(300));
+    let refused = mcb.set_presets(Presets {
+        live_time: Some(20.0),
+        ..Presets::default()
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(watch.check(&mcb), CountState::Counting);
+    mcb.poll(0.5).expect("the forced fetch");
+    assert_eq!(
+        watch.check(&mcb),
+        CountState::Counting,
+        "a gate read and the fetch right behind it ended the WAIT"
+    );
+}
