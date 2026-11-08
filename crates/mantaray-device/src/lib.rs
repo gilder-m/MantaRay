@@ -50,6 +50,8 @@ pub use presets::{MdaPreset, PRESET_TICK_SECONDS, PresetKind, Presets, Uncertain
 pub use remote::RemoteMcb;
 pub use rng::Rng;
 pub use simulator::{SimulatedMcb, SimulatedMcbBuilder, SimulatedSource, SourceLine};
+#[cfg(feature = "rig")]
+pub use transport::{CommandLog, RecordingTransport};
 pub use transport::{MockTransport, TcpTransport, Transport};
 
 /// Re-exported so callers do not need `mantaray-core` just to name a mode.

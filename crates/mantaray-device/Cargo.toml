@@ -19,8 +19,9 @@ thiserror = "2.0.19"
 
 [features]
 default = []
-# The scripted end-to-end instrument (src/rig.rs). Test builds only: its
-# numbers are invented, so no shipped binary may carry it.
+# The scripted end-to-end instrument (src/rig.rs) and the recording line
+# (RecordingTransport in src/transport.rs). Test builds only: their numbers
+# are invented, so no shipped binary may carry them.
 rig = []
 
 [dev-dependencies]

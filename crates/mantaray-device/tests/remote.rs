@@ -7,7 +7,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mantaray_device::{AnyMcb, Mcb, MockTransport, RemoteMcb, SimulatedMcb, TcpTransport, advance};
+use mantaray_device::{
+    AnyMcb, Mcb, MockTransport, RecordingTransport, RemoteMcb, SimulatedMcb, TcpTransport,
+    Transport, advance,
+};
 
 /// The handshake every script starts with: configuration, status, data.
 const HANDSHAKE: usize = 3;
@@ -1035,35 +1038,88 @@ fn a_persistent_length_change_is_adopted_on_the_second_fetch() {
     );
 }
 
-/// A line that answers like a quiet eight-channel instrument and keeps a log
-/// of every command sent, for tests that care what did *not* go out.
-struct Recording {
-    log: Arc<Mutex<Vec<String>>>,
-}
-
-impl mantaray_device::Transport for Recording {
-    fn exchange(&mut self, command: &str) -> Result<String, mantaray_device::DeviceError> {
-        self.log.lock().expect("log").push(command.to_string());
-        Ok(match command {
-            "SHOW_CONFIGURATION" => "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8".into(),
-            "SHOW_STATUS" => "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0".into(),
-            "SHOW_DATA" => "DATA 8 0 0 0 0 0 0 0 0".into(),
-            "SHOW_PRESETS" => "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0".into(),
-            _ => "OK".into(),
-        })
-    }
-
-    fn peer(&self) -> String {
-        "recording".into()
-    }
-}
-
+/// A quiet eight-channel instrument on a line that logs every command sent,
+/// for tests that care what did *not* go out. The handshake is cleared from
+/// the log, so it holds only what the test caused.
 fn connect_recording() -> (RemoteMcb, Arc<Mutex<Vec<String>>>) {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let transport = Recording { log: log.clone() };
-    let remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH").expect("connect");
-    log.lock().expect("log").clear();
-    (remote, log)
+    RecordingTransport::connect(1, "BENCH").expect("connect")
+}
+
+#[test]
+fn the_recording_line_logs_every_command_in_order_and_answers_like_a_quiet_instrument() {
+    let (mut line, log) = RecordingTransport::new();
+    assert_eq!(line.peer(), "recording");
+    assert_eq!(
+        line.exchange("SHOW_CONFIGURATION").expect("config"),
+        "MODEL=DSPEC-50 SERIAL=1 FIRMWARE=1 CHANNELS=8"
+    );
+    assert_eq!(
+        line.exchange("SHOW_STATUS").expect("status"),
+        "RT=0.00 LT=0.00 DT=0.0% ICR=0 ACTIVE=0 TOTAL=0"
+    );
+    assert_eq!(
+        line.exchange("SHOW_DATA").expect("data"),
+        "DATA 8 0 0 0 0 0 0 0 0"
+    );
+    assert_eq!(
+        line.exchange("SHOW_PRESETS").expect("presets"),
+        "PRESETS REAL=0.00 LIVE=300.00 PEAK=0 INTEG=0"
+    );
+    assert_eq!(line.exchange("SET_HV 1500").expect("hv"), "OK");
+    assert_eq!(
+        *log.lock().expect("log"),
+        [
+            "SHOW_CONFIGURATION",
+            "SHOW_STATUS",
+            "SHOW_DATA",
+            "SHOW_PRESETS",
+            "SET_HV 1500"
+        ]
+    );
+}
+
+#[test]
+fn the_recording_connect_leaves_the_handshake_out_of_the_log() {
+    let (remote, log) = RecordingTransport::connect(3, "BENCH").expect("connect");
+    assert_eq!(remote.identity().channels, 8);
+    assert_eq!(*log.lock().expect("log"), Vec::<String>::new());
+}
+
+#[test]
+fn mutating_drops_the_show_polls_and_keeps_everything_else_in_order() {
+    // Anything that is not a SHOW_ read changes the instrument, so a command
+    // the filter has never heard of is kept, not hidden.
+    let log = Mutex::new(
+        [
+            "SHOW_STATUS",
+            "SET_PRESET_CLEAR",
+            "SHOW_DATA",
+            "SET_HV 1500",
+            "START",
+            "SHOW_PRESETS",
+            "STOP",
+            "CLEAR",
+            "ENABLE_HV",
+        ]
+        .map(String::from)
+        .to_vec(),
+    );
+    assert_eq!(
+        RecordingTransport::mutating(&log),
+        [
+            "SET_PRESET_CLEAR",
+            "SET_HV 1500",
+            "START",
+            "STOP",
+            "CLEAR",
+            "ENABLE_HV"
+        ]
+    );
+    assert_eq!(
+        log.lock().expect("log").len(),
+        9,
+        "the log is read, not drained"
+    );
 }
 
 #[test]
@@ -1375,7 +1431,7 @@ fn host_side_presets_never_reach_the_instrument() {
     assert_eq!(remote.presets().mda, Some(an_mda_preset()));
 }
 
-/// A line like [`Recording`] that refuses the commands whose names it is given.
+/// A line like [`RecordingTransport`] that refuses the commands whose names it is given.
 struct Refusing {
     refuse: Vec<&'static str>,
 }
@@ -1469,7 +1525,7 @@ fn presets_cleared_and_then_refused_leave_the_mirror_as_the_instrument_is() {
     assert_eq!(remote.presets().live_time, None);
 }
 
-/// A [`Recording`] line whose instrument has been counting a peak, so an
+/// A [`RecordingTransport`] line whose instrument has been counting a peak, so an
 /// uncertainty preset can be satisfied, and which refuses what it is told to.
 struct CountingPeak {
     refuse: Vec<&'static str>,
