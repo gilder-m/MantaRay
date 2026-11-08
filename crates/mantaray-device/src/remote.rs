@@ -368,7 +368,7 @@ impl RemoteMcb {
     }
 
     /// Sets the pause between the status reads that confirm a STOP (100 ms
-    /// by default; [`CONFIRM_READS`] reads at most). Tests set zero.
+    /// by default; `CONFIRM_READS` reads at most). Tests set zero.
     pub fn set_confirm_step(&mut self, step: std::time::Duration) {
         self.confirm_step = step;
     }
@@ -429,7 +429,7 @@ impl RemoteMcb {
     }
 
     /// Reads the status until it says the detector has stopped: a STOP
-    /// finishes only when the detector agrees. At most [`CONFIRM_READS`]
+    /// finishes only when the detector agrees. At most `CONFIRM_READS`
     /// reads, [`Self::confirm_step`] apart: a bound inside one command, never
     /// a wait across frames, and the same number of reads however slow the
     /// wire. A read that fails ends it with that read's reason: the STOP was

@@ -929,7 +929,7 @@ fn until_counting(mcb: &mut RemoteMcb, line: &str) {
 fn gilder_a_slow_start_is_dated_when_the_count_began() {
     both(|rig, mut mcb, line| {
         apply(&mut mcb, Presets::live(30.0)).expect("preset");
-        rig.fault(Fault::StartLag { reads: 6 });
+        rig.fault(Fault::StartLag { reads: 20 });
         let _ = rig.take_sent();
         let sent = chrono::Local::now().naive_local();
         mcb.start().expect("START is accepted");
@@ -948,9 +948,11 @@ fn gilder_a_slow_start_is_dated_when_the_count_began() {
             "{line}: the rig did not lag ({sent} -> {began})"
         );
         let dated = mcb.spectrum().start_time.expect("a start date");
+        // Closer to when the rig began than to when START was sent: a fixed
+        // tolerance failed on a slow CI runner (macOS, 160 ms of reply delay).
         let off = (dated - began).num_milliseconds().abs();
         assert!(
-            off < 150,
+            off < (began - sent).num_milliseconds() / 2,
             "{line}: dated {dated}, began {began}, START sent {sent}"
         );
         // Later readings keep the date.
@@ -1025,14 +1027,17 @@ fn gilder_a_start_stopped_before_it_counted_does_not_date_the_count() {
         let first = chrono::Local::now().naive_local();
         mcb.start().expect("START is accepted");
         mcb.stop().expect("STOP");
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         mcb.start().expect("the second START");
         until_counting(&mut mcb, line);
         let began = rig.began_at().expect("the rig began counting");
-        assert!((began - first).num_milliseconds() >= 350, "{line}");
+        assert!((began - first).num_milliseconds() >= 950, "{line}");
         let dated = mcb.spectrum().start_time.expect("a start date");
+        // Dated by the START that counted, not the first one: closer to when
+        // the rig began than to the first START (a fixed 150 ms tolerance
+        // failed on a slow macOS CI runner).
         assert!(
-            (dated - began).num_milliseconds().abs() < 150,
+            (dated - began).num_milliseconds().abs() < (began - first).num_milliseconds() / 2,
             "{line}: dated {dated}, began {began}, first START {first}"
         );
     });

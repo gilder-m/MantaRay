@@ -321,7 +321,7 @@ pub struct McbStatus {
     pub total_counts: u64,
 }
 
-/// What a command through the gate ([`admit`]) is about to do.
+/// What a command through the gate (`admit`) is about to do.
 enum Op<'a> {
     /// START.
     Start,
@@ -339,7 +339,7 @@ enum Op<'a> {
 }
 
 /// Proof that a command passed the gate. Its field is private to this
-/// module, and only [`admit`] and [`Mcb::stop_at_preset`] make one, so the
+/// module, and only `admit` and [`Mcb::stop_at_preset`] make one, so the
 /// `do_*` methods that take it cannot be reached without the gate.
 ///
 /// ```compile_fail
@@ -544,7 +544,7 @@ fn raw_presets(current: &Presets, command: &str) -> Result<Option<Presets>, Devi
 /// A multichannel buffer: an instrument that collects a spectrum.
 ///
 /// Every command that changes the detector is a provided method here that
-/// passes the gate ([`admit`]) and then calls the backend's `do_*` method with
+/// passes the gate (`admit`) and then calls the backend's `do_*` method with
 /// the [`Admitted`] it got. A backend implements the `do_*` methods and the
 /// accessors; it never overrides a provided command method (a test reads the
 /// sources to hold that).
