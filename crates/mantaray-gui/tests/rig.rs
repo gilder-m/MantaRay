@@ -717,3 +717,115 @@ fn high_review_start_clear_wait_watches_the_jobs_count() {
     );
     assert!(rig.clocks().1 >= 3.0 - 1e-9, "{:?}", rig.clocks());
 }
+
+/// A rig as network detector `number`, added beside any already open.
+fn add_rig(app: &mut App, number: u16) -> (Rig, usize) {
+    let rig = Rig::new(CHANNELS);
+    let address = rig.serve();
+    let index = app.detectors.len();
+    app.add_detector(DetectorEntry {
+        number,
+        name: format!("RIG{number}"),
+        model: "remote".into(),
+        kind: DetectorKind::Network,
+        channels: 0,
+        description: address,
+        serial: String::new(),
+    });
+    assert_eq!(app.detectors.len(), index + 1, "connect: {}", app.status);
+    (rig, index)
+}
+
+/// Frames until every listed mirror holds two fresh fetches.
+fn settle_all(app: &mut App, indices: &[usize]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut fresh = vec![0; indices.len()];
+    while fresh.iter().any(|count| *count < 2) {
+        app.advance_by(0.5);
+        for (slot, index) in indices.iter().enumerate() {
+            if app.detectors[*index].poll_freshened() {
+                fresh[slot] += 1;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "no fetch landed");
+        std::thread::yield_now();
+    }
+}
+
+/// Third HIGH review (of 84ab2f1): a job STARTs detectors 7 and 8, then
+/// WAITs on 7 and SAVEs it. Each detector keeps its own watch, so the lag
+/// on 7 (`fault`) is watched through to the end of its count, as with one
+/// detector. With `second` false, detector 8's block is no-ops (the
+/// one-detector control).
+fn two_detector_job(fault: Fault, second: bool) {
+    let mut app = App::headless();
+    let (rig_a, a) = add_rig(&mut app, 7);
+    let (rig_b, b) = add_rig(&mut app, 8);
+    let tag = format!("{}-{second}-{fault:?}", std::process::id())
+        .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+    rig_a.fault(fault);
+    let saved = std::env::temp_dir().join(format!("mantaray-two-{tag}.spe"));
+    let _ = std::fs::remove_file(&saved);
+    let middle = if second {
+        "SET_DETECTOR 8\nSET_PRESET_LIVE 3\nCLEAR\nSTART\n"
+    } else {
+        "SET_DETECTOR 7\nSET_DETECTOR 7\nSET_DETECTOR 7\nSET_DETECTOR 7\n"
+    };
+    let text = format!(
+        "SET_DETECTOR 7\nSET_PRESET_LIVE 3\nCLEAR\nSTART\n{middle}\
+         SET_DETECTOR 7\nWAIT\nSAVE \"{}\"\n",
+        saved.display()
+    );
+    let path = std::env::temp_dir().join(format!("mantaray-two-{tag}.job"));
+    std::fs::write(&path, text).expect("write the job");
+    mantaray_gui::jobs::start(&mut app, &path).expect("parse");
+    let mut a_when_saved = None;
+    for _ in 0..200 {
+        mantaray_gui::jobs::step(&mut app);
+        if a_when_saved.is_none() && saved.exists() {
+            a_when_saved = Some((rig_a.counting(), rig_a.clocks()));
+        }
+        if app.job.is_none() {
+            break;
+        }
+        // Wall time passes too, so "stood still" (250 ms apart) can be told.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        rig_a.tick(0.5);
+        rig_b.tick(0.5);
+        settle_all(&mut app, &[a, b]);
+    }
+    let status = app.status.clone();
+    let _ = std::fs::remove_file(&path);
+    assert!(app.job.is_none(), "the job did not finish: {status}");
+    let (counting, clocks) = a_when_saved.expect("the job saved");
+    let file = mantaray_formats::load_spectrum(&saved).expect("read back");
+    let _ = std::fs::remove_file(&saved);
+    assert!(
+        !counting && clocks.1 >= 3.0 - 1e-9,
+        "the WAIT on detector 7 ended while it counted (rig counting={counting}, \
+         clocks={clocks:?}); the file holds {} counts, {} s live; status: {status}",
+        file.total_counts(),
+        file.live_time
+    );
+}
+
+#[test]
+fn high3_a_two_detector_job_waits_out_a_slow_start_on_the_first() {
+    two_detector_job(Fault::StartLag { reads: 10 }, true);
+}
+
+#[test]
+fn high3_a_two_detector_job_waits_out_a_trailing_flag_on_the_first() {
+    two_detector_job(Fault::FlagLag { reads: 10 }, true);
+}
+
+#[test]
+fn high3_a_two_detector_job_with_no_fault_saves_the_full_count() {
+    two_detector_job(Fault::StartLag { reads: 0 }, true);
+}
+
+#[test]
+fn high3_one_detector_controls_wait_out_both_lags() {
+    two_detector_job(Fault::StartLag { reads: 10 }, false);
+    two_detector_job(Fault::FlagLag { reads: 10 }, false);
+}

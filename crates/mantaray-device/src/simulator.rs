@@ -938,7 +938,7 @@ impl Mcb for SimulatedMcb {
         self.readings
     }
 
-    fn reading_at(&self) -> Option<chrono::NaiveDateTime> {
+    fn reading_at(&self) -> Option<std::time::Instant> {
         // The simulator's clock is its own, not this computer's.
         None
     }

@@ -31,6 +31,9 @@ pub(crate) struct Fetched {
     /// When the status reply arrived, on this computer's clock: the moment
     /// its clocks were read, which dates a count's real start.
     pub read_at: chrono::NaiveDateTime,
+    /// The same moment on the monotonic clock, for spacing readings: a
+    /// daylight-saving change or a clock step moves `read_at`, not this.
+    pub read_instant: std::time::Instant,
 }
 
 /// What the caller can send the courier to do.
@@ -166,11 +169,13 @@ fn deliver(
             }
             Errand::Fetch => {
                 let fetched = transport.exchange("SHOW_STATUS").and_then(|status| {
+                    let read_instant = std::time::Instant::now();
                     let read_at = chrono::Local::now().naive_local();
                     transport.exchange("SHOW_DATA").map(|data| Fetched {
                         status,
                         data,
                         read_at,
+                        read_instant,
                     })
                 });
                 *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fetched);

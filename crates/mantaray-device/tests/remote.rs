@@ -2417,3 +2417,49 @@ fn a_gate_read_and_the_fetch_behind_it_did_not_stand_still() {
         "a gate read and the fetch right behind it ended the WAIT"
     );
 }
+
+/// Third HIGH review (of 84ab2f1), nit 1: after a CLEAR, the preset hold
+/// agrees with the count watch about a count that ran unseen. Its clocks
+/// stand still at zero, the WAIT says over, and a preset write right after
+/// is let through (it was refused for some 20 more fetches).
+#[test]
+fn a_clear_after_an_unwatched_count_releases_the_hold_with_the_watch() {
+    use mantaray_device::{CountState, CountWatch};
+    let mut mcb = connect_live_10(&[
+        ("SHOW_STATUS", IDLE0),
+        ("START", "OK"),
+        (
+            "SHOW_STATUS",
+            "RT=1.00 LT=1.00 DT=0% ICR=0 ACTIVE=0 TOTAL=5",
+        ),
+        ("SHOW_DATA", "DATA 2 2 3"),
+        ("CLEAR", "OK"),
+        ("SHOW_STATUS", IDLE0),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        ("SHOW_STATUS", IDLE0),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        // The preset write's gate read, then the write.
+        ("SHOW_STATUS", IDLE0),
+        ("SET_PRESET_CLEAR", "OK"),
+        ("SET_PRESET_LIVE 5", "OK"),
+    ]);
+    mcb.start().expect("START accepted");
+    let mut watch = CountWatch::started(&mcb);
+    mcb.poll(0.5).expect("poll");
+    watch.clearing(&mcb);
+    mcb.clear().expect("CLEAR");
+    mcb.poll(0.5).expect("poll");
+    assert_eq!(watch.check(&mcb), CountState::Counting);
+    std::thread::sleep(Duration::from_millis(300));
+    mcb.poll(0.5).expect("poll");
+    assert_eq!(
+        watch.check(&mcb),
+        CountState::Over,
+        "the count ran; it is over"
+    );
+    mcb.set_presets(Presets {
+        live_time: Some(5.0),
+        ..Presets::default()
+    })
+    .expect("the hold agrees the count is over");
+}

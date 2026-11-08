@@ -128,7 +128,7 @@ pub struct CountWatch {
     /// When the clocks were first read at their current value
     /// ([`Mcb::reading_at`]), so clocks that stood still are judged only
     /// across readings far enough apart.
-    still_since: Option<chrono::NaiveDateTime>,
+    still_since: Option<std::time::Instant>,
     /// The readings count when the current run of unbelieved ones began.
     untrusted_from: Option<u64>,
     /// Believed readings seen idle with the clocks unmoved since the START.
@@ -235,7 +235,8 @@ impl CountWatch {
             // judged on the new clocks.
             let stood_still = match (self.still_since, at) {
                 (Some(since), Some(at)) => {
-                    (at - since).num_milliseconds() >= STOOD_STILL_SPACING_MS
+                    at.saturating_duration_since(since).as_millis()
+                        >= STOOD_STILL_SPACING_MS.unsigned_abs().into()
                 }
                 (None, Some(at)) => {
                     self.still_since = Some(at);

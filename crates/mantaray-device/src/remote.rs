@@ -94,7 +94,7 @@ pub struct RemoteMcb {
     /// Whether a STOP's confirm reads are under way (they date nothing).
     confirming: bool,
     /// When the latest fetch's status reply arrived ([`Mcb::reading_at`]).
-    reading_at: Option<chrono::NaiveDateTime>,
+    reading_at: Option<std::time::Instant>,
     /// When the START behind a provisional date was accepted: no date of
     /// that count is earlier.
     start_sent: Option<chrono::NaiveDateTime>,
@@ -114,12 +114,18 @@ struct StartUnseen {
     /// The real time of the latest reading (the gate's fresh status read
     /// just before START, to begin with).
     real_time: f64,
-    /// Whether a reading since START has shown the clocks run on.
+    /// Whether a reading since START has shown the clocks run on. A CLEAR
+    /// keeps it, as the count watch does: a count that ran is over once its
+    /// clocks stand still, cleared or not.
     ran: bool,
+    /// Whether a reading has shown the clocks run on since START or since
+    /// they were last reset: clocks that run on again after it date the
+    /// count.
+    ran_since_reset: bool,
     /// The real time of the latest fetch, and when a fetch first read that
     /// value: once the clocks have run, a fetch far enough after that on the
     /// same value says the count is over.
-    last_fetch: Option<(f64, chrono::NaiveDateTime)>,
+    last_fetch: Option<(f64, std::time::Instant)>,
     /// Believed fetches since then that said idle with the clocks unmoved.
     idle_fetches: u64,
 }
@@ -464,20 +470,29 @@ impl RemoteMcb {
     fn refresh(&mut self) -> Result<(), DeviceError> {
         self.since_poll = 0.0;
         let status = self.raw("SHOW_STATUS")?;
+        let read_instant = std::time::Instant::now();
         let read_at = chrono::Local::now().naive_local();
         let data = self.raw("SHOW_DATA")?;
         self.integrate(Fetched {
             status,
             data,
             read_at,
+            read_instant,
         })
     }
 
-    /// Works a believed reading, taken at `read_at`, into the start date and
-    /// an accepted START still waiting to be seen ([`StartUnseen`]). Only a
+    /// Works a believed reading, taken at `read_at` (`read_instant` on the
+    /// monotonic clock, which spaces readings), into the start date and an
+    /// accepted START still waiting to be seen ([`StartUnseen`]). Only a
     /// fetch (`fetch`) counts towards giving up on it, never the gate's own
     /// status reads.
-    fn see_start(&mut self, reading: Status, read_at: chrono::NaiveDateTime, fetch: bool) {
+    fn see_start(
+        &mut self,
+        reading: Status,
+        read_at: chrono::NaiveDateTime,
+        read_instant: std::time::Instant,
+        fetch: bool,
+    ) {
         // A STOP's confirm reads date nothing: a flag that trails the stop
         // beside clocks frozen at it would date the count late.
         if reading.active && !self.confirming {
@@ -496,6 +511,7 @@ impl RemoteMcb {
         if reading.real_time < unseen.real_time {
             unseen.real_time = reading.real_time;
             unseen.last_fetch = None;
+            unseen.ran_since_reset = false;
         }
         // How long the clocks have read this value, on fetches: a fetch on a
         // new value starts the span afresh.
@@ -503,9 +519,11 @@ impl RemoteMcb {
         if fetch {
             match unseen.last_fetch {
                 Some((value, since)) if value == reading.real_time => {
-                    stood_still_ms = (read_at - since).num_milliseconds();
+                    stood_still_ms =
+                        i64::try_from(read_instant.saturating_duration_since(since).as_millis())
+                            .unwrap_or(i64::MAX);
                 }
-                _ => unseen.last_fetch = Some((reading.real_time, read_at)),
+                _ => unseen.last_fetch = Some((reading.real_time, read_instant)),
             }
         }
         if reading.real_time > unseen.real_time {
@@ -515,9 +533,10 @@ impl RemoteMcb {
             // that run on again after an earlier such reading say it counts
             // now, and date it (still provisionally: a reading that shows it
             // counting dates it better).
-            let again = unseen.ran;
+            let again = unseen.ran_since_reset;
             unseen.real_time = reading.real_time;
             unseen.ran = true;
+            unseen.ran_since_reset = true;
             if again {
                 self.date_provisionally(reading.real_time, read_at);
             }
@@ -615,7 +634,7 @@ impl RemoteMcb {
         // afresh (rule 4).
         let status = fetched.status;
         self.readings += 1;
-        self.reading_at = Some(fetched.read_at);
+        self.reading_at = Some(fetched.read_instant);
         match parse_status(&status) {
             Some(reading) => {
                 let number = |key: &str| status_number(&status, key);
@@ -626,7 +645,7 @@ impl RemoteMcb {
                 self.status.input_count_rate = number("ICR").unwrap_or(0.0);
                 self.status.total_counts = number("TOTAL").unwrap_or(0.0) as u64;
                 self.untrusted = None;
-                self.see_start(reading, fetched.read_at, true);
+                self.see_start(reading, fetched.read_at, fetched.read_instant, true);
             }
             None => {
                 self.untrusted = Some(format!(
@@ -1092,9 +1111,10 @@ impl Mcb for RemoteMcb {
         self.since_poll = POLL_INTERVAL;
         // The mirror's clocks are now this read's, so the time of the
         // reading they are judged by is this read's too.
+        let read_instant = std::time::Instant::now();
         let read_at = chrono::Local::now().naive_local();
-        self.reading_at = Some(read_at);
-        self.see_start(reading, read_at, false);
+        self.reading_at = Some(read_instant);
+        self.see_start(reading, read_at, read_instant, false);
         // An accepted START no reading has shown begin yet counts as
         // counting: the detector may be about to raise its flag.
         Ok(reading.active || self.start_unseen.is_some())
@@ -1170,6 +1190,7 @@ impl Mcb for RemoteMcb {
             self.start_unseen = Some(StartUnseen {
                 real_time: self.status.real_time,
                 ran: false,
+                ran_since_reset: false,
                 last_fetch: None,
                 idle_fetches: 0,
             });
@@ -1226,8 +1247,10 @@ impl Mcb for RemoteMcb {
         if let Some(unseen) = self.start_unseen.as_mut() {
             unseen.real_time = 0.0;
             unseen.last_fetch = None;
-            // The clocks run again from zero: two readings decide afresh.
-            unseen.ran = false;
+            // The clocks run again from zero: dating needs two readings
+            // afresh. That they ran is kept (a count that ran out unseen is
+            // over once they stand still), as the count watch keeps it.
+            unseen.ran_since_reset = false;
         }
         self.provisional_start = false;
         self.start_sent = None;
@@ -1337,7 +1360,7 @@ impl Mcb for RemoteMcb {
         self.readings
     }
 
-    fn reading_at(&self) -> Option<chrono::NaiveDateTime> {
+    fn reading_at(&self) -> Option<std::time::Instant> {
         self.reading_at
     }
 }

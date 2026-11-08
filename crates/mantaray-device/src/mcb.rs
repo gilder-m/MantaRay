@@ -969,13 +969,14 @@ pub trait Mcb: Send {
     fn readings(&self) -> u64;
 
     /// When the reading the mirror's clocks now come from arrived (the latest
-    /// fetch, or a gate's status read after it), on this computer's clock,
-    /// or `None` for a backend that does not say (the simulator). Only the
+    /// fetch, or a gate's status read after it), on this computer's
+    /// monotonic clock (a daylight-saving change or a clock step does not
+    /// move it), or `None` for a backend that does not say (the simulator). Only the
     /// spacing of two readings is ever judged from it: clocks that stand
     /// still across two readings say a count is over only when the readings
     /// were far enough apart for a running clock to have moved. It never
     /// ends or extends a count by itself.
-    fn reading_at(&self) -> Option<chrono::NaiveDateTime>;
+    fn reading_at(&self) -> Option<std::time::Instant>;
 
     /// Which preset, if any, has been satisfied.
     fn preset_reached(&self) -> Option<PresetKind> {

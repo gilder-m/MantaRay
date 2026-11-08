@@ -935,9 +935,10 @@ pub struct App {
     pub job: Option<crate::jobs::JobRun>,
     /// A wait the job is in, checked once per frame instead of blocking one.
     pub job_wait: Option<crate::jobs::JobWait>,
-    /// The count a job's START began (detector number and the watch on it),
-    /// for the WAIT that follows.
-    pub job_count: Option<(u16, mantaray_device::CountWatch)>,
+    /// The counts the job's STARTs began, one watch per detector number,
+    /// for the WAIT that follows on that detector. A job that STARTs
+    /// several detectors keeps a watch on each.
+    pub job_count: std::collections::BTreeMap<u16, mantaray_device::CountWatch>,
     /// The detector (by number) the running job's last START counted on:
     /// with a buffer window active, the job's START, STOP, CLEAR and WAIT
     /// act on it, so a STOP never lands on another detector than its START.
@@ -1188,7 +1189,7 @@ impl App {
             report_text: None,
             job: None,
             job_wait: None,
-            job_count: None,
+            job_count: std::collections::BTreeMap::new(),
             job_started_on: None,
             job_variables: mantaray_jobs::JobVariables::new(),
             job_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

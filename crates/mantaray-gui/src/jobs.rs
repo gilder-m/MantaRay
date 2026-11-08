@@ -122,7 +122,7 @@ pub fn start(app: &mut App, path: &Path) -> Result<(), String> {
     app.job = Some(Runner::new(job));
     // A fresh job must not inherit a dead one's pending wait, or its count.
     app.job_wait = None;
-    app.job_count = None;
+    app.job_count.clear();
     app.job_started_on = None;
     Ok(())
 }
@@ -500,7 +500,8 @@ impl JobHost for App {
         let mcb = &mut self.detectors[detector];
         mcb.start().map_err(device)?;
         let number = mcb.identity().number;
-        self.job_count = Some((number, mantaray_device::CountWatch::started(&*mcb)));
+        self.job_count
+            .insert(number, mantaray_device::CountWatch::started(&*mcb));
         self.job_started_on = Some(number);
         self.status = "acquisition started".into();
         Ok(())
@@ -521,7 +522,8 @@ impl JobHost for App {
             return Err(JobError::host("STOP: there is no detector"));
         };
         self.detectors[detector].stop().map_err(device)?;
-        self.job_count = None;
+        let number = self.detectors[detector].identity().number;
+        self.job_count.remove(&number);
         self.status = "acquisition stopped".into();
         Ok(())
     }
@@ -542,9 +544,7 @@ impl JobHost for App {
         // WAIT watches (START / CLEAR / WAIT), its clocks from zero again;
         // the watch takes what the mirror holds before the CLEAR wipes it.
         let number = self.detectors[detector].identity().number;
-        if let Some((watched, watch)) = self.job_count.as_mut()
-            && *watched == number
-        {
+        if let Some(watch) = self.job_count.get_mut(&number) {
             watch.clearing(&self.detectors[detector]);
         }
         self.clear_detector_for_job(detector).map_err(device)?;
@@ -575,10 +575,10 @@ impl JobHost for App {
             // counts is told from a count that is over.
             let mcb = &self.detectors[detector];
             let number = mcb.identity().number;
-            let watch = match self.job_count.take() {
-                Some((started, watch)) if started == number => watch,
-                _ => mantaray_device::CountWatch::begin(mcb),
-            };
+            let watch = self
+                .job_count
+                .remove(&number)
+                .unwrap_or_else(|| mantaray_device::CountWatch::begin(mcb));
             self.job_wait = Some(JobWait::Stop {
                 detector: number,
                 watch,

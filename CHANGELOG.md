@@ -54,7 +54,10 @@ end a WAIT, a batch sample or that hold: the flag can trail the clocks as a
 count begins, so the next reading decides (clocks moved again, it counts;
 where they stood, it is over), at the cost of one fetch at the end of a
 count that runs out between two readings. A job's CLEAR after its START
-keeps the job's WAIT on that count. A START the detector accepts but does
+keeps the job's WAIT on that count. In the interface a job keeps one watch
+per detector it STARTs, so a job that starts several detectors and then
+WAITs on each has every one watched this way, not only the last started. A
+cleared count that ran is over for the preset hold as for the WAIT. A START the detector accepts but does
 not count on is called never started after 20 readings (about 10 s), not 4. **Sample changer:** shipped
 builds have no sample changer (it was the simulator's); the CHANGE_SAMPLE and
 WAIT_CHANGER job commands fail with "no sample changer is connected", the
