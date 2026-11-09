@@ -506,7 +506,8 @@ impl RemoteMcb {
     /// Reads the spectrum the detector stopped at, after a confirmed STOP:
     /// one SHOW_DATA beside the confirming status read (taken after the
     /// stop, so its clocks are the final ones), tried up to
-    /// [`FINAL_FETCH_TRIES`] times.
+    /// [`FINAL_FETCH_TRIES`] times when an answer comes back but is not
+    /// believed, and once only when the line itself fails.
     ///
     /// The confirm read only the status, so the mirror kept the channels and
     /// clocks of the last regular fetch, and a SAVE straight after STOP - a
@@ -519,14 +520,26 @@ impl RemoteMcb {
             return Ok(());
         };
         let mut reason = None;
-        for _ in 0..FINAL_FETCH_TRIES {
-            let landed = self.raw("SHOW_DATA").and_then(|data| {
-                self.integrate(Fetched {
-                    status: status.clone(),
-                    data,
-                    read_at,
-                    read_instant,
-                })
+        let mut tries = 0;
+        while tries < FINAL_FETCH_TRIES {
+            tries += 1;
+            // A line error (on the bridge, its whole exchange timeout) is not
+            // tried again: three tries made a STOP to a hung instrument wait
+            // about 30 s (review of the save-path fixes, S-1). An answer that
+            // came back but was not believed - the 926's ERR for a short
+            // adapter read, a held length - is what the retry is for.
+            let data = match self.raw("SHOW_DATA") {
+                Ok(data) => data,
+                Err(error) => {
+                    reason = Some(error.to_string());
+                    break;
+                }
+            };
+            let landed = self.integrate(Fetched {
+                status: status.clone(),
+                data,
+                read_at,
+                read_instant,
             });
             match landed {
                 Ok(true) => return Ok(()),
@@ -536,12 +549,17 @@ impl RemoteMcb {
         }
         let reason = reason.unwrap_or_else(|| "its channel count did not hold still".into());
         self.untrusted = Some(format!("the final spectrum could not be read: {reason}"));
+        let tries = if tries == 1 {
+            "1 try".to_string()
+        } else {
+            format!("{tries} tries")
+        };
         Err(DeviceError::Command {
             command: "STOP".into(),
             detail: format!(
                 "the detector stopped, but its final spectrum could not be read \
-                 ({FINAL_FETCH_TRIES} tries): {reason}; the spectrum shown is from \
-                 before the stop until a reading lands"
+                 ({tries}): {reason}; the spectrum shown is from before the stop until \
+                 a reading lands"
             ),
         })
     }
