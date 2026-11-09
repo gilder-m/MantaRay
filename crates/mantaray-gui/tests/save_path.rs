@@ -114,16 +114,22 @@ fn f2_a_job_stop_then_save_writes_the_count_the_detector_stopped_at() {
     let saved = temp("f2.Spe");
     let _ = std::fs::remove_file(&saved);
     let step = 0.05;
+    let mut last = std::time::Instant::now();
     run(
         &mut app,
         &rig,
         "f2.job",
         &format!("CLEAR\nSTART\nWAIT 2\nSTOP\nSAVE \"{}\"\n", saved.display()),
         |rig| {
-            // The rig's clock runs in step with the wall clock.
+            // The rig's clock runs in step with the wall clock: it advances by
+            // the time that really passed, so a slow runner whose sleeps
+            // overrun (macOS CI, 11/9) cannot leave it behind the job's WAIT.
             std::thread::sleep(std::time::Duration::from_secs_f64(step));
-            rig.tick(step);
-            step
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last).as_secs_f64();
+            last = now;
+            rig.tick(dt);
+            dt
         },
     );
     let status = app.status.clone();
