@@ -375,7 +375,15 @@ fn rule3_t08_a_recent_poll_is_not_an_answer() {
             "Presets can't be changed during acquisition.",
             line,
         );
-        assert_eq!(rig.sent().first().map(String::as_str), Some("SHOW_STATUS"));
+        // A spectrum read can land first (ubuntu CI, 11/8); the status ask is
+        // what must come before anything else.
+        let sent = rig.sent();
+        let asked = sent.iter().find(|command| command.as_str() != "SHOW_DATA");
+        assert_eq!(
+            asked.map(String::as_str),
+            Some("SHOW_STATUS"),
+            "{line}: {sent:?}"
+        );
         no_violations(rig, line);
     });
 }
