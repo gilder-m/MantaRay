@@ -89,7 +89,10 @@ fn start_refuses_while_a_typed_preset_is_not_applied() {
     open_presets(&mut harness);
     type_real_time(&mut harness, "60");
     press_start(&mut harness);
-    assert!(!started(&log), "the count went out without the typed preset");
+    assert!(
+        !started(&log),
+        "the count went out without the typed preset"
+    );
     let status = harness.state().status.clone();
     assert!(status.contains("not applied"), "{status}");
     assert!(status.contains("Apply presets"), "{status}");
@@ -106,7 +109,10 @@ fn closing_the_dialog_does_not_lose_the_typed_preset_or_let_start_through() {
         .set(Dialog::McbProperties, false);
     harness.run();
     press_start(&mut harness);
-    assert!(!started(&log), "closing the dialog let the unlimited count start");
+    assert!(
+        !started(&log),
+        "closing the dialog let the unlimited count start"
+    );
 
     // Reopened, the draft is there, marked.
     open_presets(&mut harness);
@@ -150,7 +156,9 @@ fn typing_a_sample_description_makes_the_window_unsaved() {
     let (mut harness, _log) = harness();
     let index = harness.state().active.expect("the detector window");
     harness.state_mut().windows[index].modified = false;
-    harness.state_mut().apply_action(Action::Show(Dialog::Sample));
+    harness
+        .state_mut()
+        .apply_action(Action::Show(Dialog::Sample));
     harness.run();
     harness
         .get_by_role_and_label(Role::MultilineTextInput, "Sample Description")

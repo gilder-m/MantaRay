@@ -32,7 +32,10 @@ fn reopened() -> App {
         Some(PathBuf::from("Co60.Spe")),
     );
     let index = app.active.expect("the buffer is active");
-    assert!(!app.windows[index].modified, "a file just opened is not modified");
+    assert!(
+        !app.windows[index].modified,
+        "a file just opened is not modified"
+    );
     app
 }
 
@@ -46,7 +49,10 @@ fn active_modified(app: &App) -> bool {
 fn marking_a_region_on_a_reopened_file_makes_it_unsaved() {
     let mut app = reopened();
     app.apply_action(Action::MarkRange(10, 20));
-    assert!(active_modified(&app), "a new region is not saved anywhere yet");
+    assert!(
+        active_modified(&app),
+        "a new region is not saved anywhere yet"
+    );
 }
 
 #[test]
@@ -59,7 +65,10 @@ fn every_region_change_makes_the_window_unsaved() {
     ] {
         let mut app = reopened();
         app.apply_action(action.clone());
-        assert!(active_modified(&app), "{action:?} left the window unsaved-free");
+        assert!(
+            active_modified(&app),
+            "{action:?} left the window unsaved-free"
+        );
     }
 }
 
@@ -78,8 +87,15 @@ fn closing_a_reopened_file_after_marking_a_region_asks_first() {
 
 #[test]
 fn a_calibration_point_makes_the_window_unsaved() {
+    // One point fits nothing and changes nothing a save writes; the second
+    // puts a calibration in force, and that is unsaved. (The spectrum has
+    // 64 channels: the marker is kept inside them.)
     let mut app = reopened();
-    app.apply_action(Action::AddCalibrationPoint(661.7));
+    app.apply_action(Action::Marker(10));
+    app.apply_action(Action::AddCalibrationPoint(30.0));
+    assert!(!active_modified(&app), "one point changes nothing saved");
+    app.apply_action(Action::Marker(50));
+    app.apply_action(Action::AddCalibrationPoint(150.0));
     assert!(active_modified(&app));
 }
 
@@ -95,10 +111,14 @@ fn a_region_marked_on_a_detector_window_after_a_save_is_unsaved_again() {
     let dir = scratch("detector-roi");
     let mut app = App::headless();
     app.apply_action(Action::OpenDetector(0));
-    app.save_active_to(&dir.join("count.Chn")).expect("the save");
+    app.save_active_to(&dir.join("count.Chn"))
+        .expect("the save");
     assert!(!active_modified(&app));
     app.apply_action(Action::MarkRange(5, 9));
-    assert!(active_modified(&app), "Exit would not ask, and the region would be lost");
+    assert!(
+        active_modified(&app),
+        "Exit would not ask, and the region would be lost"
+    );
 }
 
 // --------------------------------------------- S4, GUI-5: the name decides the format
@@ -113,27 +133,45 @@ fn a_name_with_a_dot_in_it_gets_the_default_extension() {
 
 #[test]
 fn a_name_with_no_extension_gets_the_default_extension() {
-    assert_eq!(writable_save_path(Path::new("run1"), "spe"), PathBuf::from("run1.Spe"));
-    assert_eq!(writable_save_path(Path::new("run1"), "json"), PathBuf::from("run1.json"));
+    assert_eq!(
+        writable_save_path(Path::new("run1"), "spe"),
+        PathBuf::from("run1.Spe")
+    );
+    assert_eq!(
+        writable_save_path(Path::new("run1"), "json"),
+        PathBuf::from("run1.json")
+    );
 }
 
 #[test]
 fn a_name_that_already_names_a_writer_is_left_alone() {
     for name in ["x.Chn", "x.spe", "x.Spc", "x.json", "x.txt", "dir.v2/x.CHN"] {
-        assert_eq!(writable_save_path(Path::new(name), "spe"), PathBuf::from(name));
+        assert_eq!(
+            writable_save_path(Path::new(name), "spe"),
+            PathBuf::from(name)
+        );
     }
 }
 
 #[test]
 fn a_name_ending_in_a_format_with_no_writer_gets_one_that_has() {
     // .lis and .n42 open, but nothing writes them from a histogram.
-    assert_eq!(writable_save_path(Path::new("x.lis"), "chn"), PathBuf::from("x.lis.Chn"));
-    assert_eq!(writable_save_path(Path::new("x.n42"), "chn"), PathBuf::from("x.n42.Chn"));
+    assert_eq!(
+        writable_save_path(Path::new("x.lis"), "chn"),
+        PathBuf::from("x.lis.Chn")
+    );
+    assert_eq!(
+        writable_save_path(Path::new("x.n42"), "chn"),
+        PathBuf::from("x.n42.Chn")
+    );
 }
 
 #[test]
 fn a_default_format_with_no_writer_falls_back_to_chn() {
-    assert_eq!(writable_save_path(Path::new("run1"), "csv"), PathBuf::from("run1.Chn"));
+    assert_eq!(
+        writable_save_path(Path::new("run1"), "csv"),
+        PathBuf::from("run1.Chn")
+    );
 }
 
 #[test]
@@ -162,7 +200,10 @@ fn an_added_extension_never_replaces_a_file_unasked() {
         save_path_for(&dir.join("run1.Chn"), "chn"),
         Ok(dir.join("run1.Chn"))
     );
-    assert_eq!(save_path_for(&dir.join("run2"), "chn"), Ok(dir.join("run2.Chn")));
+    assert_eq!(
+        save_path_for(&dir.join("run2"), "chn"),
+        Ok(dir.join("run2.Chn"))
+    );
 }
 
 #[test]
@@ -193,7 +234,10 @@ fn every_default_format_the_settings_offer_has_a_writer() {
         mantaray_formats::save_spectrum(&spectrum(), &path)
             .unwrap_or_else(|error| panic!(".{format} is offered as a default and fails: {error}"));
     }
-    assert!(!SAVE_FORMATS.contains(&"csv"), "no spectrum writer takes .csv");
+    assert!(
+        !SAVE_FORMATS.contains(&"csv"),
+        "no spectrum writer takes .csv"
+    );
 }
 
 #[test]
@@ -233,7 +277,10 @@ fn a_bare_save_with_no_file_behind_the_window_is_an_error() {
     let status = run_job(&mut app, &dir, "SAVE\n");
     assert!(app.job.is_none(), "the job is still running: {status}");
     assert!(!status.contains("job finished"), "{status}");
-    assert!(status.contains("SAVE"), "the error does not name SAVE: {status}");
+    assert!(
+        status.contains("SAVE"),
+        "the error does not name SAVE: {status}"
+    );
 }
 
 #[test]

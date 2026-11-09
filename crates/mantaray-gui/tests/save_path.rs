@@ -207,7 +207,10 @@ fn s2_a_job_fill_buffer_of_a_reading_not_believed_is_refused() {
     let status = app.status.clone();
     let wrote = saved.exists();
     let _ = std::fs::remove_file(&saved);
-    assert!(!wrote, "a copy of a reading not believed was saved; status: {status}");
+    assert!(
+        !wrote,
+        "a copy of a reading not believed was saved; status: {status}"
+    );
     assert!(status.contains("not believed"), "{status}");
 }
 

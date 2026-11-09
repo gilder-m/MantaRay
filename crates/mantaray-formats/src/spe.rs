@@ -84,9 +84,9 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
     {
         // Checked: a damaged or crafted first channel near `usize::MAX`
         // panicked a test build and wrapped in a release one.
-        last = first
-            .checked_add(data.1.len() - 2)
-            .ok_or_else(|| FormatError::invalid("$DATA: channel range", format!("{first} {last}")))?;
+        last = first.checked_add(data.1.len() - 2).ok_or_else(|| {
+            FormatError::invalid("$DATA: channel range", format!("{first} {last}"))
+        })?;
     }
     // The declared range sizes an allocation, so it is not taken on faith: no
     // real MCB reaches a million channels, and an otherwise ordinary file

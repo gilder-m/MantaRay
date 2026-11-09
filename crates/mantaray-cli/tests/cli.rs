@@ -30,7 +30,7 @@ fn sample(path: &Path) {
     let sigma = 2.5;
     let amplitude = 60_000.0 / (sigma * (2.0 * std::f64::consts::PI).sqrt());
     for (channel, value) in counts.iter_mut().enumerate() {
-        let x = (channel as f64 - 661.657) / sigma;
+        let x = (channel as f64 - 661.157) / sigma;
         *value += amplitude * (-0.5 * x * x).exp();
     }
     let mut spectrum = mantaray_core::Spectrum::from_counts(
@@ -40,7 +40,10 @@ fn sample(path: &Path) {
     spectrum.real_time = 610.0;
     spectrum.detector_id = 1;
     spectrum.sample_description = "cli test".into();
-    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.0, 1.0));
+    // Not 0 + 1 keV/ch: that is ORTEC's "uncalibrated" in a `.Chn`, and
+    // reads back as no calibration (format conformance S1). The peak sits
+    // at channel 661.157, so the line is still at 661.657 keV.
+    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 1.0));
     mantaray_formats::save_spectrum(&spectrum, path).unwrap();
 }
 

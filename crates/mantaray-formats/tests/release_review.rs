@@ -49,7 +49,11 @@ fn chn_with_0_2_4_description(text: &str) -> Vec<u8> {
 #[test]
 fn a_0_2_4_description_cut_inside_a_character_keeps_its_micro_sign() {
     let full = format!("1 \u{b5}Ci {}\u{b5}Ci", "x".repeat(55));
-    assert_eq!(full.as_bytes()[62], 0xc2, "the cut falls inside the second micro sign");
+    assert_eq!(
+        full.as_bytes()[62],
+        0xc2,
+        "the cut falls inside the second micro sign"
+    );
     let back = chn::read(&chn_with_0_2_4_description(&full))
         .expect("read")
         .sample_description;
@@ -212,7 +216,10 @@ fn a_link_to_a_file_not_yet_there_is_followed_and_survives() {
             path.display()
         );
     }
-    assert_eq!(std::fs::read_to_string(&real).expect("the file the link names"), "new");
+    assert_eq!(
+        std::fs::read_to_string(&real).expect("the file the link names"),
+        "new"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("data").join("relative.Chn")).expect("relative"),
         "rel"

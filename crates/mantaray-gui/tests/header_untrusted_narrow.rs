@@ -69,7 +69,11 @@ fn header_rect(harness: &Harness<'static>, label: &str, case: &str) -> egui::Rec
 fn assert_header_fits(width: f32, untrusted: Option<&'static str>) {
     let case = format!(
         "{width} px, readings {}",
-        if untrusted.is_some() { "not believed" } else { "believed" }
+        if untrusted.is_some() {
+            "not believed"
+        } else {
+            "believed"
+        }
     );
     let harness = header_harness(width, untrusted);
     let button = header_rect(&harness, "maximise", &case);

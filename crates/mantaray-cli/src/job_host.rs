@@ -144,7 +144,11 @@ impl CliSession {
     /// SAVE with no WAIT or STOP before it wrote without a word (review of
     /// the save-path fixes, S-2).
     fn refuse_untrusted(&self) -> Result<(), JobError> {
-        match self.detector.as_ref().and_then(|detector| detector.reading_untrusted()) {
+        match self
+            .detector
+            .as_ref()
+            .and_then(|detector| detector.reading_untrusted())
+        {
             Some(reason) => Err(JobError::host(format!(
                 "the detector's reading is not believed ({reason}); the spectrum held is the \
                  last good reading, which a job does not save"

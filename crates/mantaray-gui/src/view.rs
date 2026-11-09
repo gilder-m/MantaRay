@@ -664,7 +664,11 @@ fn header_bar(
     // that is not believed.
     let mark = header.untrusted.map(|reason| {
         if width >= 640.0 + UNTRUSTED_FULL_WIDTH {
-            ("not updating - last good reading", UNTRUSTED_FULL_WIDTH, reason)
+            (
+                "not updating - last good reading",
+                UNTRUSTED_FULL_WIDTH,
+                reason,
+            )
         } else {
             ("not updating", UNTRUSTED_SHORT_WIDTH, reason)
         }
@@ -679,10 +683,10 @@ fn header_bar(
         // it lasts, at any width, so frozen counts never pass for live ones.
         if let Some((text, _, reason)) = mark {
             ui.label(egui::RichText::new(text).color(colors.alarm.to_color()))
-            .on_hover_text(format!(
-                "{reason}. The counts shown are the last good reading, and changes are refused \
+                .on_hover_text(format!(
+                    "{reason}. The counts shown are the last good reading, and changes are refused \
                  until a good reading comes in."
-            ));
+                ));
         }
         // The window's own title bar already carries the name, so the header
         // shows what the title bar cannot: the shape of the data.

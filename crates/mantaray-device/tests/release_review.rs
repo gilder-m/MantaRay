@@ -262,7 +262,10 @@ fn one_unreadable_flag_in_a_preset_stop_confirm_uses_up_one_read() {
             break;
         }
     }
-    assert!(mcb.preset_reached().is_some(), "the uncertainty preset is reached");
+    assert!(
+        mcb.preset_reached().is_some(),
+        "the uncertainty preset is reached"
+    );
     assert!(rig.counting(), "a host-side preset is the host's to stop");
     unreadable_flag(&rig, 1);
     let stopped = mcb.stop_at_preset();
@@ -282,7 +285,9 @@ fn a_stop_confirm_that_never_reads_the_flag_still_fails() {
     advance(&mut mcb, 0.5).expect("poll");
     unreadable_flag(&rig, 10);
     let stopped = mcb.stop();
-    let error = stopped.expect_err("ten unreadable flags confirm nothing").to_string();
+    let error = stopped
+        .expect_err("ten unreadable flags confirm nothing")
+        .to_string();
     assert!(error.contains("could not confirm"), "{error}");
     assert!(error.contains("SHOW_ACTIVE timed out"), "{error}");
 }
@@ -296,7 +301,10 @@ fn a_stop_confirm_that_never_reads_idle_still_fails() {
     advance(&mut mcb, 0.5).expect("poll");
     rig.fault(Fault::StopLag { reads: 1000 });
     unreadable_flag(&rig, 3);
-    assert!(mcb.stop().is_err(), "a flag that never says idle confirms nothing");
+    assert!(
+        mcb.stop().is_err(),
+        "a flag that never says idle confirms nothing"
+    );
 }
 
 /// Lucius's S2 NOTE on 1894648: two flaps on the last two fetches. Closed by
@@ -326,7 +334,10 @@ fn two_flaps_on_the_last_two_fetches_do_not_end_the_wait_on_an_old_spectrum() {
     assert_eq!(stage, 2, "both flaps were armed");
     assert_eq!(state, CountState::Over);
     assert!(!rig.counting());
-    assert!((rig.clocks().1 - 2.0).abs() < 1e-9, "the rig finished its preset");
+    assert!(
+        (rig.clocks().1 - 2.0).abs() < 1e-9,
+        "the rig finished its preset"
+    );
     // Counts and clocks are from one fetch (the S2 fix holds)...
     assert_whole(&mcb, 1000.0);
     // ...but not from the fetch that ended the count.
@@ -387,7 +398,10 @@ fn a_line_error_on_the_final_fetch_is_not_retried() {
     mcb.clear().expect("clear");
     mcb.start().expect("start");
     advance(&mut mcb, 0.5).expect("poll");
-    let error = mcb.stop().expect_err("the final spectrum was never read").to_string();
+    let error = mcb
+        .stop()
+        .expect_err("the final spectrum was never read")
+        .to_string();
     assert!(error.contains("the detector stopped"), "{error}");
     assert_eq!(
         data_tries.load(std::sync::atomic::Ordering::SeqCst),
@@ -455,7 +469,10 @@ fn a_gate_status_read_does_not_clear_a_failed_fetch_mark() {
     });
     // The failed fetch is the poll's error.
     let _ = advance(&mut mcb, 0.5);
-    assert!(mcb.reading_untrusted().is_some(), "the failed fetch marks it");
+    assert!(
+        mcb.reading_untrusted().is_some(),
+        "the failed fetch marks it"
+    );
     mcb.apply_presets(Presets::live(5.0)).expect("preset");
     assert!(
         mcb.reading_untrusted().is_some(),
@@ -478,7 +495,10 @@ fn a_start_status_read_does_not_clear_a_failed_fetch_mark() {
         execute: true,
     });
     let _ = advance(&mut mcb, 0.5);
-    assert!(mcb.reading_untrusted().is_some(), "the failed fetch marks it");
+    assert!(
+        mcb.reading_untrusted().is_some(),
+        "the failed fetch marks it"
+    );
     mcb.start().expect("start");
     assert!(
         mcb.reading_untrusted().is_some(),

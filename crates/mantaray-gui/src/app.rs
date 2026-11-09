@@ -1358,8 +1358,9 @@ impl App {
         }
     }
 
-    /// Why the active window's reading is not believed, if it is not (see
-    /// [`Self::untrusted_of`]). A job refuses to save or copy it.
+    /// Why the active window's reading is not believed, if it is not: it
+    /// shows a detector whose reading is not, never a buffer. A job refuses
+    /// to save or copy it.
     pub fn active_untrusted(&self) -> Option<String> {
         self.active.and_then(|index| self.untrusted_of(index))
     }
