@@ -7,7 +7,7 @@
 //! ```text
 //! record 1, byte offsets (little endian)
 //!   0  u16  INFTYP  information type, 1 for a spectrum
-//!   2  u16  FILTYP  1 = integer channel data, 2 = floating point
+//!   2  u16  FILTYP  1 = integer channel data, 5 = floating point
 //!   8  u16  ACQIRP  record holding the acquisition information
 //!  10  u16  SAMDRP  record holding the sample description
 //!  12  u16  DETDRP  record holding the detector description
@@ -20,8 +20,8 @@
 //!  62  u16  SPCRCN  number of channel-data records (32 channels each)
 //!  64  u16  SPCCHN  number of channels
 //!  66  u16  ABSTCH  absolute start channel
-//!  68  f32  ACQTIM  acquisition time
-//!  72  f64  ACQTI8  acquisition time, double precision
+//!  68  f32  ACQTIM  acquisition start, DECDAY (days since 1-JAN-79)
+//!  72  f64  ACQTI8  acquisition start, DECDAY, double precision
 //!  82  u16  MCANU   detector (MCA) number
 //!  84  u16  SEGNUM  segment number
 //!  88  u16  CHNSRT  first channel stored
@@ -34,7 +34,7 @@
 //!  28  10 ascii  time, "HH:MM:SS"
 //!  38  10 ascii  live time in seconds
 //!  48  10 ascii  real time in seconds
-//!  92  10 ascii  sample collection start date
+//!  90  10 ascii  sample collection start date (not written: never entered)
 //! 102   8 ascii  sample collection start time
 //! 110  10 ascii  sample collection stop date
 //! 120   8 ascii  sample collection stop time
@@ -102,8 +102,9 @@ pub fn read(bytes: &[u8]) -> Result<Spectrum, FormatError> {
     }
     let file_type = header.u16()?;
     let channel_format = match file_type {
+        // FSM §4.12 and §4.11.1: 1 is integer, 5 is real (f32) data.
         1 => ChannelFormat::Integer,
-        2 => ChannelFormat::Float,
+        5 => ChannelFormat::Float,
         other => {
             return Err(FormatError::Unsupported {
                 detail: format!(".Spc file type {other}"),
@@ -345,8 +346,11 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
         put_word(&mut out, 31, spectrum_records as u16); // SPCRCN
         put_word(&mut out, 32, channels as u16); // SPCCHN
         put_word(&mut out, 33, 0); // ABSTCH
-        put_f32(&mut out, 68, spectrum.real_time as f32); // ACQTIM
-        put_f64(&mut out, 72, spectrum.real_time); // ACQTI8
+        // ACQTIM/ACQTI8: the start date, not a duration (FSM §4.12 words 35
+        // and 37). 0.2.4 put the real time here, which reads as a 1980s date.
+        let decday = spectrum.start_time.map_or(0.0, decday);
+        put_f32(&mut out, 68, decday as f32); // ACQTIM
+        put_f64(&mut out, 72, decday); // ACQTI8
         put_word(&mut out, 41, spectrum.detector_id); // MCANU
         put_word(&mut out, 42, spectrum.segment); // SEGNUM
         put_word(&mut out, 44, spectrum.channel_offset); // CHNSRT
@@ -390,10 +394,10 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
             10,
             &format!("{:>10.0}", spectrum.real_time),
         );
-        write_ascii(&mut out[base..], 92, 10, &date);
-        write_ascii(&mut out[base..], 102, 8, &time);
-        write_ascii(&mut out[base..], 110, 10, &date);
-        write_ascii(&mut out[base..], 120, 8, &time);
+        // Bytes 90-127 are the sample collection start and stop (FSM
+        // §4.11.2). This program has no collection time, and GammaVision can
+        // decay-correct to it, so they stay zero rather than borrowing the
+        // acquisition start as 0.2.4 did (at offset 92, two bytes late).
     }
 
     // Records 4 and 5: descriptions.
@@ -425,7 +429,13 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     // (it underflows to zero, lands in the subnormals where digits are lost,
     // overflows to infinity, or is NaN) cannot be stored as it is. It is
     // refused by name instead of written as something else.
-    if let Some(calibration) = &spectrum.energy_calibration {
+    // No units field either: the coefficients are keV.
+    let calibration = spectrum
+        .energy_calibration
+        .as_ref()
+        .map(|cal| crate::units::in_kev_for(".Spc", cal))
+        .transpose()?;
+    if let Some(calibration) = &calibration {
         for (name, coefficient) in ["offset", "gain", "quadratic term"]
             .into_iter()
             .zip(calibration.coefficients)
@@ -452,6 +462,14 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     }
 
     Ok(out)
+}
+
+/// Days since 1-JAN-79 00:00, ORTEC's DECDAY (FSM §4.2): 2-JAN-79 12:00 is 1.5.
+fn decday(at: NaiveDateTime) -> f64 {
+    let epoch = NaiveDate::from_ymd_opt(1979, 1, 1)
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
+        .unwrap_or_default();
+    (at - epoch).num_milliseconds() as f64 / 86_400_000.0
 }
 
 fn record_bytes(bytes: &[u8], record: u16) -> Option<&[u8]> {
@@ -838,7 +856,7 @@ mod tests {
         // 132, 133, 134 - so only knowing where the channel data lies keeps
         // them out.
         let mut bytes = gammavision_layout(None);
-        bytes[2..4].copy_from_slice(&2u16.to_le_bytes()); // FILTYP: floats
+        bytes[2..4].copy_from_slice(&5u16.to_le_bytes()); // FILTYP: floats
         let data = LEADING_RECORDS * RECORD_SIZE;
         for channel in 0..1024 {
             let value = (100 + channel % 60) as f32;

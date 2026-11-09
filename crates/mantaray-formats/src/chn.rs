@@ -45,6 +45,12 @@ pub const HEADER_SIZE: usize = 32;
 
 /// The most characters a description holds.
 pub(crate) const DESCRIPTION_LEN: usize = 63;
+
+/// The trailer's energy coefficients for an uncalibrated spectrum (FSM §3.1.2).
+const UNCALIBRATED_ENERGY: [f64; 3] = [0.0, 1.0, 0.0];
+/// The trailer's FWHM coefficients for an uncalibrated spectrum (FSM §3.1.2).
+const UNCALIBRATED_SHAPE: [f64; 3] = [1.0, 0.0, 0.0];
+
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
@@ -102,10 +108,12 @@ pub fn read(bytes: &[u8]) -> Result<Spectrum, FormatError> {
         } else {
             energy
         };
-        if energy.iter().any(|c| *c != 0.0) {
+        // ORTEC's "uncalibrated" is 0, 1, 0 and FWHM 1, 0, 0 (FSM §3.1.2);
+        // 0.2.4 wrote zeros. Neither is a calibration.
+        if energy.iter().any(|c| *c != 0.0) && energy != UNCALIBRATED_ENERGY {
             spectrum.energy_calibration = Some(EnergyCalibration::new(energy, "keV"));
         }
-        if shape.iter().any(|c| *c != 0.0) {
+        if shape.iter().any(|c| *c != 0.0) && shape != UNCALIBRATED_SHAPE {
             spectrum.shape_calibration = Some(ShapeCalibration::new(shape));
         }
         if cursor.remaining() >= 228 + 2 * (1 + DESCRIPTION_LEN) {
@@ -131,7 +139,8 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     let mut out = Vec::with_capacity(HEADER_SIZE + 4 * spectrum.len() + 512);
     out.extend_from_slice(&(-1i16).to_le_bytes());
     out.extend_from_slice(&(spectrum.detector_id as i16).to_le_bytes());
-    out.extend_from_slice(&(spectrum.segment as i16).to_le_bytes());
+    // FSM §3.1: "set to 1 in UMCBI"; 0 is this program's "not known".
+    out.extend_from_slice(&(spectrum.segment.max(1) as i16).to_le_bytes());
 
     // ORTEC's File Structure Manual: the start date is ASCII, "or binary
     // zeros if not known". Time and seconds go with it: they mean nothing
@@ -173,15 +182,14 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     // Trailer.
     out.extend_from_slice(&(-102i16).to_le_bytes());
     out.extend_from_slice(&0i16.to_le_bytes());
-    let energy = spectrum
-        .energy_calibration
-        .as_ref()
-        .map(|cal| cal.coefficients)
-        .unwrap_or([0.0; 3]);
+    // The trailer has no units field: ORTEC reads it as keV.
+    let energy = match &spectrum.energy_calibration {
+        Some(cal) => crate::units::in_kev_for(".Chn", cal)?.coefficients,
+        None => UNCALIBRATED_ENERGY,
+    };
     let shape = spectrum
         .shape_calibration
-        .map(|cal| cal.coefficients)
-        .unwrap_or([0.0; 3]);
+        .map_or(UNCALIBRATED_SHAPE, |cal| cal.coefficients);
     for value in energy.iter().chain(shape.iter()) {
         out.extend_from_slice(&(*value as f32).to_le_bytes());
     }

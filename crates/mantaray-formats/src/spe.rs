@@ -231,18 +231,18 @@ pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
     let mut out = String::new();
     out.push_str("$SPEC_ID:\n");
     let description = if spectrum.sample_description.trim().is_empty() {
-        "No sample description was entered."
+        "No sample description was entered.".to_string()
     } else {
-        spectrum.sample_description.trim()
+        one_line(&spectrum.sample_description)
     };
-    out.push_str(description);
+    out.push_str(&description);
     out.push('\n');
 
     out.push_str("$SPEC_REM:\n");
     out.push_str(&format!("DET# {}\n", spectrum.detector_id));
     out.push_str(&format!(
         "DETDESC# {}\n",
-        spectrum.detector_description.trim()
+        one_line(&spectrum.detector_description)
     ));
     out.push_str(concat!("AP# mantaray ", env!("CARGO_PKG_VERSION"), "\n"));
 
@@ -287,10 +287,13 @@ pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
     out.push_str("$PRESETS:\n");
     out.push_str("None\n0\n0\n");
 
-    let energy = spectrum
-        .energy_calibration
-        .clone()
-        .unwrap_or_else(|| EnergyCalibration::new([0.0, 0.0, 0.0], "keV"));
+    // In keV when the units are an energy: SpecUtils drops a `$MCA_CAL` line
+    // that does not end in keV, and keV is MAESTRO's default. Other units are
+    // kept as they are; this format can say what they are.
+    let energy = spectrum.energy_calibration.as_ref().map_or_else(
+        || EnergyCalibration::new([0.0, 0.0, 0.0], "keV"),
+        |cal| crate::units::in_kev(cal).unwrap_or_else(|| cal.clone()),
+    );
     out.push_str("$ENER_FIT:\n");
     out.push_str(&format!(
         "{:.6} {:.6}\n",
@@ -309,6 +312,15 @@ pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
         shape.coefficients[0], shape.coefficients[1], shape.coefficients[2]
     ));
     Ok(out)
+}
+
+/// A description as one line of text that cannot be read as a keyword: line
+/// breaks become spaces, and a leading `$` is dropped. Keywords are `$` in
+/// column 1 (FSM §5.1), and SpecUtils trims a line before it looks, so a
+/// space in front would not do.
+pub(crate) fn one_line(text: &str) -> String {
+    let line = text.trim().replace(['\r', '\n'], " ");
+    line.trim_start_matches('$').trim_start().to_string()
 }
 
 /// Splits the file into `(keyword, lines)` blocks, tolerating CRLF and blanks.
