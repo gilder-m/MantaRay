@@ -34,12 +34,14 @@ fn journal() -> Option<&'static Mutex<std::fs::File>> {
         .get_or_init(|| {
             std::env::var_os("MANTARAY_DEBUG")?;
             let mut file = open_journal_file("mantaray-debug.log")?;
-            let _ = writeln!(
+            if let Err(error) = writeln!(
                 file,
                 "mantaray {} · journal opened {}",
                 env!("CARGO_PKG_VERSION"),
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-            );
+            ) {
+                write_failed(&error);
+            }
             Some(Mutex::new(file))
         })
         .as_ref()
@@ -89,11 +91,24 @@ pub fn line(text: &str) {
         let mut file = journal
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = writeln!(
+        let written = writeln!(
             file,
             "{} {text}",
             chrono::Local::now().format("%H:%M:%S%.3f")
-        );
-        let _ = file.flush();
+        )
+        .and_then(|()| file.flush());
+        if let Err(error) = written {
+            write_failed(&error);
+        }
+    }
+}
+
+/// Says on stderr, once a run, that the journal stopped being written - a
+/// full disk, say. A journal that silently ends early reads as a run that
+/// stopped doing things. Once, because every later line fails the same way.
+fn write_failed(error: &std::io::Error) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("journal: a line could not be written, so the journal is incomplete: {error}");
     }
 }
