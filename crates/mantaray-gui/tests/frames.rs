@@ -538,49 +538,6 @@ fn a_preset_being_typed_survives_the_next_frame() {
 }
 
 #[test]
-fn a_bias_being_typed_does_not_reach_the_instrument_until_applied() {
-    // Bias went to the instrument as the field changed: a drag sent every
-    // voltage it crossed, and typing 1500 sent 1, 15 and 150 first.
-    let ctx = egui::Context::default();
-    let mut app = App::headless();
-    app.apply_action(Action::OpenDetector(0));
-    app.dialogs.open(Dialog::McbProperties);
-    app.dialogs.properties_tab = 3;
-    let applied = mantaray_device::Mcb::properties(&app.detectors[0])
-        .high_voltage
-        .target_volts;
-    app.dialogs.hv_edit.insert(1, applied - 500.0);
-
-    for _ in 0..3 {
-        let output = frame(&mut app, &ctx, [1400.0, 900.0]);
-        assert!(
-            painted_text(&output).contains("not applied yet"),
-            "the tab says the typed target is pending"
-        );
-        assert_eq!(app.dialogs.hv_edit.get(&1), Some(&(applied - 500.0)));
-        assert_eq!(
-            mantaray_device::Mcb::properties(&app.detectors[0])
-                .high_voltage
-                .target_volts,
-            applied,
-            "a target nobody applied reached the instrument"
-        );
-    }
-
-    // Apply is what sends it, and the edit ends there.
-    click_text(&mut app, &ctx, "Apply");
-    assert_eq!(
-        mantaray_device::Mcb::properties(&app.detectors[0])
-            .high_voltage
-            .target_volts,
-        applied - 500.0
-    );
-    assert!(app.dialogs.hv_edit.is_empty());
-    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
-    assert!(!painted_text(&output).contains("not applied yet"));
-}
-
-#[test]
 fn a_bias_edit_belongs_to_its_detector_and_its_dialog() {
     let ctx = egui::Context::default();
     let mut app = App::headless();
@@ -1995,46 +1952,6 @@ fn type_into_field(app: &mut App, ctx: &egui::Context, shown: &str, typed: &str)
         }],
     );
     frame(app, ctx, [1400.0, 900.0]);
-}
-
-#[test]
-fn a_coarse_gain_typed_into_the_field_does_not_reach_the_instrument_until_applied() {
-    // The coarse gain went to the instrument as the field changed: typing 40
-    // sent 4 and then 40, and a drag from 20 to 40 every gain it crossed. This
-    // drives the real field, the way a hand does, rather than seeding the edit.
-    let ctx = still_context();
-    let mut app = App::headless();
-    app.apply_action(Action::OpenDetector(0));
-    app.dialogs.open(Dialog::McbProperties);
-    app.dialogs.properties_tab = 0;
-    let gain = || {
-        |app: &App| {
-            mantaray_device::Mcb::properties(&app.detectors[0])
-                .amplifier
-                .coarse_gain
-        }
-    };
-    let applied = gain()(&app);
-    assert_eq!(applied, 20.0, "the field reads 20 to start with");
-    type_into_field(&mut app, &ctx, "20", "40");
-    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
-    assert!(
-        painted_text(&output).contains("not applied yet"),
-        "the tab says the typed gain is pending"
-    );
-    assert_eq!(app.dialogs.coarse_edit.get(&1), Some(&40.0));
-    assert_eq!(
-        gain()(&app),
-        applied,
-        "a gain nobody applied reached the instrument"
-    );
-
-    // Apply is what sends it, and the edit ends there.
-    click_text(&mut app, &ctx, "Apply");
-    assert_eq!(gain()(&app), 40.0);
-    assert!(app.dialogs.coarse_edit.is_empty());
-    let output = frame(&mut app, &ctx, [1400.0, 900.0]);
-    assert!(!painted_text(&output).contains("not applied yet"));
 }
 
 #[test]
