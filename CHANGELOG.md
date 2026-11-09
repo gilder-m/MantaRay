@@ -121,6 +121,13 @@ Unit-tested with scripted adapters; not yet run on Windows hardware.
   again, and if the spectrum still cannot be read after 20 tries the job stops
   and says why, without saving. A 0.2.4 job could save 2 s of a 3 s count
   and report "job finished".
+- A spectrum that comes back empty (`DATA 0`) beside one with channels is a
+  spectrum that could not be read, not an empty one: after a STOP it is asked
+  again, and the STOP no longer succeeds on the counts of the read before
+  under the final clocks.
+- Once a spectrum read has failed, the reading stays "not updating" until a
+  spectrum read lands. The status read made for a preset change or a START
+  used to clear it, though no spectrum had been read since.
 - Spectrum lengths that keep changing (the Windows ORTEC-library road) no
   longer end a WAIT on an older spectrum, however many reads in a row they
   change for.
@@ -137,6 +144,31 @@ Apply is pressed, and the tab says "not applied yet" until then. Closing the
 dialog without Apply sends nothing and drops the edit. The high voltage's
 Enabled checkbox is not part of this: switching the bias on or off is still
 sent the moment it is clicked, as in 0.2.4.
+
+**A typed preset is not lost, and nothing unsaved closes unasked
+(2026-11-09).**
+- Presets typed in MCB Properties and not applied survive closing the
+  dialog; the Presets tab says "not applied yet" and has a "Discard preset
+  changes" button that goes back to what the detector holds, sending nothing.
+  While such a draft is there, Start on that detector is refused, saying to
+  apply or discard it. 0.2.4 dropped the draft on close and Start counted
+  with whatever the detector held, which could be no preset at all. Start all
+  on the dashboard does not check for a draft yet.
+- Marking or removing a region, a peak or anything else that can be undone,
+  a calibration, and the sample description mark the window unsaved, so
+  closing it or quitting asks first. Only Smooth, Clear and Strip used to.
+- A Save As name with no spectrum extension ("run1") or a dot of its own
+  ("Co60_10.5cm") gets the default format's extension added ("run1.Chn",
+  "Co60_10.5cm.Chn") instead of being refused; if that name is already a
+  file, the save is refused rather than replacing it unasked.
+- Save As lists only formats MantaRay writes (no `.lis`), and the default
+  save format in Settings no longer offers `.csv` (it is File > Export); a
+  `.csv` default kept from 0.2.4 falls back to `.Chn`.
+- A job's `SAVE` with no file name saves to the file the window was last
+  saved to or recalled from, and stops the job with an error when there is
+  none. Before, it said it saved and wrote nothing.
+- A multi-line description is written on one line in an ASCII `.txt`, so
+  the channels after it no longer shift when it is read back.
 
 **Screen fixes for 0.2.5 (2026-11-08).**
 - A constant efficiency outside 0 to 1 is refused, with the command line's
