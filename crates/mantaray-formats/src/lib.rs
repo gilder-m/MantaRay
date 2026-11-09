@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod ansi;
 pub mod ascii;
 mod atomic;
 pub mod chn;
@@ -222,7 +223,15 @@ pub fn sniff(bytes: &[u8]) -> Option<SpectrumFormat> {
     }
     // The text formats announce themselves in their first few hundred bytes.
     let head = &bytes[..bytes.len().min(4096)];
-    if let Ok(text) = std::str::from_utf8(head) {
+    // A file MAESTRO wrote is Windows-1252, not UTF-8, when its description
+    // has a `µ` or a `°`. A head with no control bytes but line breaks and
+    // tabs is text either way; binary formats carry zeros early.
+    let is_text = std::str::from_utf8(head).is_ok()
+        || head
+            .iter()
+            .all(|b| *b >= 0x20 || matches!(b, b'\t' | b'\n' | b'\r'));
+    if is_text {
+        let text = &ansi::decode(head);
         let trimmed = text.trim_start();
         // N42 is XML, and the element that names it comes early.
         if trimmed.starts_with('<')
@@ -358,7 +367,7 @@ pub fn read_as(format: SpectrumFormat, bytes: &[u8]) -> Result<Spectrum, FormatE
     match format {
         SpectrumFormat::Chn => chn::read(bytes),
         SpectrumFormat::Spc => spc::read(bytes),
-        SpectrumFormat::Spe => spe::read(&text()),
+        SpectrumFormat::Spe => spe::read_bytes(bytes),
         SpectrumFormat::Ascii => ascii::read(&text()),
         SpectrumFormat::Native => native::read(&text()),
         SpectrumFormat::List => list_mode::read(bytes).map(|file| file.to_spectrum()),
@@ -376,7 +385,7 @@ pub fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), 
     match format {
         SpectrumFormat::Chn => write_atomic(path, chn::write(spectrum)?)?,
         SpectrumFormat::Spc => write_atomic(path, spc::write(spectrum)?)?,
-        SpectrumFormat::Spe => write_atomic(path, spe::write(spectrum)?)?,
+        SpectrumFormat::Spe => write_atomic(path, spe::write_bytes(spectrum)?)?,
         SpectrumFormat::Ascii => {
             write_atomic(path, ascii::write(spectrum, &AsciiOptions::default()))?
         }
@@ -393,6 +402,64 @@ pub fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// Saves like [`save_spectrum`], and hands back what the file could not hold
+/// as it was given, one sentence each, for the user to see.
+///
+/// ORTEC's formats store text in Windows-1252, as MAESTRO reads it: a
+/// character outside it is saved as `?`, and a `.Chn` or `.Spc` description
+/// longer than its field is cut. The native `.json` holds any text, so it has
+/// nothing to say. Nothing is noted when the save fails.
+pub fn save_spectrum_noting(
+    spectrum: &Spectrum,
+    path: impl AsRef<Path>,
+) -> Result<Vec<String>, FormatError> {
+    let path = path.as_ref();
+    save_spectrum(spectrum, path)?;
+    Ok(SpectrumFormat::from_path(path)
+        .map(|format| text_notes(spectrum, format))
+        .unwrap_or_default())
+}
+
+/// What saving `spectrum` as `format` changes in its text; see
+/// [`save_spectrum_noting`].
+pub fn text_notes(spectrum: &Spectrum, format: SpectrumFormat) -> Vec<String> {
+    // The widths the writers use, so a note never disagrees with the file.
+    let (width, kind) = match format {
+        SpectrumFormat::Chn => (chn::DESCRIPTION_LEN, ".Chn"),
+        SpectrumFormat::Spc => (spc::RECORD_SIZE, ".Spc"),
+        SpectrumFormat::Spe => (usize::MAX, ".Spe"),
+        _ => return Vec::new(),
+    };
+    let mut notes = Vec::new();
+    for (name, text) in [
+        ("sample description", &spectrum.sample_description),
+        ("detector description", &spectrum.detector_description),
+    ] {
+        // The `.Spe` writer trims its descriptions; the binary ones do not.
+        let text = if format == SpectrumFormat::Spe {
+            text.trim()
+        } else {
+            text.as_str()
+        };
+        let encoded = ansi::field(text, width);
+        if !encoded.replaced.is_empty() {
+            let mut lost: Vec<char> = encoded.replaced.clone();
+            lost.dedup();
+            let lost: String = lost.into_iter().collect();
+            notes.push(format!(
+                "{name}: \"{lost}\" cannot be stored in a {kind} file (Windows-1252 text, as \
+                 MAESTRO reads it) and was saved as '?'"
+            ));
+        }
+        if encoded.cut {
+            notes.push(format!(
+                "{name}: cut to {width} characters, the most a {kind} file holds"
+            ));
+        }
+    }
+    notes
 }
 
 /// Hands back `text` only if `read` opens it: no file is written that this

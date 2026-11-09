@@ -2,6 +2,14 @@
 
 Layouts as MantaRay implements them, and how each was established.
 
+**Text in ORTEC's formats is Windows-1252**, one byte per character, because
+MAESTRO and GammaVision are Windows "ANSI" programs: the `.Chn` and `.Spc`
+descriptions and the whole of a `.Spe` (`µ` is `0xB5`, `°` is `0xB0`). A
+character the code page lacks is saved as `?`, and the save says so, as it does
+when a description is cut to its field. On read, text that is valid UTF-8 is taken
+as UTF-8 (what 0.2.4 and earlier wrote), anything else as Windows-1252. The native
+`.json` is UTF-8 and holds any text.
+
 ## `.Chn` - ORTEC integer spectrum
 
 Little endian throughout. The layout comes from the reader published in Appendix B

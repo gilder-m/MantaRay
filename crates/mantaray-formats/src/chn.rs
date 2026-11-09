@@ -29,11 +29,13 @@
 //! 320 1 + 63  sample description: length byte then text
 //! 384 128     reserved
 //! ```
+//!
+//! The descriptions are Windows-1252 text, one byte per character.
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use mantaray_core::{EnergyCalibration, ShapeCalibration, Spectrum};
 
-use crate::{Cursor, FormatError};
+use crate::{Cursor, FormatError, ansi};
 
 /// Duration of one tick of the stored times, in seconds.
 pub const TICK_SECONDS: f64 = 0.02;
@@ -41,7 +43,8 @@ pub const TICK_SECONDS: f64 = 0.02;
 /// Size of the fixed header, in bytes.
 pub const HEADER_SIZE: usize = 32;
 
-const DESCRIPTION_LEN: usize = 63;
+/// The most characters a description holds.
+pub(crate) const DESCRIPTION_LEN: usize = 63;
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
@@ -189,21 +192,18 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     Ok(out)
 }
 
+/// Descriptions are Windows-1252, as MAESTRO writes them (see [`crate::ansi`]).
 fn read_description(cursor: &mut Cursor<'_>) -> Result<String, FormatError> {
     let length = cursor.take(1)?[0] as usize;
     let text = cursor.take(DESCRIPTION_LEN)?;
     let length = length.min(DESCRIPTION_LEN);
-    Ok(String::from_utf8_lossy(&text[..length])
+    Ok(ansi::decode(&text[..length])
         .trim_end_matches(['\0', ' '])
         .to_string())
 }
 
 fn write_description(out: &mut Vec<u8>, text: &str) {
-    let bytes: Vec<u8> = text
-        .bytes()
-        .filter(|b| *b >= 0x20)
-        .take(DESCRIPTION_LEN)
-        .collect();
+    let bytes = ansi::field(text, DESCRIPTION_LEN).bytes;
     out.push(bytes.len() as u8);
     out.extend_from_slice(&bytes);
     out.extend(std::iter::repeat_n(0u8, DESCRIPTION_LEN - bytes.len()));

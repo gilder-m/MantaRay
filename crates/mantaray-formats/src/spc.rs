@@ -59,7 +59,7 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use mantaray_core::{EnergyCalibration, Spectrum};
 
-use crate::{Cursor, FormatError};
+use crate::{Cursor, FormatError, ansi};
 
 /// Size of one record.
 pub const RECORD_SIZE: usize = 128;
@@ -468,9 +468,10 @@ fn record_text(bytes: &[u8], record: u16) -> Option<String> {
     Some(text.trim().to_string())
 }
 
-/// Reads a fixed-width ASCII field, dropping the padding ORTEC leaves behind.
+/// Reads a fixed-width text field, dropping the padding ORTEC leaves behind.
+/// The text is Windows-1252, as GammaVision writes it (see [`crate::ansi`]).
 fn ascii(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
+    ansi::decode(bytes)
         .chars()
         .map(|c| if c == '\0' || c == '\u{1}' { ' ' } else { c })
         .collect::<String>()
@@ -478,12 +479,11 @@ fn ascii(bytes: &[u8]) -> String {
         .to_string()
 }
 
+/// Writes a fixed-width Windows-1252 field, padded with spaces. Earlier
+/// versions dropped every character outside ASCII; a character the code
+/// page lacks is now a `?` (and [`crate::save_spectrum_noting`] says so).
 fn write_ascii(out: &mut [u8], offset: usize, width: usize, text: &str) {
-    let bytes: Vec<u8> = text
-        .bytes()
-        .filter(|b| b.is_ascii() && *b >= 0x20)
-        .take(width)
-        .collect();
+    let bytes = ansi::field(text, width).bytes;
     out[offset..offset + bytes.len()].copy_from_slice(&bytes);
     for byte in &mut out[offset + bytes.len()..offset + width] {
         *byte = b' ';

@@ -22,9 +22,24 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use mantaray_core::{EnergyCalibration, Roi, ShapeCalibration, Spectrum};
 
-use crate::{FormatError, MOST_CHANNELS};
+use crate::{FormatError, MOST_CHANNELS, ansi};
 
-/// Reads a `.Spe` file.
+/// Reads a `.Spe` file from its bytes, as stored on disk.
+///
+/// MAESTRO writes the file in Windows-1252, one byte per character; text that
+/// is valid UTF-8 (pure ASCII, or what MantaRay 0.2.4 and earlier wrote) is
+/// read as UTF-8. See [`crate::ansi`].
+pub fn read_bytes(bytes: &[u8]) -> Result<Spectrum, FormatError> {
+    read(&ansi::decode(bytes))
+}
+
+/// Writes a `.Spe` file as the bytes to store: [`write`] in Windows-1252, the
+/// code page MAESTRO reads it in. A character it lacks is stored as `?`.
+pub fn write_bytes(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
+    Ok(ansi::text(&write(spectrum)?).bytes)
+}
+
+/// Reads a `.Spe` file already decoded to text.
 pub fn read(text: &str) -> Result<Spectrum, FormatError> {
     let blocks = split_blocks(text);
     let data = blocks
@@ -198,7 +213,7 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
     Ok(spectrum)
 }
 
-/// Writes a `.Spe` file.
+/// Writes a `.Spe` file as text; [`write_bytes`] gives the bytes to store.
 pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
     let mut out = String::new();
     out.push_str("$SPEC_ID:\n");
