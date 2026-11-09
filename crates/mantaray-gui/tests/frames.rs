@@ -2909,11 +2909,26 @@ impl mantaray_device::Transport for NeverStops {
 /// about a second), not three, and each is named.
 #[test]
 fn review3_stop_all_does_not_stack_the_confirm_waits() {
+    // One stuck detector on this machine is the yardstick, so a slow runner
+    // cannot fail the test (macOS CI took 2.1 s for three on 11/8).
+    let (one, _) = stop_all_on_stuck(1);
+    let (three, status) = stop_all_on_stuck(3);
+    for number in 1..=3 {
+        assert!(status.contains(&format!("Detector {number}: ")), "{status}");
+    }
+    assert!(status.contains("did not stop"), "{status}");
+    // Stacked waits would take three times as long as one; shared, about the same.
+    assert!(three < one * 2, "three {three:?} vs one {one:?}");
+}
+
+/// Presses Stop all on `count` detectors that never stop: how long the press
+/// took, and the status line after it.
+fn stop_all_on_stuck(count: u16) -> (std::time::Duration, String) {
     let ctx = egui::Context::default();
     let mut app = App::headless();
     app.time_scale = 0.0;
     app.detectors.clear();
-    for number in 1..=3 {
+    for number in 1..=count {
         let remote = mantaray_device::RemoteMcb::connect(Box::new(NeverStops), number, "STUCK")
             .expect("connect");
         app.detectors.push(remote.into());
@@ -2923,17 +2938,7 @@ fn review3_stop_all_does_not_stack_the_confirm_waits() {
     let stop_all = text_rect(&output, "Stop all").expect("Stop all is painted");
     let began = std::time::Instant::now();
     press_at(&mut app, &ctx, stop_all.center());
-    let took = began.elapsed();
-    for number in 1..=3 {
-        assert!(
-            app.status.contains(&format!("Detector {number}: ")),
-            "{}",
-            app.status
-        );
-    }
-    assert!(app.status.contains("did not stop"), "{}", app.status);
-    // One bound is about 0.9 s of pauses; three stacked would be 2.7 s.
-    assert!(took < std::time::Duration::from_millis(1800), "{took:?}");
+    (began.elapsed(), app.status.clone())
 }
 
 /// Every shape a frame painted, with nested lists flattened.
