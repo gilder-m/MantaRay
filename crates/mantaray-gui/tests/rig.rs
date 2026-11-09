@@ -829,3 +829,55 @@ fn high3_one_detector_controls_wait_out_both_lags() {
     two_detector_job(Fault::StartLag { reads: 10 }, false);
     two_detector_job(Fault::FlagLag { reads: 10 }, false);
 }
+
+#[test]
+fn a_reading_not_believed_stays_marked_on_its_window_until_a_good_one() {
+    // The status line says it once; after the operator is told anything
+    // else, the window used to show the frozen counts as if live.
+    use egui_kittest::kittest::Queryable;
+    const MARK: &str = "not updating";
+    let (mut app, rig, index) = rig_app();
+    app.apply_action(Action::Start);
+    settle(&mut app, index);
+    rig.tick(5.0);
+    settle(&mut app, index);
+    rig.fault(Fault::StatusWithout {
+        key: "ACTIVE".into(),
+        count: 6,
+    });
+    settle(&mut app, index);
+    assert!(app.status.contains("last good reading"), "{}", app.status);
+    app.apply_action(Action::Status("marker moved".into()));
+    assert!(app.detectors[index].reading_untrusted().is_some());
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+    for _ in 0..3 {
+        harness.step();
+    }
+    assert!(
+        harness.query_by_label_contains(MARK).is_some(),
+        "the reading is frozen and nothing on its window says so"
+    );
+    assert!(harness.query_by_label_contains("marker moved").is_some());
+
+    // The fault runs out: the next good reading clears the mark.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while harness.state().detectors[index]
+        .reading_untrusted()
+        .is_some()
+    {
+        settle(harness.state_mut(), index);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fault never ran out"
+        );
+    }
+    for _ in 0..3 {
+        harness.step();
+    }
+    assert!(
+        harness.query_by_label_contains(MARK).is_none(),
+        "a good reading came in and the window still says it is not updating"
+    );
+}

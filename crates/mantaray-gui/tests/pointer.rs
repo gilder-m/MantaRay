@@ -94,6 +94,7 @@ impl Display {
                         dead_time: None,
                         active: true,
                         maximized: true,
+                        untrusted: None,
                     },
                 },
             );
@@ -589,6 +590,7 @@ fn a_tiny_display_still_handles_a_click() {
                     dead_time: None,
                     active: true,
                     maximized: false,
+                    untrusted: None,
                 },
             },
         );
@@ -663,6 +665,7 @@ fn frame_with_selection(selection: Option<(usize, usize)>) -> egui::FullOutput {
                         dead_time: None,
                         active: true,
                         maximized: true,
+                        untrusted: None,
                     },
                 },
             );

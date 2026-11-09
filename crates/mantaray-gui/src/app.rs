@@ -5046,6 +5046,12 @@ impl App {
                     .or_else(|| spectrum.dead_time_percent()),
                 active: *active == Some(index),
                 maximized: is_maximized,
+                untrusted: match *target {
+                    Target::Detector(detector) => detectors
+                        .get(detector)
+                        .and_then(|mcb| mcb.reading_untrusted()),
+                    Target::Buffer => None,
+                },
             };
 
             let mut open = *window_open;

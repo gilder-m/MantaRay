@@ -111,6 +111,9 @@ pub struct ViewHeader<'a> {
     pub active: bool,
     /// Whether the window currently fills the spectrum area.
     pub maximized: bool,
+    /// Why the detector's latest reading is not believed, while it is not:
+    /// the window then shows the last good one.
+    pub untrusted: Option<&'a str>,
 }
 
 /// A library beside its energy index, as the draw path wants it.
@@ -649,6 +652,18 @@ fn header_bar(
     ui.horizontal(|ui| {
         if header.counting {
             ui.label(egui::RichText::new("● REC").color(colors.alarm.to_color()));
+        }
+        // The status line says this once; the window says it for as long as
+        // it lasts, at any width, so frozen counts never pass for live ones.
+        if let Some(reason) = header.untrusted {
+            ui.label(
+                egui::RichText::new("not updating - last good reading")
+                    .color(colors.alarm.to_color()),
+            )
+            .on_hover_text(format!(
+                "{reason}. The counts shown are the last good reading, and changes are refused \
+                 until a good reading comes in."
+            ));
         }
         // The window's own title bar already carries the name, so the header
         // shows what the title bar cannot: the shape of the data.
