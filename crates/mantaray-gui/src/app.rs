@@ -55,6 +55,57 @@ pub(crate) fn dotted(extension: &str) -> &str {
     }
 }
 
+/// The spectrum formats a save can write, as stored preferences (lowercase,
+/// no dot). The Settings default-format list and the fix-up of a typed name
+/// both come from here, so neither can offer a format nothing writes (.csv
+/// is File/Export, .lis needs list-mode events, .n42 only reads).
+pub const SAVE_FORMATS: &[&str] = &["chn", "spe", "spc", "json", "txt"];
+
+/// The name a save writes to: `path` itself when its extension has a
+/// spectrum writer, otherwise `path` with the default format's extension
+/// added on.
+///
+/// The format comes from the name alone, and the native dialog adds no
+/// extension, so "Co60_10.5cm" was saved as format "5cm" and "run1" as no
+/// format at all, both refused (flow review S4). Adding to the name rather
+/// than replacing the part after the last dot keeps "10.5cm" as typed.
+pub fn writable_save_path(path: &std::path::Path, default_format: &str) -> PathBuf {
+    let writable = SpectrumFormat::from_path(path)
+        .is_some_and(|format| SAVE_FORMATS.contains(&format.extension()));
+    if writable {
+        return path.to_path_buf();
+    }
+    let default = if SAVE_FORMATS.contains(&default_format) {
+        default_format
+    } else {
+        "chn"
+    };
+    let mut name = path.as_os_str().to_owned();
+    name.push(".");
+    name.push(dotted(default));
+    PathBuf::from(name)
+}
+
+/// [`writable_save_path`] for a name picked in the save dialog. The dialog
+/// asked before replacing the name it was given, not the one with an
+/// extension added, so an added name that is already a file is refused
+/// rather than replaced unasked.
+///
+/// # Errors
+///
+/// The status line to show when the added name is already taken.
+pub fn save_path_for(picked: &std::path::Path, default_format: &str) -> Result<PathBuf, String> {
+    let path = writable_save_path(picked, default_format);
+    if path != picked && path.exists() {
+        return Err(format!(
+            "not saved: {} already exists. Save again and pick that file to replace it, or \
+             give another name.",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod save_tests {
     use super::{Action, save_action};
@@ -1098,7 +1149,9 @@ impl App {
         self.remembered_calibrations = persisted.calibrations;
         self.log_decade_top = persisted.log_decade_top;
         self.peak_font = persisted.peak_font.clamp(9.0, 18.0);
-        if !persisted.default_format.is_empty() {
+        // A default nothing writes (.csv was offered once) would make every
+        // suggested name fail, so it is not kept.
+        if SAVE_FORMATS.contains(&persisted.default_format.as_str()) {
             self.default_format = persisted.default_format;
         }
         self.reopen_last = persisted.reopen_last;
@@ -1320,6 +1373,39 @@ impl App {
             Target::Detector(detector) => self.detectors.get_mut(detector),
             Target::Buffer => None,
         }
+    }
+
+    /// Why Start must not go ahead on the active detector: presets typed in
+    /// MCB Properties that differ from what it holds and were never applied.
+    ///
+    /// Start used to go out with whatever the instrument held, which may be
+    /// no preset at all, so a live time typed without Apply gave a count
+    /// that never ended by itself (flow review S2). Applying it for the
+    /// operator would send presets nobody confirmed, so Start asks instead.
+    fn unapplied_presets(&self) -> Option<String> {
+        let detector = self.active_detector_index()?;
+        let mcb = self.detectors.get(detector)?;
+        let number = mcb.identity().number;
+        let draft = self.dialogs.presets_edit.get(&number)?;
+        if mcb.is_active() || !mcb.properties().presets.differ(draft) {
+            return None;
+        }
+        Some(format!(
+            "not started: presets typed for detector {number} were not applied. In Acquire > \
+             MCB Properties > Presets, press Apply presets, or Discard preset changes to count \
+             with the presets it holds."
+        ))
+    }
+
+    /// Starts the active detector's count (Acquire/Start, Alt+1).
+    fn start_active(&mut self) {
+        self.status = match self.active_detector() {
+            Some(detector) => match detector.start() {
+                Ok(()) => "acquisition started".into(),
+                Err(error) => error.to_string(),
+            },
+            None => "select a detector window to start a count".into(),
+        };
     }
 
     /// Arranges every visible window (Window/Tile Horizontally, Tile Vertically,
@@ -1718,7 +1804,14 @@ impl App {
         self.focus_window(self.windows.len() - 1);
     }
 
-    /// Records the active spectrum before a command changes it.
+    /// Records the active spectrum before a command changes it, and marks
+    /// the window unsaved.
+    ///
+    /// Every command that changes what a save writes (regions, peaks, a
+    /// strip, a clear) comes through here, so this is where the window
+    /// becomes unsaved. Only Smooth, Clear and Strip used to say so, and
+    /// closing or quitting after marking a region asked nothing and lost it
+    /// (flow review S3).
     pub fn push_undo(&mut self, label: &str) {
         let Some(index) = self.active else { return };
         let Some(spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index).cloned()
@@ -1735,6 +1828,7 @@ impl App {
                 title: window.title.clone(),
             },
         );
+        self.windows[index].modified = true;
     }
 
     /// Takes back the last destructive command.
@@ -2029,12 +2123,9 @@ impl App {
                     self.status = "open a spectrum first".into();
                 }
             }
-            Action::Start => match self.active_detector() {
-                Some(detector) => match detector.start() {
-                    Ok(()) => self.status = "acquisition started".into(),
-                    Err(error) => self.status = error.to_string(),
-                },
-                None => self.status = "select a detector window to start a count".into(),
+            Action::Start => match self.unapplied_presets() {
+                Some(refusal) => self.status = refusal,
+                None => self.start_active(),
             },
             // "stopped" only when the detector says it stopped; a refusal
             // (locked, or it still counts) is shown as it is.
@@ -2935,10 +3026,17 @@ impl App {
                     })
                     .filter(|stem| !stem.is_empty())
                     .unwrap_or_else(|| "spectrum".into());
-                crate::dialogs::pick_save_file_named(
-                    &self.spectrum_filters(),
+                let picked = crate::dialogs::pick_save_file_named(
+                    &self.save_filters(),
                     Some(&format!("{stem}.{}", dotted(&self.default_format))),
-                )
+                );
+                match picked.map(|picked| save_path_for(&picked, &self.default_format)) {
+                    Some(Err(refusal)) => {
+                        self.status = refusal;
+                        return;
+                    }
+                    other => other.and_then(Result::ok),
+                }
             }
         };
         let Some(path) = path else { return };
@@ -3535,6 +3633,7 @@ impl App {
         }
     }
 
+    /// The types the open dialogs offer.
     fn spectrum_filters(&self) -> Vec<(&'static str, &'static [&'static str])> {
         vec![
             (
@@ -3546,6 +3645,19 @@ impl App {
             ("IAEA .Spe", &["spe"]),
             ("mantaray native", &["json"]),
             ("List mode", &["lis"]),
+        ]
+    }
+
+    /// The types File/Save As offers: only formats with a spectrum writer.
+    /// "List mode (.lis)" was offered and always refused (test gaps GUI-5).
+    pub fn save_filters(&self) -> Vec<(&'static str, &'static [&'static str])> {
+        vec![
+            ("Spectrum files", &["chn", "spc", "spe", "json", "txt"]),
+            ("Integer .Chn", &["chn"]),
+            ("ORTEC .Spc", &["spc"]),
+            ("IAEA .Spe", &["spe"]),
+            ("mantaray native", &["json"]),
+            ("ASCII channel dump", &["txt"]),
         ]
     }
 
@@ -4209,7 +4321,13 @@ impl App {
     /// is rebuilt at every connect, and this memory is what it is rebuilt
     /// *from*. An instrument reporting no serial cannot be recognised at the
     /// next connect, so nothing is filed for one.
+    ///
+    /// Being the one place every calibration change ends, it also marks the
+    /// window unsaved, buffer or detector: the calibration goes into the
+    /// saved file, and closing after calibrating asked nothing (flow review
+    /// S3).
     fn remember_active_calibration(&mut self) {
+        self.mark_modified();
         let Some(index) = self.active else { return };
         let Some(window) = self.windows.get(index) else {
             return;

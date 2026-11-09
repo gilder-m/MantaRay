@@ -62,13 +62,13 @@ pub fn write(spectrum: &Spectrum, options: &AsciiOptions) -> String {
         if !spectrum.detector_description.trim().is_empty() {
             out.push_str(&format!(
                 "Detector    {}\n",
-                spectrum.detector_description.trim()
+                one_line(&spectrum.detector_description)
             ));
         }
         if !spectrum.sample_description.trim().is_empty() {
             out.push_str(&format!(
                 "Sample      {}\n",
-                spectrum.sample_description.trim()
+                one_line(&spectrum.sample_description)
             ));
         }
         if let Some(cal) = &spectrum.energy_calibration {
@@ -91,6 +91,20 @@ pub fn write(spectrum: &Spectrum, options: &AsciiOptions) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A description as one header line, its lines joined with " / ".
+///
+/// The description box takes several lines, and the reader reads any line
+/// that starts with a number as counts, so a second line "500 g, dried"
+/// written as it was came back as a channel of 500 in front of channel 0.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .flat_map(|line| line.split('\r'))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 /// Reads an ASCII dump.
