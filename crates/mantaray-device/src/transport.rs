@@ -30,10 +30,33 @@ pub trait Transport: Send {
 }
 
 /// The dialect over TCP: commands end CRLF, responses end LF.
+///
+/// A reply that misses the timeout is not lost: it arrives later. On a
+/// connection that simply carried on, the next command read it as its own
+/// answer and every command after read its predecessor's, so one late reply
+/// put a network detector out of step until it was removed and added again
+/// (deep review F3). So a failed or timed-out exchange ends the connection
+/// and the next exchange opens a fresh one: a late reply dies with the old
+/// socket and is never read as another command's answer.
 pub struct TcpTransport {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    /// The open connection (reader, writer); `None` after a failed exchange.
+    line: Option<(BufReader<TcpStream>, TcpStream)>,
+    address: std::net::SocketAddr,
+    timeout: Duration,
     peer: String,
+}
+
+/// One connection, with the timeout on its reads and writes.
+fn open(
+    address: std::net::SocketAddr,
+    timeout: Duration,
+) -> std::io::Result<(BufReader<TcpStream>, TcpStream)> {
+    let stream = TcpStream::connect_timeout(&address, timeout)?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    stream.set_nodelay(true).ok();
+    let writer = stream.try_clone()?;
+    Ok((BufReader::new(stream), writer))
 }
 
 impl TcpTransport {
@@ -47,28 +70,18 @@ impl TcpTransport {
                     detail: error.to_string(),
                 })?
                 .collect();
-        let first = addresses.first().ok_or_else(|| DeviceError::Connection {
+        let first = *addresses.first().ok_or_else(|| DeviceError::Connection {
             address: address.to_string(),
             detail: "the address resolves to nothing".into(),
         })?;
-        let stream = TcpStream::connect_timeout(first, timeout).map_err(|error| {
-            DeviceError::Connection {
-                address: address.to_string(),
-                detail: error.to_string(),
-            }
+        let line = open(first, timeout).map_err(|error| DeviceError::Connection {
+            address: address.to_string(),
+            detail: error.to_string(),
         })?;
-        stream.set_read_timeout(Some(timeout)).ok();
-        stream.set_write_timeout(Some(timeout)).ok();
-        stream.set_nodelay(true).ok();
-        let writer = stream
-            .try_clone()
-            .map_err(|error| DeviceError::Connection {
-                address: address.to_string(),
-                detail: error.to_string(),
-            })?;
         Ok(Self {
-            reader: BufReader::new(stream),
-            writer,
+            line: Some(line),
+            address: first,
+            timeout,
             peer: address.to_string(),
         })
     }
@@ -80,19 +93,35 @@ impl Transport for TcpTransport {
             address: self.peer.clone(),
             detail,
         };
-        self.writer
-            .write_all(command.as_bytes())
-            .and_then(|_| self.writer.write_all(b"\r\n"))
-            .map_err(|error| failed(error.to_string()))?;
-        let mut line = String::new();
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .map_err(|error| failed(error.to_string()))?;
-        if read == 0 {
-            return Err(failed("the instrument closed the connection".into()));
+        if self.line.is_none() {
+            let line = open(self.address, self.timeout).map_err(|error| {
+                failed(format!("reconnecting after a failed exchange: {error}"))
+            })?;
+            self.line = Some(line);
         }
-        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+        let Some((reader, writer)) = self.line.as_mut() else {
+            return Err(failed("not connected".into()));
+        };
+        let mut line = String::new();
+        let outcome = writer
+            .write_all(command.as_bytes())
+            .and_then(|()| writer.write_all(b"\r\n"))
+            .and_then(|()| reader.read_line(&mut line));
+        match outcome {
+            Ok(0) => {
+                self.line = None;
+                Err(failed("the instrument closed the connection".into()))
+            }
+            Ok(_) => Ok(line.trim_end_matches(['\r', '\n']).to_string()),
+            Err(error) => {
+                // Whatever is still owed on this connection - the late reply,
+                // or the rest of a half-read line - goes with it.
+                if let Some((_, writer)) = self.line.take() {
+                    let _ = writer.shutdown(std::net::Shutdown::Both);
+                }
+                Err(failed(error.to_string()))
+            }
+        }
     }
 
     fn peer(&self) -> String {
