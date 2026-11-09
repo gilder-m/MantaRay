@@ -4835,11 +4835,13 @@ fn workspace_dialog(app: &mut App, ctx: &egui::Context) {
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.add(
+            let field = ui.add(
                 egui::TextEdit::singleline(&mut app.dialogs.workspace_name)
                     .desired_width(120.0)
                     .hint_text("name"),
             );
+            // Named by its hint, the word it shows.
+            named(&field, "name");
             let named = !app.dialogs.workspace_name.trim().is_empty();
             if ui
                 .add_enabled(named, egui::Button::new("Keep"))
@@ -4923,6 +4925,10 @@ fn scheme_swatch(
 ) -> egui::Response {
     const SIZE: egui::Vec2 = egui::vec2(116.0, 40.0);
     let (rect, response) = ui.allocate_exact_size(SIZE, egui::Sense::click());
+    // Named by the scheme's name, which it paints, and chosen or not.
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, name)
+    });
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -5034,11 +5040,13 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
     }
 
     ui.horizontal(|ui| {
-        ui.add(
+        let field = ui.add(
             egui::TextEdit::singleline(&mut app.dialogs.scheme_name)
                 .desired_width(120.0)
                 .hint_text("name"),
         );
+        // Named by its hint, the word it shows.
+        named(&field, "name");
         let named = !app.dialogs.scheme_name.trim().is_empty();
         if ui
             .add_enabled(named, egui::Button::new("Save"))
@@ -5183,8 +5191,9 @@ fn style_editor(app: &mut App, ui: &mut egui::Ui) {
             .on_hover_text("under windows and menus");
     });
     ui.horizontal(|ui| {
-        ui.label("Corners");
-        ui.add(
+        let label = ui.label("Corners").id;
+        named_slider(
+            ui,
             egui::Slider::new(&mut app.style.corners, 0..=12)
                 .suffix(" px")
                 .custom_formatter(|value, _| {
@@ -5194,14 +5203,16 @@ fn style_editor(app: &mut App, ui: &mut egui::Ui) {
                         format!("{value:.0}")
                     }
                 }),
+            label,
         )
         .on_hover_text("windows, menus and buttons; zero is square");
     });
     ui.horizontal(|ui| {
-        ui.label("Wheel zoom");
+        let label = ui.label("Wheel zoom").id;
         // Logarithmic, because pace is felt in ratios: 50% and 200% sit the
         // same distance either side of parity, as they do under the finger.
-        ui.add(
+        named_slider(
+            ui,
             egui::Slider::new(&mut app.style.wheel_zoom, 25..=400)
                 .logarithmic(true)
                 // The unit lives in the formatter, not in `suffix`: egui
@@ -5214,6 +5225,7 @@ fn style_editor(app: &mut App, ui: &mut egui::Ui) {
                         format!("{value:.0} %")
                     }
                 }),
+            label,
         )
         .on_hover_text(
             "how much one notch of the wheel zooms, as a share of the keyboard's step - \
@@ -5233,7 +5245,8 @@ fn colour_editor(app: &mut App, ui: &mut egui::Ui) {
     let edit = |ui: &mut egui::Ui, label: &str, hint: &str, value: &mut Rgb| {
         ui.horizontal(|ui| {
             let mut color = value.to_color();
-            if ui.color_edit_button_srgba(&mut color).changed() {
+            let picker = ui.color_edit_button_srgba(&mut color);
+            if picker.changed() {
                 *value = Rgb::from_color(color);
             }
             // The hex beside the picker, because a colour is shared as text and
@@ -5265,7 +5278,10 @@ fn colour_editor(app: &mut App, ui: &mut egui::Ui) {
                 // an abandoned typo does not sit there looking like the truth.
                 ui.data_mut(|data| data.remove_temp::<String>(id));
             }
-            ui.label(label).on_hover_text(hint);
+            // The colour's name comes after its picker and hex, and names both.
+            let label = ui.label(label).on_hover_text(hint).id;
+            picker.labelled_by(label);
+            field.labelled_by(label);
         });
     };
 
@@ -5409,11 +5425,15 @@ fn palette_checks(app: &mut App, ui: &mut egui::Ui) {
 /// The settings that are not colours, kept out of the way of the ones that are.
 fn other_preferences(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        ui.label("Peak Info text size");
-        ui.add(egui::Slider::new(&mut app.peak_font, 9.0..=18.0).suffix(" px"));
+        let label = ui.label("Peak Info text size").id;
+        named_slider(
+            ui,
+            egui::Slider::new(&mut app.peak_font, 9.0..=18.0).suffix(" px"),
+            label,
+        );
     });
     ui.horizontal(|ui| {
-        ui.label("Default save format");
+        let label = ui.label("Default save format").id;
         egui::ComboBox::from_id_salt("default-save-format")
             .selected_text(format!(".{}", crate::app::dotted(&app.default_format)))
             .show_ui(ui, |ui| {
@@ -5428,7 +5448,9 @@ fn other_preferences(app: &mut App, ui: &mut egui::Ui) {
                         app.default_format = extension.into();
                     }
                 }
-            });
+            })
+            .response
+            .labelled_by(label);
         ui.label(
             egui::RichText::new("offered first when saving a new buffer")
                 .weak()
