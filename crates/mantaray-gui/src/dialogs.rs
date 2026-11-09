@@ -2345,8 +2345,12 @@ fn decimals_of(value: f64) -> usize {
 /// This puts one cell in the caller's grid row. The two notes are returned,
 /// not drawn, for [`pending_notes`] to draw outside the grid, where a label
 /// is not another cell of the row.
+///
+/// `label` is the row's label, which names the field for screen readers and
+/// for tests that find it by what it says.
 pub fn pending_field(
     ui: &mut egui::Ui,
+    label: egui::Id,
     pending: &mut PendingEdits,
     detector: u16,
     mirror: f64,
@@ -2372,7 +2376,8 @@ pub fn pending_field(
                 .fixed_decimals(decimals)
                 .clamp_existing_to_range(false)
                 .update_while_editing(false),
-        );
+        )
+        .labelled_by(label);
         // Always available: the number shown may be a default rather than the
         // instrument's, and applying the same number must still send it.
         apply = ui.button("Apply").clicked();
@@ -2479,10 +2484,11 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     // is a whole number because the command carries one.
                     let mut coarse = None;
                     egui::Grid::new("amp").num_columns(2).show(ui, |ui| {
-                        ui.label("Coarse gain");
+                        let label = ui.label("Coarse gain").id;
                         let mirror = properties.amplifier.coarse_gain;
                         let field = pending_field(
                             ui,
+                            label,
                             &mut app.dialogs.coarse_edit,
                             number,
                             mirror,
@@ -2802,10 +2808,11 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     // The target is held in `hv_edit` until Apply.
                     let mut bias = None;
                     egui::Grid::new("hv").num_columns(2).show(ui, |ui| {
-                        ui.label("Target (V)");
+                        let label = ui.label("Target (V)").id;
                         let mirror = properties.high_voltage.target_volts;
                         let field = pending_field(
                             ui,
+                            label,
                             &mut app.dialogs.hv_edit,
                             number,
                             mirror,

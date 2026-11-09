@@ -2196,8 +2196,10 @@ fn draw_pending_field(
             ..Default::default()
         };
         let output = ctx.run_ui(input, |ui| {
+            let label = ui.label("Coarse gain").id;
             let field = mantaray_gui::dialogs::pending_field(
                 ui,
+                label,
                 pending,
                 1,
                 mirror,
