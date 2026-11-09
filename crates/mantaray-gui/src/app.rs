@@ -1830,7 +1830,15 @@ impl App {
         if !self.looked_for_instruments && self.shown {
             self.looked_for_instruments = true;
             if self.detectors.is_empty() && std::env::var("MANTARAY_NO_OPEN").is_err() {
+                // Nobody asked for this look, so it does not take the status
+                // line from the warning about a newer crash snapshot: that
+                // was on screen for one frame. The scan's answer is still in
+                // Instruments; the operator's next action moves the line on.
+                let warning = self.snapshot_from_newer.then(|| self.status.clone());
                 self.scan_local_instruments();
+                if let Some(warning) = warning {
+                    self.status = warning;
+                }
             }
         }
         let elapsed = self.last_tick.elapsed().as_secs_f64() * self.time_scale;
@@ -5164,5 +5172,28 @@ impl App {
             }
         }
         actions
+    }
+}
+
+#[cfg(test)]
+mod first_look_tests {
+    use super::App;
+
+    #[test]
+    fn the_newer_snapshot_warning_outlives_the_first_look_for_instruments() {
+        // The look for instruments on the second frame rewrote the status
+        // line, so the warning that this run takes no crash snapshot was on
+        // screen for about one frame.
+        let mut app = App::headless();
+        while !app.detectors.is_empty() {
+            app.remove_detector(0);
+        }
+        app.offer_unfinished_work(Err("session/9 is newer than session/1".into()));
+        let warning = app.status.clone();
+        assert!(warning.contains("newer mantaray"), "{warning}");
+        app.shown = true;
+        app.tick();
+        assert!(app.looked_for_instruments);
+        assert_eq!(app.status, warning);
     }
 }
