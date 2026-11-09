@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+**ORTEC files read the same in MAESTRO (2026-11-08).**
+- A `.Spe` of a spectrum with a channel offset writes its `$DATA:` range as
+  the first and the last channel (`100 1123` for 1024 channels from 100), as
+  MAESTRO does. 0.2.4 wrote `100 1023`, which reopened 100 channels short, and
+  a 50-channel `.Chn` at offset 60 saved as `.Spe` (`60 49`) never opened
+  again. Those 0.2.4 files now open whole. A range that ends before it starts
+  is refused saying so.
+- Descriptions in `.Chn`, `.Spc` and `.Spe` are stored in Windows-1252, the
+  text MAESTRO reads, so "1 µCi, 22 °C" shows in MAESTRO as typed instead of
+  "1 ÂµCi, 22 Â°C", and a long description is never cut through a character.
+  A character it cannot hold (a Greek β, say) is saved as `?`, and the save
+  says so in the status line or on stderr, as it does when a description is
+  cut to the 63 characters a `.Chn` holds. `.Spc` used to drop such
+  characters silently. MAESTRO's own files with `µ` or `°` now read them
+  right. Files 0.2.4 wrote still read as before; the native `.json` stays
+  UTF-8.
+- A `.Chn` of a count with no start date stores binary zeros there, as
+  ORTEC's file manual has it, instead of spaces.
+
 **Bias and coarse gain wait for Apply (2026-11-08).** In MCB Properties, a
 change to the high voltage or the coarse gain is no longer sent as it is made,
 as 0.2.4 did: nothing goes to the detector until Apply is pressed, and the tab
