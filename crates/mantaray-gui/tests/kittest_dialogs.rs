@@ -6,6 +6,9 @@
 //! is the exact list of commands that went down the wire, not a field in the
 //! app's own state. A test here fails if the widget itself starts sending,
 //! whatever the code behind it looks like.
+//!
+//! Finding a widget by name only works if it has one, so the last tests here
+//! walk every screen and dialog for controls a screen reader could not name.
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
@@ -204,4 +207,338 @@ fn walking_the_property_tabs_sends_nothing() {
             "showing the {tab} tab sent"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Every control has a name.
+
+use egui_kittest::kittest::{AccessKitNode, NodeT, by};
+use mantaray_gui::dialogs::Dialog;
+
+/// Whether a screen reader, or a test, can act on this node: it takes the
+/// keyboard or answers a click.
+fn interactive(node: &AccessKitNode<'_>) -> bool {
+    let data = node.data();
+    data.supports_action(egui::accesskit::Action::Focus)
+        || data.supports_action(egui::accesskit::Action::Click)
+}
+
+/// Whether the node has a name to be read out and found by. A label's name is
+/// its text, which accesskit keeps as its value.
+fn named(node: &AccessKitNode<'_>) -> bool {
+    let name = if node.role() == Role::Label {
+        node.value()
+    } else {
+        node.label()
+    };
+    name.is_some_and(|name| !name.trim().is_empty())
+}
+
+/// The title of the window the node is in, if it is in one.
+fn window_of(node: &AccessKitNode<'_>) -> Option<String> {
+    let mut up = node.parent();
+    while let Some(parent) = up {
+        if parent.role() == Role::Window {
+            return parent.label();
+        }
+        up = parent.parent();
+    }
+    None
+}
+
+/// Whether egui made this node itself, as part of a container, rather than
+/// the app as a control: a scroll bar, the edge of the status panel that
+/// drags to resize it, the floor of a menu (it takes a click only to come to
+/// the front, and holds the menu's items), or the strip of a window's title
+/// bar that takes the drag. None is ours to name; the panel, menu or window
+/// carries the name. The strip and the edge are matched by egui's own ids, so
+/// if egui ever changes them they show up here as unnamed rather than
+/// slipping by.
+fn made_by_egui(node: &AccessKitNode<'_>) -> bool {
+    if node.role() == Role::ScrollBar {
+        return true;
+    }
+    if node.locate().0 == egui::Id::new("status").with("__resize").accesskit_id() {
+        return true;
+    }
+    if node.role() == Role::Unknown && node.children().next().is_some() {
+        return true;
+    }
+    // egui keys a window by its title as `Window::new` holds it, an
+    // `Option` of the text.
+    window_of(node).is_some_and(|title| {
+        node.locate().0
+            == egui::Id::new(Some(title.as_str()))
+                .with("__title_click")
+                .accesskit_id()
+    })
+}
+
+/// One line saying where an unnamed control is: its role, what it shows,
+/// where it sits, and the window it is in.
+fn describe(screen: &str, node: &AccessKitNode<'_>) -> String {
+    let at = node
+        .bounding_box()
+        .map(|rect| {
+            format!(
+                "({:.0}, {:.0}) {:.0}x{:.0}",
+                rect.x0,
+                rect.y0,
+                rect.width(),
+                rect.height()
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{screen}: {:?} showing {:?} at {at} in window {:?}",
+        node.role(),
+        node.value().unwrap_or_default(),
+        window_of(node).unwrap_or_default(),
+    )
+}
+
+/// Every control on screen that has no name, by node, described where it
+/// was first seen.
+type Unnamed = std::collections::BTreeMap<egui::accesskit::NodeId, String>;
+
+/// Adds every control on screen that has no name to `into`.
+fn unnamed(harness: &Harness<'_, App>, screen: &str, into: &mut Unnamed) {
+    for node in harness
+        .query_all(by().predicate(|node| interactive(node) && !named(node) && !made_by_egui(node)))
+    {
+        let node = node.accesskit_node();
+        into.entry(node.locate().0)
+            .or_insert_with(|| describe(screen, &node));
+    }
+}
+
+/// Opens every collapsed section on screen, so what it hides is drawn too.
+fn expand_everything(harness: &mut Harness<'_, App>) {
+    for _ in 0..20 {
+        let closed = harness
+            .query_all(by().predicate(|node| {
+                node.role() != Role::ComboBox && node.data().is_expanded() == Some(false)
+            }))
+            .next();
+        match closed {
+            Some(node) => node.click(),
+            None => return,
+        }
+        harness.run_steps(2);
+    }
+}
+
+/// The harness with a spectrum to work on as well: peaks found, a library
+/// loaded, so the dialogs that list them have rows to show.
+fn harness_with_data() -> (Harness<'static, App>, CommandLog) {
+    let (mut harness, log) = harness();
+    let app = harness.state_mut();
+    let mut spectrum = mantaray_core::Spectrum::new(4096);
+    spectrum.live_time = 300.0;
+    spectrum.real_time = 315.0;
+    spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 0.36));
+    for (channel, counts) in spectrum.channels.iter_mut().enumerate() {
+        *counts = 500 - (400 * channel as u64 / 4096).min(400);
+    }
+    for centre in [1024_i64, 2048, 3072] {
+        for offset in -12_i64..=12 {
+            let value = (30_000.0 * (-0.5 * (offset as f64 / 3.0).powi(2)).exp()) as u64;
+            spectrum.channels[(centre + offset) as usize] += value;
+        }
+    }
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.open_buffer("labels.Spe".into(), spectrum, None);
+    app.apply_action(Action::PeakSearch);
+    // A calibration point, an analysis and a report, so their tables have
+    // rows.
+    app.apply_action(Action::Marker(1024));
+    app.apply_action(Action::AddCalibrationPoint(661.7));
+    app.apply_action(Action::Analyse);
+    app.apply_action(Action::RoiReport);
+    harness.run();
+    (harness, log)
+}
+
+/// Shows `dialog` alone, opens its folded sections, and adds what on it has
+/// no name to `into`. False if the dialog did not open, so nothing was seen.
+fn walk_dialog(harness: &mut Harness<'_, App>, dialog: Dialog, into: &mut Unnamed) -> bool {
+    harness.state_mut().dialogs.close_all();
+    harness.state_mut().apply_action(Action::Show(dialog));
+    walk_open_dialog(harness, dialog, into)
+}
+
+/// The same, for a dialog something else has opened.
+fn walk_open_dialog(harness: &mut Harness<'_, App>, dialog: Dialog, into: &mut Unnamed) -> bool {
+    // A fixed number of frames: InSight's trace never stops moving, so
+    // waiting for the screen to settle would wait forever.
+    harness.run_steps(3);
+    if !harness.state().dialogs.is_open(dialog) {
+        return false;
+    }
+    expand_everything(harness);
+    unnamed(harness, &format!("{dialog:?}"), into);
+    true
+}
+
+#[test]
+fn every_control_on_every_screen_has_a_name() {
+    // A field beside a label is not named by it: the label is only text
+    // painted nearby. Without a name a screen reader says "spin button" and
+    // a test cannot find the field without counting pixels.
+    let mut missing = Unnamed::new();
+    let mut unopened = Vec::new();
+
+    // The main window, its toolbar drawn each of the three ways.
+    let (mut harness, _log) = harness_with_data();
+    for style in [
+        mantaray_gui::theme::IconStyle::Text,
+        mantaray_gui::theme::IconStyle::Icons,
+        mantaray_gui::theme::IconStyle::Both,
+    ] {
+        harness.state_mut().style.icons = style;
+        harness.run();
+        unnamed(
+            &harness,
+            &format!("main window, {style:?} toolbar"),
+            &mut missing,
+        );
+    }
+    harness.state_mut().style.icons = mantaray_gui::theme::IconStyle::Text;
+    harness.run();
+
+    // Every menu.
+    for menu in [
+        "File",
+        "Edit",
+        "Acquire",
+        "Calculate",
+        "Services",
+        "ROI",
+        "Display",
+        "Window",
+        "Help",
+    ] {
+        harness.get_by_label(menu).click();
+        harness.run();
+        unnamed(&harness, &format!("{menu} menu"), &mut missing);
+        harness.get_by_label(menu).click();
+        harness.run();
+    }
+
+    // Every dialog, over the spectrum and then over the instrument's own
+    // window, since several show different controls for each.
+    let mut dialogs: Vec<Dialog> = Dialog::all()
+        .iter()
+        .copied()
+        .filter(|dialog| *dialog != Dialog::ConfirmClose)
+        .collect();
+    dialogs.push(Dialog::Workspace);
+    let (mut detector, _log) = self::harness();
+    for dialog in &dialogs {
+        for app in [&mut harness, &mut detector] {
+            if !walk_dialog(app, *dialog, &mut missing) {
+                unopened.push(format!("{dialog:?}"));
+            }
+        }
+    }
+
+    // Every tab of the MCB Properties.
+    detector.state_mut().dialogs.close_all();
+    detector.run();
+    open_properties(&mut detector, "Amplifier");
+    for tab in [
+        "Amplifier",
+        "ADC",
+        "Presets",
+        "High Voltage",
+        "Stabilizer",
+        "About",
+    ] {
+        detector.get_by_label(tab).click();
+        detector.run();
+        expand_everything(&mut detector);
+        unnamed(&detector, &format!("MCB Properties, {tab}"), &mut missing);
+    }
+
+    // Closing a spectrum that has unsaved changes, which asks first.
+    harness.state_mut().dialogs.close_all();
+    let id = {
+        let app = harness.state_mut();
+        let window = app.windows.last_mut().expect("the spectrum window");
+        window.modified = true;
+        window.id
+    };
+    harness.state_mut().apply_action(Action::CloseWindow(id));
+    if !walk_open_dialog(&mut harness, Dialog::ConfirmClose, &mut missing) {
+        unopened.push("ConfirmClose".into());
+    }
+
+    // The offer of unfinished work, which only a crash brings up.
+    harness.state_mut().dialogs.close_all();
+    harness.state_mut().recovered = Some(mantaray_gui::session::Session {
+        saved_at: "earlier".into(),
+        windows: vec![mantaray_gui::session::SavedWindow {
+            title: "left behind".into(),
+            path: None,
+            spectrum: mantaray_core::Spectrum::from_counts(vec![1; 64]),
+            display: Default::default(),
+            calibration: Default::default(),
+            modified: true,
+            floating: false,
+        }],
+    });
+    if !walk_dialog(&mut harness, Dialog::Recover, &mut missing) {
+        unopened.push("Recover".into());
+    }
+
+    assert_eq!(unopened, Vec::<String>::new(), "these dialogs did not open");
+    let missing: Vec<&String> = missing.values().collect();
+    assert!(
+        missing.is_empty(),
+        "{} controls have no name:\n{}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn controls_answer_to_the_words_beside_them() {
+    // A name is only as good as the label it points at: these are found by
+    // what the user reads next to them, so a field pointed at the wrong
+    // label fails here even though it has a name.
+    let (mut harness, _log) = harness_with_data();
+    harness.state_mut().style.icons = mantaray_gui::theme::IconStyle::Icons;
+    harness.run();
+    // A drawn icon, by the word the Both arrangement puts beside it.
+    harness.get_by_role_and_label(Role::Button, "Start");
+    harness.get_by_label("Spectrum");
+
+    // A slider is two widgets, the bar and its number box: both are named.
+    harness
+        .state_mut()
+        .apply_action(Action::Show(Dialog::Settings));
+    harness.run();
+    assert_eq!(
+        harness.query_all_by_label("Sensitivity factor").count(),
+        2,
+        "the slider and its number box"
+    );
+
+    // A row of a table, by the column header over it.
+    harness.state_mut().dialogs.close_all();
+    harness
+        .state_mut()
+        .apply_action(Action::Show(Dialog::Calibration));
+    harness.run();
+    harness.get_by_role_and_label(Role::TextInput, "channel");
+
+    // A bare checkbox, by its row label rather than its empty text.
+    let (mut detector, _log) = self::harness();
+    open_properties(&mut detector, "Presets");
+    detector.get_by_role_and_label(Role::CheckBox, "Real time (s)");
+    detector.get_by_role_and_label(Role::SpinButton, "Real time (s)");
 }
