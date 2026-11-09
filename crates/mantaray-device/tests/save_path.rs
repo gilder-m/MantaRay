@@ -50,9 +50,10 @@ fn assert_finished(rig: &Rig, mcb: &RemoteMcb) {
         spectrum.live_time,
         spectrum.real_time
     );
+    // One count of slack: the rig keeps whole counts.
     let expected = RATE * live;
     assert!(
-        (spectrum.total_counts() as f64 - expected).abs() <= 1.0,
+        (spectrum.total_counts() as f64 - expected).abs() < 1.5,
         "the spectrum holds {} counts; the detector counted {expected}",
         spectrum.total_counts()
     );

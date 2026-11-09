@@ -664,11 +664,27 @@ impl RemoteMcb {
         // values, the reading is marked untrusted, and the spectrum fetch
         // goes on. Changes stay refused, because each asks the detector
         // afresh (rule 4).
+        //
+        // A fetch whose spectrum could not be read (SHOW_DATA answered ERR:
+        // on the 926 the 32 KB histogram read is the fragile one, the status
+        // reads are small) is set aside the same way, status and all. Its
+        // idle status was worked in beside the spectrum of the fetch before,
+        // which ended a job's WAIT, and SAVE wrote 2 s of a 3 s count as the
+        // finished one (deep review F1). A count is over only on a fetch
+        // whose channels landed with its clocks; marked untrusted, a WAIT
+        // goes on over the failed reads (each poll tries again) and gives up
+        // after UNREADABLE_READINGS of them, saying why.
         let status = fetched.status;
         self.readings += 1;
         self.reading_at = Some(fetched.read_instant);
-        match parse_status(&status) {
-            Some(reading) => {
+        let reading = match &parsed {
+            Err(error) => Err(format!("the spectrum could not be read: {error}")),
+            Ok(_) => parse_status(&status).ok_or_else(|| {
+                format!("the status reply is not a status line: {status:.60?}")
+            }),
+        };
+        match reading {
+            Ok(reading) => {
                 let number = |key: &str| status_number(&status, key);
                 self.status.real_time = reading.real_time;
                 self.status.live_time = reading.live_time;
@@ -679,10 +695,8 @@ impl RemoteMcb {
                 self.untrusted = None;
                 self.see_start(reading, fetched.read_at, fetched.read_instant, true);
             }
-            None => {
-                self.untrusted = Some(format!(
-                    "the status reply is not a status line: {status:.60?}"
-                ));
+            Err(reason) => {
+                self.untrusted = Some(reason);
                 // An unbelievable fetch is still a fetch towards the bound
                 // on an unseen START: the hold never outlasts the wait a
                 // WAIT gives up on (UNREADABLE_READINGS, the same count).
