@@ -36,8 +36,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// allows; ownership and ACLs other than those bits are not. A symbolic link
 /// is followed, so the file it points at is replaced and the link survives.
 ///
-/// The temporary file goes in the target's own directory, so that directory
-/// must be writable as well as the file.
+/// The temporary file goes in the target's own directory. Where that
+/// directory refuses it (permission denied) but the file itself is writable,
+/// as on some lab shares, the file is written in place instead, the way
+/// `std::fs::write` does: that save still works, but is not atomic.
 ///
 /// # Errors
 ///
@@ -77,7 +79,18 @@ fn write_atomic_with(
         Err(error) => return Err(error),
     };
 
-    let (scratch, mut part) = create_scratch(&directory, name)?;
+    let (scratch, mut part) = match create_scratch(&directory, name) {
+        Ok(created) => created,
+        // A folder that may not be written into, holding a file that may:
+        // a lab share set up that way saved on 0.2.4, and being unable to
+        // save at all is worse than a save that is not atomic. Windows'
+        // ERROR_ACCESS_DENIED reads as this kind too
+        // (library/std/src/sys/io/error/windows.rs).
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            return write_in_place(&target, fill);
+        }
+        Err(error) => return Err(error),
+    };
     let written = (|| {
         if let Some(permissions) = existing {
             // Best effort: a FAT stick or a network share may refuse to set
@@ -97,6 +110,14 @@ fn write_atomic_with(
     }
     sync_directory(&directory);
     Ok(())
+}
+
+/// The old way: truncate the target and write into it. Only for a folder
+/// that refuses the temporary file; see [`write_atomic`].
+fn write_in_place(target: &Path, fill: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    let mut out = File::create(target)?;
+    fill(&mut out)?;
+    out.sync_all()
 }
 
 /// The file a symbolic link points at, or `path` itself.
@@ -247,6 +268,34 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         fs::set_permissions(&path, permissions).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unix only: on Windows the read-only attribute on a folder does not stop
+    /// files being created in it, so the case cannot be staged there. Skipped
+    /// as root, who creates files in any folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_writable_file_in_a_read_only_folder_still_saves_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("ro-folder");
+        let path = dir.join("shared.Spe");
+        fs::write(&path, "old").expect("old");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("lock the folder");
+        let locked = File::create(dir.join("probe")).is_err();
+
+        let outcome = write_atomic(&path, "new, and longer than the old");
+        let left = names(&dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("unlock");
+
+        if locked {
+            outcome.expect("the save must still work");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read"),
+                "new, and longer than the old"
+            );
+            assert_eq!(left, ["shared.Spe"]);
+        }
         fs::remove_dir_all(&dir).ok();
     }
 
