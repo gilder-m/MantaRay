@@ -182,3 +182,66 @@ fn tolerates_crlf_and_blank_lines() {
     let s = spe::read(&text).unwrap();
     assert_eq!(s.channels, vec![10, 20, 30, 40, 50, 60, 70, 0]);
 }
+
+/// A live or real time that is not a finite number is refused on read, so it
+/// is never carried into a native file that would not open again.
+#[test]
+fn a_measurement_time_that_is_not_finite_is_refused() {
+    for times in ["NaN inf", "100 NaN", "inf 100", "-inf 100"] {
+        let text = format!("$SPEC_ID:\nx\n$MEAS_TIM:\n{times}\n$DATA:\n0 3\n1\n2\n3\n4\n");
+        match spe::read(&text) {
+            Ok(spectrum) => panic!(
+                "{times:?} read as live {} real {}",
+                spectrum.live_time, spectrum.real_time
+            ),
+            Err(error) => assert!(error.to_string().contains("$MEAS_TIM"), "{times}: {error}"),
+        }
+    }
+    // Finite times still read as before.
+    let text = "$SPEC_ID:\nx\n$MEAS_TIM:\n10 12\n$DATA:\n0 1\n1\n2\n";
+    let spectrum = spe::read(text).unwrap();
+    assert_eq!((spectrum.live_time, spectrum.real_time), (10.0, 12.0));
+}
+
+/// The native writer refuses what its reader would refuse, naming the field.
+#[test]
+fn a_native_spectrum_with_a_time_that_is_not_finite_is_not_written() {
+    let mut spectrum = Spectrum::from_counts(vec![1, 2, 3]);
+    spectrum.live_time = f64::NAN;
+    spectrum.real_time = f64::INFINITY;
+    match mantaray_formats::native::write(&spectrum) {
+        Ok(text) => assert!(
+            mantaray_formats::native::read(&text).is_ok(),
+            "wrote a spectrum that does not open again"
+        ),
+        Err(error) => assert!(error.to_string().contains("live time"), "{error}"),
+    }
+    let mut calibrated = Spectrum::from_counts(vec![1, 2, 3]);
+    calibrated.energy_calibration = Some(EnergyCalibration::new([0.0, f64::NAN, 0.0], "keV"));
+    match mantaray_formats::native::write(&calibrated) {
+        Ok(text) => assert!(
+            mantaray_formats::native::read(&text).is_ok(),
+            "wrote a calibration that does not open again"
+        ),
+        Err(error) => assert!(error.to_string().contains("coefficients"), "{error}"),
+    }
+}
+
+/// A corrupt `.Spc` whose time words hold NaN is refused the same way.
+#[test]
+fn an_spc_time_that_is_not_finite_is_refused() {
+    let mut spectrum = Spectrum::from_counts(vec![5; 1024]);
+    spectrum.live_time = 10.0;
+    spectrum.real_time = 12.0;
+    for offset in [90usize, 94] {
+        let mut bytes = mantaray_formats::spc::write(&spectrum).unwrap();
+        bytes[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        match mantaray_formats::spc::read(&bytes) {
+            Ok(back) => panic!(
+                "offset {offset}: read as live {} real {}",
+                back.live_time, back.real_time
+            ),
+            Err(error) => assert!(error.to_string().contains("time"), "{offset}: {error}"),
+        }
+    }
+}

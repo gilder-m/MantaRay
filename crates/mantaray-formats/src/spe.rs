@@ -89,6 +89,21 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
             .next()
             .and_then(|value| value.parse().ok())
             .unwrap_or(spectrum.live_time);
+        // `NaN inf` parses, and was carried into a native file that then
+        // never opened again. A time that is not a number of seconds is
+        // refused here instead.
+        if !spectrum.live_time.is_finite() || !spectrum.real_time.is_finite() {
+            return Err(FormatError::invalid(
+                "$MEAS_TIM",
+                format!(
+                    "{:?} gives live time {} s, real time {} s: a time has to be a finite \
+                     number of seconds",
+                    line.trim(),
+                    spectrum.live_time,
+                    spectrum.real_time
+                ),
+            ));
+        }
     }
     if let Some((_, lines)) = blocks.iter().find(|(keyword, _)| keyword == "$DATE_MEA:") {
         spectrum.start_time = lines.first().and_then(|line| parse_date(line));

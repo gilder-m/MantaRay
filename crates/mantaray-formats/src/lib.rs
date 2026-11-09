@@ -395,6 +395,38 @@ pub fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), 
     Ok(())
 }
 
+/// Hands back `text` only if `read` opens it: no file is written that this
+/// build cannot read back. serde writes NaN and infinity as `null`, which the
+/// readers refuse, so a save that "worked" could leave a file that never
+/// opened again. The writers name the fields they know first; this catches
+/// any other, by the key on the line where reading stopped.
+pub(crate) fn readable<T>(
+    text: String,
+    read: impl FnOnce(&str) -> Result<T, FormatError>,
+) -> Result<String, FormatError> {
+    match read(&text) {
+        Ok(_) => Ok(text),
+        Err(FormatError::Json(error)) => {
+            let key = text
+                .lines()
+                .nth(error.line().saturating_sub(1))
+                .and_then(|line| line.split('"').nth(1))
+                .unwrap_or("a value")
+                .to_string();
+            Err(FormatError::invalid(
+                format!("{key} (not saved)"),
+                format!("the file would not open again: {error}"),
+            ))
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Names a number a JSON file cannot hold: NaN or infinity.
+pub(crate) fn not_finite(value: f64) -> Option<f64> {
+    (!value.is_finite()).then_some(value)
+}
+
 fn unsupported(path: &Path, what: &str) -> FormatError {
     FormatError::Unsupported {
         detail: format!(

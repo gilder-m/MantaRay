@@ -36,13 +36,52 @@ struct Document {
 }
 
 /// Serialises a spectrum as pretty-printed JSON.
+///
+/// # Errors
+///
+/// A spectrum holding a number JSON cannot (NaN or infinity, which would be
+/// written as `null` and never read again) is refused, naming the field. The
+/// layout is unchanged, so 0.2.4 still opens what is written.
 pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
+    let refuse = |field: &str, value: String| {
+        FormatError::invalid(
+            "spectrum (not saved)",
+            format!(
+                "{field} {value} is not a finite number, which a native spectrum cannot hold \
+                 (it would not open again)"
+            ),
+        )
+    };
+    for (field, value) in [
+        ("live time", spectrum.live_time),
+        ("real time", spectrum.real_time),
+    ] {
+        if let Some(value) = crate::not_finite(value) {
+            return Err(refuse(field, format!("{value} s")));
+        }
+    }
+    if let Some(calibration) = &spectrum.energy_calibration
+        && calibration.coefficients.iter().any(|c| !c.is_finite())
+    {
+        return Err(refuse(
+            "energy calibration coefficients",
+            format!("{:?}", calibration.coefficients),
+        ));
+    }
+    if let Some(calibration) = &spectrum.shape_calibration
+        && calibration.coefficients.iter().any(|c| !c.is_finite())
+    {
+        return Err(refuse(
+            "shape calibration coefficients",
+            format!("{:?}", calibration.coefficients),
+        ));
+    }
     let document = DocumentOut {
         mantaray: FORMAT_TAG,
         written_by: WRITER,
         spectrum,
     };
-    Ok(serde_json::to_string_pretty(&document)?)
+    crate::readable(serde_json::to_string_pretty(&document)?, read)
 }
 
 /// Parses a native JSON spectrum.

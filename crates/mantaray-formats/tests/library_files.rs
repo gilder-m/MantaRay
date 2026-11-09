@@ -280,3 +280,70 @@ fn libraries_can_be_saved_and_loaded_by_extension() {
         );
     }
 }
+
+/// A JSON library is written only if this build can open it again. serde
+/// writes NaN and infinity as `null`, which the reader refuses, so a library
+/// holding one used to save without a word and then never open.
+#[test]
+fn a_json_library_with_a_number_that_is_not_finite_is_refused_naming_it() {
+    for (half_life, shown) in [("inf", "inf"), ("NaN", "NaN")] {
+        let csv = format!(
+            "{}\nStab-1,{half_life},0,,100.0,50.0,gamma,true,false\n",
+            library::CSV_HEADER
+        );
+        // The CSV keeps its meaning: infinity is the library's "stable", NaN
+        // a library mistake the analysis reports on.
+        let lib = library::read_csv(&csv).expect("csv reads");
+        match library::write_json(&lib) {
+            Ok(json) => assert!(
+                library::read_json(&json).is_ok(),
+                "half-life {half_life}: saved a library that does not open again:\n{json}"
+            ),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(message.contains("Stab-1"), "{message}");
+                assert!(message.contains("half-life"), "{message}");
+                assert!(message.contains(shown), "{message}");
+            }
+        }
+        // As CSV it is written as text and read back the same.
+        let back = library::read_csv(&library::write_csv(&lib)).unwrap();
+        let again = back.nuclide("Stab-1").unwrap().half_life_seconds;
+        assert_eq!(again.is_nan(), half_life == "NaN");
+        assert_eq!(again.is_infinite(), half_life == "inf");
+    }
+}
+
+#[test]
+fn a_refused_json_library_save_leaves_the_old_file_alone() {
+    let dir = std::env::temp_dir().join(format!("mantaray-lib-nan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lib.json");
+    library::save(&NuclideLibrary::sample_for_tests(), &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut bad = NuclideLibrary::sample_for_tests();
+    bad.push(Nuclide::new(
+        "Odd-1",
+        1.0e6,
+        vec![LibraryPeak::new(f64::NAN, 10.0)],
+    ));
+    let error = library::save(&bad, &path).expect_err("a NaN energy saved");
+    assert!(error.to_string().contains("Odd-1"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A line energy or yield that is not a finite number means nothing, so a
+/// CSV row with one is refused where it enters, naming the row.
+#[test]
+fn csv_refuses_an_energy_or_yield_that_is_not_finite() {
+    for row in [
+        "Odd-1,1000,0,,NaN,50.0,gamma,true,false",
+        "Odd-1,1000,0,,inf,50.0,gamma,true,false",
+        "Odd-1,1000,0,,100.0,NaN,gamma,true,false",
+        "Odd-1,1000,0,,100.0,-inf,gamma,true,false",
+    ] {
+        let csv = format!("{}\n{row}\n", library::CSV_HEADER);
+        let error = library::read_csv(&csv).expect_err(row);
+        assert!(error.to_string().contains("row 2"), "{row}: {error}");
+    }
+}

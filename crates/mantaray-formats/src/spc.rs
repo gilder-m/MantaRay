@@ -145,6 +145,17 @@ pub fn read(bytes: &[u8]) -> Result<Spectrum, FormatError> {
     let channel_start = word(44)?;
     let real_time = float(90)? as f64;
     let live_time = float(94)? as f64;
+    // NaN bits in a corrupt header were kept (NaN is not `<= 0.0`) and
+    // carried into a native file that then never opened again.
+    if !real_time.is_finite() || !live_time.is_finite() {
+        return Err(FormatError::invalid(
+            ".Spc header",
+            format!(
+                "real time {real_time} s, live time {live_time} s: a time has to be a finite \
+                 number of seconds"
+            ),
+        ));
+    }
 
     if channels == 0 || spectrum_record == 0 {
         return Err(FormatError::invalid(

@@ -40,11 +40,44 @@ const JSON_NEWEST: u32 = 1;
 ///
 /// The tag and writer stamp sit beside the library's own fields, so versions
 /// that predate them still read the file.
+///
+/// # Errors
+///
+/// A number JSON cannot hold (NaN or infinity, written as `null` and never
+/// read again) is refused, naming the nuclide and the field. CSV holds them
+/// as text, so an infinite ("stable") half-life still saves as `.csv`.
 pub fn write_json(library: &NuclideLibrary) -> Result<String, FormatError> {
-    Ok(serde_json::to_string_pretty(&Tagged::new(
-        JSON_FORMAT_TAG,
-        library,
-    ))?)
+    for nuclide in library.iter() {
+        let mut fields = vec![
+            ("half-life", nuclide.half_life_seconds, " s"),
+            ("uncertainty", nuclide.uncertainty_percent, " %"),
+        ];
+        for peak in &nuclide.peaks {
+            fields.push(("line energy", peak.energy, " keV"));
+            fields.push(("line yield", peak.yield_percent, " %"));
+        }
+        if let Some((field, value, unit)) = fields
+            .into_iter()
+            .find(|(_, value, _)| crate::not_finite(*value).is_some())
+        {
+            let stable = if field == "half-life" {
+                ", or give a stable nuclide a half-life of 0"
+            } else {
+                ""
+            };
+            return Err(FormatError::invalid(
+                format!("library entry {} (not saved)", nuclide.name),
+                format!(
+                    "{field} {value}{unit} is not a finite number, which a JSON library cannot \
+                     hold (it would not open again); save it as .csv{stable}"
+                ),
+            ));
+        }
+    }
+    crate::readable(
+        serde_json::to_string_pretty(&Tagged::new(JSON_FORMAT_TAG, library))?,
+        read_json,
+    )
 }
 
 /// Parses a JSON library.
@@ -125,6 +158,18 @@ pub fn read_csv(text: &str) -> Result<NuclideLibrary, FormatError> {
             .get(energy_index + 1)
             .and_then(|value| value.parse().ok())
             .unwrap_or(0.0);
+        // A line's energy or yield that is NaN or infinite means nothing and
+        // could not be saved as JSON, so it is refused here, where it enters.
+        // The half-life is not: infinity is the library's "stable", and NaN
+        // is a library mistake the analysis names.
+        for (what, value) in [("energy", energy), ("yield", yield_percent)] {
+            if !value.is_finite() {
+                return Err(FormatError::invalid(
+                    format!("library row {}", number + 1),
+                    format!("{what} {value} is not a finite number"),
+                ));
+            }
+        }
         let mut peak = LibraryPeak::new(energy, yield_percent);
         if let Some(code) = fields.get(energy_index + 2)
             && let Some(kind) = code.chars().next().and_then(PhotonKind::from_code)
