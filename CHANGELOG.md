@@ -21,6 +21,27 @@
 - A `.Chn` of a count with no start date stores binary zeros there, as
   ORTEC's file manual has it, instead of spaces.
 
+**A saved count is the count the detector finished (2026-11-08).**
+- A STOP now reads the spectrum the detector stopped at before it reports
+  stopped, so a SAVE straight after STOP (a job's `STOP` / `SAVE`) holds the
+  whole count, not the reading from up to half a second before. If that read
+  fails three times, the STOP says so ("the detector stopped, but its final
+  spectrum could not be read") and a job stops before its SAVE.
+- When the spectrum read fails (`SHOW_DATA` answers an error) the reading is
+  set aside instead of ending a job's WAIT on the spectrum before it. The
+  header says "not updating - last good reading" meanwhile, each poll tries
+  again, and if the spectrum still cannot be read after 20 tries the job stops
+  and says why, without saving. A 0.2.4 job could save 2 s of a 3 s count
+  and report "job finished".
+- Spectrum lengths that keep changing (the Windows ORTEC-library road) no
+  longer end a WAIT on an older spectrum, however many reads in a row they
+  change for.
+- A network detector whose reply came back after the timeout reconnects on
+  its next command. Before, every later reply was taken for the one after it,
+  until the detector was removed and added again.
+- Regions of interest marked on the detector in MAESTRO are still not read
+  into MantaRay; mark them in MantaRay (or recall a `.Roi` file).
+
 **Bias and coarse gain wait for Apply (2026-11-08).** In MCB Properties, a
 change to the high voltage or the coarse gain is no longer sent as it is made,
 as 0.2.4 did: nothing goes to the detector until Apply is pressed, and the tab
