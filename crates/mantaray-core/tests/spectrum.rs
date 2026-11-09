@@ -100,3 +100,33 @@ fn add_counts_accumulates() {
     assert_eq!(s.counts(3), 5);
     assert_eq!(s.total_counts(), 7);
 }
+
+/// The 926's two counters latch apart, so a finished count can read a live
+/// time a tick past its real time (bench 11/8: RT 9.98, LT 10.00). Dead time
+/// cannot be negative: it shows 0 %, and the stored times are left as read.
+#[test]
+fn live_time_past_real_time_is_zero_dead_time() {
+    let mut s = Spectrum::from_counts(vec![100; 10]);
+    s.live_time = 10.00;
+    s.real_time = 9.98;
+    let dead = s.dead_time_percent().unwrap();
+    assert_eq!(dead.to_bits(), 0.0f64.to_bits(), "dead time {dead}");
+    assert_eq!((s.live_time, s.real_time), (10.00, 9.98));
+    // Equal times are 0 %, not -0 %.
+    s.live_time = 9.98;
+    assert_eq!(s.dead_time_percent().unwrap().to_bits(), 0.0f64.to_bits());
+}
+
+/// A dead time read from an instrument is shown through the same rule.
+#[test]
+fn a_negative_dead_time_reading_is_shown_as_zero() {
+    assert_eq!(
+        mantaray_core::shown_dead_time(-0.2).to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(
+        mantaray_core::shown_dead_time(-0.0).to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(mantaray_core::shown_dead_time(12.5), 12.5);
+}

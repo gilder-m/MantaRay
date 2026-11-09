@@ -58,7 +58,7 @@ pub use quant::{
 };
 pub use roi::{Roi, RoiSet};
 pub use settings::CalculationSettings;
-pub use spectrum::{AcquisitionMode, Spectrum};
+pub use spectrum::{AcquisitionMode, Spectrum, shown_dead_time};
 pub use undo::{DEFAULT_CAPACITY as UNDO_CAPACITY, Snapshot, UndoStack};
 
 /// Conversion constant between the standard deviation and the full width at

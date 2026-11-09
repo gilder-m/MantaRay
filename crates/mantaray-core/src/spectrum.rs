@@ -198,11 +198,18 @@ impl Spectrum {
     }
 
     /// Dead time as a percentage of the real time, when both times are known.
+    ///
+    /// Never below 0 %: the 926's live and real counters latch apart, so a
+    /// finished count can read a live time a tick past its real time (RT 9.98,
+    /// LT 10.00 on the bench), which computed to -0.20 %. The stored times are
+    /// left exactly as read.
     pub fn dead_time_percent(&self) -> Option<f64> {
         if self.real_time <= 0.0 {
             return None;
         }
-        Some((1.0 - self.live_time / self.real_time) * 100.0)
+        Some(shown_dead_time(
+            (1.0 - self.live_time / self.real_time) * 100.0,
+        ))
     }
 
     /// Total count rate over the live time, in counts per second.
@@ -271,4 +278,12 @@ impl Spectrum {
     pub fn as_f64(&self) -> Vec<f64> {
         self.channels.iter().map(|c| *c as f64).collect()
     }
+}
+
+/// A dead-time percentage as it is shown: a reading below zero, or a negative
+/// zero, is 0 %. Used for the instrument's own reading as well as for
+/// [`Spectrum::dead_time_percent`]. NaN stays NaN, so a reading that is broken
+/// is never shown as a healthy 0 %.
+pub fn shown_dead_time(percent: f64) -> f64 {
+    if percent <= 0.0 { 0.0 } else { percent }
 }

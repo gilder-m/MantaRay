@@ -5050,7 +5050,7 @@ impl App {
                 source: window_title,
                 counting: status.map(|status| status.active).unwrap_or(false),
                 dead_time: status
-                    .map(|status| status.dead_time_percent)
+                    .map(|status| mantaray_core::shown_dead_time(status.dead_time_percent))
                     .or_else(|| spectrum.dead_time_percent()),
                 active: *active == Some(index),
                 maximized: is_maximized,

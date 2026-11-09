@@ -1553,7 +1553,10 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             Some(status) => (
                 format!("{:.2}", status.real_time),
                 format!("{:.2}", status.live_time),
-                format!("{:.2} %", status.dead_time_percent),
+                format!(
+                    "{:.2} %",
+                    mantaray_core::shown_dead_time(status.dead_time_percent)
+                ),
             ),
             None => match spectrum {
                 Some(spectrum) => (
@@ -1579,7 +1582,7 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             // A small gauge, coloured like the header's dead-time readout, so a
             // stressed detector is visible at a glance from across the room.
             let fraction = match &status {
-                Some(status) => Some(status.dead_time_percent),
+                Some(status) => Some(mantaray_core::shown_dead_time(status.dead_time_percent)),
                 None => app
                     .active_spectrum()
                     .and_then(|spectrum| spectrum.dead_time_percent()),
@@ -2983,7 +2986,13 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             ("Channels", identity.channels.to_string()),
                             ("Real time", format!("{:.2} s", status.real_time)),
                             ("Live time", format!("{:.2} s", status.live_time)),
-                            ("Dead time", format!("{:.2} %", status.dead_time_percent)),
+                            (
+                                "Dead time",
+                                format!(
+                                    "{:.2} %",
+                                    mantaray_core::shown_dead_time(status.dead_time_percent)
+                                ),
+                            ),
                             ("Input rate", format!("{:.0} cps", status.input_count_rate)),
                             ("Stored rate", format!("{:.0} cps", status.total_count_rate)),
                             (
@@ -5527,7 +5536,10 @@ fn dashboard_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
                         ui.label(state);
                         ui.label(format!("{:.1}", tile.live_time));
                         ui.label(format!("{:.1}", tile.real_time));
-                        ui.label(format!("{:.2}", tile.dead_time_percent));
+                        ui.label(format!(
+                            "{:.2}",
+                            mantaray_core::shown_dead_time(tile.dead_time_percent)
+                        ));
                         ui.label(format!("{:.0}", tile.count_rate));
                         ui.end_row();
                     }

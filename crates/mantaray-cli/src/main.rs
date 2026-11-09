@@ -790,7 +790,10 @@ fn acquire(args: AcquireArgs) -> Result<()> {
     let status = detector.status();
     println!(
         "collected {} counts in {:.1} s live ({:.1} s real, {:.2} % dead)",
-        status.total_counts, status.live_time, status.real_time, status.dead_time_percent
+        status.total_counts,
+        status.live_time,
+        status.real_time,
+        mantaray_core::shown_dead_time(status.dead_time_percent)
     );
 
     let mut spectrum = detector.spectrum().clone();
