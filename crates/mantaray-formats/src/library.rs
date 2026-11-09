@@ -45,7 +45,8 @@ const JSON_NEWEST: u32 = 1;
 ///
 /// A number JSON cannot hold (NaN or infinity, written as `null` and never
 /// read again) is refused, naming the nuclide and the field. CSV holds them
-/// as text, so an infinite ("stable") half-life still saves as `.csv`.
+/// as text, so an infinite ("stable") half-life still saves as `.csv`; a
+/// line energy or yield has to be a number in either format.
 pub fn write_json(library: &NuclideLibrary) -> Result<String, FormatError> {
     for nuclide in library {
         let mut fields = vec![
@@ -60,16 +61,19 @@ pub fn write_json(library: &NuclideLibrary) -> Result<String, FormatError> {
             .into_iter()
             .find(|(_, value, _)| crate::not_finite(*value).is_some())
         {
-            let stable = if field == "half-life" {
-                ", or give a stable nuclide a half-life of 0"
-            } else {
-                ""
+            // Only advice that is true: the CSV reader keeps a non-finite
+            // half-life or uncertainty, but refuses such a line energy or
+            // yield (d293cb8), so .csv is no way out for those (Lucius c1).
+            let advice = match field {
+                "half-life" => "save it as .csv, or give a stable nuclide a half-life of 0",
+                "uncertainty" => "save it as .csv, or give it a number",
+                _ => "give the line a number, or remove it",
             };
             return Err(FormatError::invalid(
                 format!("library entry {} (not saved)", nuclide.name),
                 format!(
                     "{field} {value}{unit} is not a finite number, which a JSON library cannot \
-                     hold (it would not open again); save it as .csv{stable}"
+                     hold (it would not open again); {advice}"
                 ),
             ));
         }
