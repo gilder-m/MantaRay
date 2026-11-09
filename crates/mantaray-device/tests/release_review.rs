@@ -164,3 +164,39 @@ fn one_whole_fetch_after_a_flap_lands_at_once() {
     assert_whole(&mcb, 1000.0);
     assert!(mcb.reading_untrusted().is_none());
 }
+
+/// Lengths that never agree twice are set aside once, not forever: the
+/// readings go on (a WAIT can still end), and the spectrum keeps the clocks of
+/// the channels it holds.
+#[test]
+fn a_run_of_flaps_is_set_aside_once_and_keeps_clocks_with_channels() {
+    let rig = Rig::new(16);
+    let mut mcb = counting(&rig, 1000.0, 60.0);
+    advance(&mut mcb, 0.5).expect("poll");
+    let landed = mcb.spectrum().live_time;
+    let before = mcb.readings();
+    for reply in [
+        "DATA 8 1 1 1 1 1 1 1 1",
+        "DATA 4 1 1 1 1",
+        "DATA 8 1 1 1 1 1 1 1 1",
+    ] {
+        rig.fault(Fault::Reply {
+            verb: "SHOW_DATA".into(),
+            reply: reply.into(),
+            count: 1,
+            execute: true,
+        });
+        advance(&mut mcb, 0.5).expect("poll");
+    }
+    assert_eq!(
+        mcb.readings(),
+        before + 2,
+        "only the first flap is set aside"
+    );
+    assert_eq!(mcb.spectrum().len(), 16);
+    assert!((mcb.spectrum().live_time - landed).abs() < 1e-9);
+    assert_whole(&mcb, 1000.0);
+    // The status says where the instrument is; the spectrum, where its
+    // counts were read.
+    assert!(mcb.status().live_time > landed);
+}

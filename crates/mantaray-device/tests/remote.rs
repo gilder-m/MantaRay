@@ -951,8 +951,9 @@ fn a_courier_whose_thread_died_reports_a_lost_connection() {
 /// each disagreement started it from zeros, so the window flashed empty and
 /// full, over and over: seen on the bench as the program clearing the count.
 /// A mirror holding counts now believes a new length only when two fetches
-/// in a row agree on it; the flap costs its own channels and nothing else -
-/// its clocks still land.
+/// in a row agree on it; the flap costs that one fetch, set aside whole, so
+/// its clocks never sit beside counts older than they are (release review
+/// S2).
 #[test]
 fn a_flapping_channel_count_does_not_clear_the_mirror() {
     let mut remote = connect_scripted(&[
@@ -987,12 +988,15 @@ fn a_flapping_channel_count_does_not_clear_the_mirror() {
         vec![5, 5, 5, 5],
         "a one-fetch flap must not rebuild the mirror"
     );
-    // ...while the flapped fetch's clocks still count.
-    assert!((remote.status().real_time - 2.0).abs() < 1e-9);
+    // ...and its clocks with them: the flapped fetch is set aside whole.
+    assert!((remote.status().real_time - 1.0).abs() < 1e-9);
+    assert!((remote.spectrum().live_time - 1.0).abs() < 1e-9);
 
     // The whole read after it lands as if nothing happened.
     remote.poll(1.0).expect("poll through the whole read");
     assert_eq!(remote.spectrum().channels, vec![6, 6, 6, 6]);
+    assert!((remote.status().real_time - 3.0).abs() < 1e-9);
+    assert!((remote.spectrum().live_time - 3.0).abs() < 1e-9);
 }
 
 /// A length change that repeats is real, and is adopted - once.

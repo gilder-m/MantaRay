@@ -77,6 +77,9 @@ pub struct RemoteMcb {
     /// A channel count one fetch declared that the mirror has not believed
     /// yet - see [`Self::believes`].
     pending_length: Option<usize>,
+    /// Whether the last fetch was a held one (a new length not yet
+    /// believed), so a run of them is set aside once, never forever.
+    held_last: bool,
     /// The pause between the status reads that confirm a STOP
     /// ([`CONFIRM_STEP`] unless a test or a slow adapter sets another).
     confirm_step: std::time::Duration,
@@ -291,6 +294,7 @@ impl RemoteMcb {
             freshened: true,
             scratch: Vec::new(),
             pending_length: None,
+            held_last: false,
             confirm_step: CONFIRM_STEP,
             untrusted: None,
             readings: 0,
@@ -613,8 +617,8 @@ impl RemoteMcb {
     /// zeros as zeros loses nothing - which is what lets connection and the
     /// fetch after CLEAR size themselves immediately. A mirror holding counts
     /// adopts a new length only when two fetches in a row agree on it; a
-    /// one-fetch flap keeps the spectrum on screen and costs that fetch's
-    /// channels alone.
+    /// one-fetch flap keeps the spectrum on screen and costs that one fetch
+    /// (see [`Self::integrate`]).
     fn believes(&mut self, count: usize) -> bool {
         self.spectrum.total_counts() == 0 || self.pending_length.replace(count) == Some(count)
     }
@@ -625,6 +629,35 @@ impl RemoteMcb {
     /// stay a courier: it moves bytes, and what the bytes mean - including
     /// an `ERR` where an answer should be - is decided on the caller's side.
     fn integrate(&mut self, fetched: Fetched) -> Result<(), DeviceError> {
+        // The spectrum first, though its errors are said after the status
+        // is worked in. A fetch whose channels the mirror holds back (a new
+        // length, not yet believed) is set aside whole: status, clocks and
+        // all. Taking its clocks without its channels left the spectrum's
+        // counts half a second older than the live time beside them, and its
+        // idle status ended a WAIT on exactly that spectrum, which a job then
+        // saved (release review S2). The next fetch decides. Only the first
+        // of a run of them, though: lengths that never agree twice must not
+        // stop the readings, so the rest are worked in with the channels and
+        // the spectrum's clocks both kept from the last fetch that landed.
+        let parsed = self.parse_data(&fetched.data);
+        let held = matches!(parsed, Ok(count)
+            if count > 0 && self.spectrum.len() != count && !self.believes(count));
+        if held && !self.held_last {
+            self.held_last = true;
+            if crate::journal::on() {
+                crate::journal::line(&format!(
+                    "d{}: fetch: count={} | mirror len={} sum={} | set aside: one fetch of a \
+                     new length",
+                    self.identity.number,
+                    self.scratch.len(),
+                    self.spectrum.len(),
+                    self.spectrum.total_counts(),
+                ));
+            }
+            return Ok(());
+        }
+        self.held_last = held;
+
         // A status reply that is not a status line with the flag and both
         // clocks (an ERR, another command's reply, a slipped line) is not
         // believed: nothing is invented, the display keeps the last good
@@ -662,7 +695,80 @@ impl RemoteMcb {
             }
         }
 
-        let data = checked(fetched.data)?;
+        let count = parsed?;
+        // What the mirror did with this fetch, for the journal: the bench
+        // that misbehaves is the only machine that can say what its fetches
+        // actually carried, and this line is how it says it.
+        let mut verdict = "no channels";
+        if count > 0 {
+            verdict = "landed";
+            if held {
+                verdict = "held: another fetch of a new length";
+            } else if self.spectrum.len() != count {
+                // The instrument's conversion gain changed underneath us.
+                // The counts are new, but whose spectrum this is -
+                // detector, calibration, start date - is not.
+                let mut resized = Spectrum::new(count);
+                resized.copy_descriptors_from(&self.spectrum);
+                self.spectrum = resized;
+                verdict = "adopted a new length";
+            }
+            // Only a fetch the mirror's length agrees with lands; a held
+            // fetch's channels are dropped.
+            if self.spectrum.len() == count {
+                self.spectrum.channels.copy_from_slice(&self.scratch);
+                self.pending_length = None;
+            }
+        }
+        if crate::journal::on() {
+            let sum: u64 = self.scratch.iter().sum();
+            crate::journal::line(&format!(
+                "d{}: fetch: count={count} sum={sum} rt={:.2} lt={:.2} active={} total={} | \
+                 mirror len={} sum={} | {verdict}",
+                self.identity.number,
+                self.status.real_time,
+                self.status.live_time,
+                self.status.active,
+                self.status.total_counts,
+                self.spectrum.len(),
+                self.spectrum.total_counts(),
+            ));
+        }
+        // The spectrum's clocks go with its channels: a held fetch's clocks
+        // are not the ones its counts were read at.
+        if !held {
+            self.spectrum.real_time = self.status.real_time;
+            self.spectrum.live_time = self.status.live_time;
+        }
+        // A count already running when this connected has no start to read.
+        // The instrument keeps no measurement date of its own, and the one
+        // call that would give it - `MIOGetStartTime` - exists only in ORTEC's
+        // Windows library, so nothing on this road can be asked. Closing the
+        // window and opening it again therefore lost the date outright, and
+        // every file written afterwards carried none.
+        //
+        // The real-time clock is what survives, and it advances only while the
+        // run does, so the run began that many seconds ago. Two limits, both
+        // deliberate. Only while it is still counting: an idle instrument
+        // holding this morning's spectrum would otherwise be dated to this
+        // minute, which is a worse answer than none. And only into a gap - a
+        // start this process watched happen is the real one and is never
+        // overwritten. A run stopped and resumed reads late by however long it
+        // stood paused, which is the residual error and is the reason this is
+        // a reconstruction rather than a reading.
+        //
+        // The same rule dates a count this process started: START gives a
+        // provisional date, and the first reading that shows it counting
+        // replaces it, so a detector slow to begin is dated when it began.
+        // Both are [`Self::date_start`], called on the believed status above.
+        self.freshened = true;
+        Ok(())
+    }
+
+    /// Parses a `DATA <n> <count>...` reply into the scratch; the channel
+    /// count it declares.
+    fn parse_data(&mut self, data: &str) -> Result<usize, DeviceError> {
+        let data = checked(data.to_string())?;
         let mut words = data.split_whitespace();
         if words.next() != Some("DATA") {
             return Err(DeviceError::Communication {
@@ -704,71 +810,7 @@ impl RemoteMcb {
                 ),
             });
         }
-        // What the mirror did with this fetch, for the journal: the bench
-        // that misbehaves is the only machine that can say what its fetches
-        // actually carried, and this line is how it says it.
-        let mut verdict = "no channels";
-        if count > 0 {
-            verdict = "landed";
-            if self.spectrum.len() != count {
-                if self.believes(count) {
-                    // The instrument's conversion gain changed underneath us.
-                    // The counts are new, but whose spectrum this is -
-                    // detector, calibration, start date - is not.
-                    let mut resized = Spectrum::new(count);
-                    resized.copy_descriptors_from(&self.spectrum);
-                    self.spectrum = resized;
-                    verdict = "adopted a new length";
-                } else {
-                    verdict = "held: one fetch of a new length";
-                }
-            }
-            // Only a fetch the mirror's length agrees with lands; a flap's
-            // channels are dropped, and its clocks and status still count.
-            if self.spectrum.len() == count {
-                self.spectrum.channels.copy_from_slice(&self.scratch);
-                self.pending_length = None;
-            }
-        }
-        if crate::journal::on() {
-            let sum: u64 = self.scratch.iter().sum();
-            crate::journal::line(&format!(
-                "d{}: fetch: count={count} sum={sum} rt={:.2} lt={:.2} active={} total={} | \
-                 mirror len={} sum={} | {verdict}",
-                self.identity.number,
-                self.status.real_time,
-                self.status.live_time,
-                self.status.active,
-                self.status.total_counts,
-                self.spectrum.len(),
-                self.spectrum.total_counts(),
-            ));
-        }
-        self.spectrum.real_time = self.status.real_time;
-        self.spectrum.live_time = self.status.live_time;
-        // A count already running when this connected has no start to read.
-        // The instrument keeps no measurement date of its own, and the one
-        // call that would give it - `MIOGetStartTime` - exists only in ORTEC's
-        // Windows library, so nothing on this road can be asked. Closing the
-        // window and opening it again therefore lost the date outright, and
-        // every file written afterwards carried none.
-        //
-        // The real-time clock is what survives, and it advances only while the
-        // run does, so the run began that many seconds ago. Two limits, both
-        // deliberate. Only while it is still counting: an idle instrument
-        // holding this morning's spectrum would otherwise be dated to this
-        // minute, which is a worse answer than none. And only into a gap - a
-        // start this process watched happen is the real one and is never
-        // overwritten. A run stopped and resumed reads late by however long it
-        // stood paused, which is the residual error and is the reason this is
-        // a reconstruction rather than a reading.
-        //
-        // The same rule dates a count this process started: START gives a
-        // provisional date, and the first reading that shows it counting
-        // replaces it, so a detector slow to begin is dated when it began.
-        // Both are [`Self::date_start`], called on the believed status above.
-        self.freshened = true;
-        Ok(())
+        Ok(count)
     }
 }
 
