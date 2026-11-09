@@ -1,0 +1,91 @@
+{
+  "name": "lab-check-sources",
+  "nuclides": [
+    {
+      "name": "Am-241",
+      "half_life_seconds": 13651000000.0,
+      "uncertainty_percent": 0.3,
+      "flags": {
+        "thermal_neutron_activation": false,
+        "fast_neutron_activation": false,
+        "fission_product": false,
+        "naturally_occurring": false,
+        "photon_reaction": false,
+        "charged_particle": false,
+        "no_mda": false,
+        "not_in_total": false
+      },
+      "peaks": [
+        {
+          "energy": 59.5409,
+          "yield_percent": 35.92,
+          "photon": "Gamma",
+          "key_line": true,
+          "not_in_average": false
+        }
+      ]
+    },
+    {
+      "name": "Cs-137",
+      "half_life_seconds": 949250000.0,
+      "uncertainty_percent": 0.2,
+      "flags": {
+        "thermal_neutron_activation": false,
+        "fast_neutron_activation": false,
+        "fission_product": true,
+        "naturally_occurring": false,
+        "photon_reaction": false,
+        "charged_particle": false,
+        "no_mda": false,
+        "not_in_total": false
+      },
+      "peaks": [
+        {
+          "energy": 32.19,
+          "yield_percent": 3.64,
+          "photon": "XRay",
+          "key_line": false,
+          "not_in_average": true
+        },
+        {
+          "energy": 661.657,
+          "yield_percent": 85.1,
+          "photon": "Gamma",
+          "key_line": true,
+          "not_in_average": false
+        }
+      ]
+    },
+    {
+      "name": "Co-60",
+      "half_life_seconds": 166344000.0,
+      "uncertainty_percent": 0.1,
+      "flags": {
+        "thermal_neutron_activation": true,
+        "fast_neutron_activation": false,
+        "fission_product": false,
+        "naturally_occurring": false,
+        "photon_reaction": false,
+        "charged_particle": false,
+        "no_mda": false,
+        "not_in_total": false
+      },
+      "peaks": [
+        {
+          "energy": 1173.228,
+          "yield_percent": 99.85,
+          "photon": "Gamma",
+          "key_line": true,
+          "not_in_average": false
+        },
+        {
+          "energy": 1332.492,
+          "yield_percent": 99.9826,
+          "photon": "Gamma",
+          "key_line": true,
+          "not_in_average": false
+        }
+      ]
+    }
+  ]
+}
