@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.5 (2026-11-09)
 
 **A failed save no longer costs the file already there (2026-11-08).** Every
 save MantaRay makes (spectra in every format, libraries, regions,
@@ -117,8 +117,8 @@ Unit-tested with scripted adapters; not yet run on Windows hardware.
   good reading was saved without a word.
 - When the spectrum read fails (`SHOW_DATA` answers an error) the reading is
   set aside instead of ending a job's WAIT on the spectrum before it. The
-  header says "not updating - last good reading" meanwhile, each poll tries
-  again, and if the spectrum still cannot be read after 20 tries the job stops
+  window says it is not updating meanwhile (see Screen fixes), each poll
+  tries again, and if the spectrum still cannot be read after 20 tries the job stops
   and says why, without saving. A 0.2.4 job could save 2 s of a 3 s count
   and report "job finished".
 - A spectrum that comes back empty (`DATA 0`) beside one with channels is a
@@ -170,7 +170,7 @@ sent the moment it is clicked, as in 0.2.4.
 - A multi-line description is written on one line in an ASCII `.txt`, so
   the channels after it no longer shift when it is read back.
 
-**Screen fixes for 0.2.5 (2026-11-08).**
+**Screen fixes (2026-11-08).**
 - A constant efficiency outside 0 to 1 is refused, with the command line's
   words ("5 is not an efficiency: give a fraction above 0 and at most 1 (5 % is
   0.05)"). A 5 typed for 5 % used to be cut to 1 and put in force, making every
