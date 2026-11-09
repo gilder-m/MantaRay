@@ -186,22 +186,61 @@ fn write_in_place(target: &Path, fill: impl FnOnce(&mut File) -> io::Result<()>)
 }
 
 /// The file a symbolic link points at, or `path` itself.
+///
+/// A link to a file not there yet cannot be canonicalized, and replacing the
+/// link's own path put a plain file where the link was (Lucius a4); 0.2.4's
+/// in-place write made the file at the link's destination. Such a link is
+/// read hop by hop instead (a relative one from its own folder), at most as
+/// many hops as Linux follows.
 fn follow_link(path: &Path) -> PathBuf {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    /// Linux's MAXSYMLINKS.
+    const HOPS: usize = 40;
+    let mut at = path.to_path_buf();
+    for _ in 0..HOPS {
+        match fs::symlink_metadata(&at) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if let Ok(real) = fs::canonicalize(&at) {
+                    return real;
+                }
+                let Ok(next) = fs::read_link(&at) else {
+                    return at;
+                };
+                at = match at.parent() {
+                    Some(folder) if next.is_relative() => folder.join(next),
+                    _ => next,
+                };
+            }
+            _ => return at,
         }
-        _ => path.to_path_buf(),
     }
+    at
 }
 
 /// A new, empty temporary file beside the target, named so it cannot be
 /// mistaken for a finished one and cannot collide with another save.
+///
+/// The name is the target's with a dot before and `.<pid>-<n>.part` after,
+/// unless that is longer than the filesystem allows for a name the target
+/// itself fits in (a 250-byte name saved on 0.2.4; Lucius a3): then it is
+/// `.mantaray-<pid>-<n>.part`.
 fn create_scratch(directory: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)> {
+    match create_scratch_named(directory, Some(name)) {
+        Err(error) if error.kind() == io::ErrorKind::InvalidFilename => {
+            create_scratch_named(directory, None)
+        }
+        other => other,
+    }
+}
+
+/// [`create_scratch`], named after `name` or, without one, after this program.
+fn create_scratch_named(
+    directory: &Path,
+    name: Option<&std::ffi::OsStr>,
+) -> io::Result<(PathBuf, File)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     loop {
         let mut scratch_name = std::ffi::OsString::from(".");
-        scratch_name.push(name);
+        scratch_name.push(name.unwrap_or_else(|| std::ffi::OsStr::new("mantaray")));
         scratch_name.push(format!(
             ".{}-{}.part",
             std::process::id(),
