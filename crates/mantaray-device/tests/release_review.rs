@@ -415,3 +415,48 @@ fn an_err_reply_on_the_final_fetch_is_still_retried() {
     assert!(mcb.reading_untrusted().is_none());
     assert_whole(&mcb, 1000.0);
 }
+
+/// DEV-1 (swarm 11/8, mantaray-test-gaps.md): a `DATA 0` answer to the final
+/// fetch after STOP is believed, so the mirror keeps its old channels beside
+/// the final clocks and a SAVE writes stale counts. An empty final DATA has
+/// to count as an unreadable fetch (tried again, then the STOP fails as F2).
+#[test]
+#[ignore = "DEV-1 open"]
+fn an_empty_final_fetch_is_not_believed() {
+    let rig = Rig::new(16);
+    let mut mcb = counting(&rig, 1000.0, 60.0);
+    advance(&mut mcb, 0.5).expect("poll");
+    rig.fault(Fault::Reply {
+        verb: "SHOW_DATA".into(),
+        reply: "DATA 0".into(),
+        count: 1,
+        execute: true,
+    });
+    mcb.stop().expect("the second try reads the final spectrum");
+    assert_eq!(mcb.spectrum().len(), 16);
+    assert_whole(&mcb, 1000.0);
+}
+
+/// DEV-2 (swarm 11/8): a readable status read made for a preset change (the
+/// gate's) clears the mark a failed SHOW_DATA set, though no spectrum has
+/// been read since. Only a fetch that lands may clear it.
+#[test]
+#[ignore = "DEV-2 open"]
+fn a_gate_status_read_does_not_clear_a_failed_fetch_mark() {
+    let rig = Rig::new(16);
+    let mut mcb = RemoteMcb::connect(rig.transport(), 1, "RIG").expect("connect");
+    mcb.set_confirm_step(Duration::ZERO);
+    rig.fault(Fault::Reply {
+        verb: "SHOW_DATA".into(),
+        reply: "ERR the adapter sent 0 of 64 bytes from 0x0000".into(),
+        count: 1,
+        execute: true,
+    });
+    advance(&mut mcb, 0.5).expect("poll");
+    assert!(mcb.reading_untrusted().is_some(), "the failed fetch marks it");
+    mcb.apply_presets(Presets::live(5.0)).expect("preset");
+    assert!(
+        mcb.reading_untrusted().is_some(),
+        "a status read is no spectrum read: the mark must stay until a fetch lands"
+    );
+}
