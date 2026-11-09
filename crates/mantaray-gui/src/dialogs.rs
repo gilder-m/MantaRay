@@ -3790,8 +3790,18 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 .collect();
             ui.horizontal(|ui| {
                 if ui.button("Interpolate through points").clicked() {
-                    app.efficiency = Some(EfficiencyCalibration::interpolated(points.clone()));
-                    actions.push(Action::Status("interpolated efficiency in force".into()));
+                    // A curve through nothing is no curve: it used to be said
+                    // to be in force anyway.
+                    if points.is_empty() {
+                        actions.push(Action::Status(
+                            "interpolated efficiency not in force: no point could be read as \
+                             two numbers (use a dot for decimals, e.g. 59.5 and 0.08)"
+                                .into(),
+                        ));
+                    } else {
+                        app.efficiency = Some(EfficiencyCalibration::interpolated(points.clone()));
+                        actions.push(Action::Status("interpolated efficiency in force".into()));
+                    }
                 }
                 if ui.button("Fit log-log polynomial").clicked() {
                     match EfficiencyCalibration::fit_log_log(&points, app.dialogs.efficiency_order)
@@ -5529,6 +5539,14 @@ fn dashboard_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
                 // side by side, one thread each, so a STOP's bounded confirm
                 // is paid once for them all, not once per detector.
                 let mut all = |verb: &str, act: fn(&mut AnyMcb) -> Result<(), DeviceError>| {
+                    // With none there, "on every detector" read as done.
+                    if app.detectors.is_empty() {
+                        actions.push(Action::Status(format!(
+                            "no detectors, so no acquisition was {}",
+                            verb.trim_start_matches("acquisition ")
+                        )));
+                        return;
+                    }
                     let refused: Vec<String> = std::thread::scope(|scope| {
                         let asked: Vec<_> = app
                             .detectors

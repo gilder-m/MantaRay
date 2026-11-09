@@ -629,3 +629,18 @@ fn interpolating_through_no_readable_point_is_not_in_force() {
     assert!(app.status.contains("not in force"), "{}", app.status);
     assert!(app.status.contains("no point"), "{}", app.status);
 }
+
+#[test]
+fn start_all_with_no_detectors_says_there_are_none() {
+    // It said "acquisition started on every detector" with none there.
+    let mut harness = bare_harness(mantaray_gui::dialogs::Dialog::Dashboard);
+    harness.get_by_label("Start all").click();
+    harness.run();
+    let status = harness.state().status.clone();
+    assert!(!status.contains("every detector"), "{status}");
+    assert!(status.contains("no detectors"), "{status}");
+    harness.get_by_label("Stop all").click();
+    harness.run();
+    let status = harness.state().status.clone();
+    assert!(status.contains("no detectors"), "{status}");
+}
