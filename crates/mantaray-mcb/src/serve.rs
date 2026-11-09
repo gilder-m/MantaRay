@@ -781,12 +781,16 @@ mod tests {
     /// hardware is.
     struct Bench {
         sent: std::cell::RefCell<Vec<String>>,
+        /// Answers for the coming flag reads, oldest first; counting once
+        /// they run out.
+        flag: std::cell::RefCell<std::collections::VecDeque<Result<bool, String>>>,
     }
 
     impl Bench {
         fn new() -> Self {
             Self {
                 sent: std::cell::RefCell::new(Vec::new()),
+                flag: std::cell::RefCell::new(std::collections::VecDeque::new()),
             }
         }
     }
@@ -810,8 +814,8 @@ mod tests {
                 .map(|channel| channel as u64 * 10)
                 .collect())
         }
-        fn is_counting(&self) -> bool {
-            true
+        fn is_counting(&self) -> Result<bool, String> {
+            self.flag.borrow_mut().pop_front().unwrap_or(Ok(true))
         }
         fn model(&self) -> String {
             "0926-001".into()
@@ -839,6 +843,55 @@ mod tests {
             reply,
             "RT=157851.12 LT=153272.64 DT=2.90% ICR=0 ACTIVE=1 TOTAL=0"
         );
+    }
+
+    /// Release review S1: a flag read that fails (a SHOW_ACTIVE that timed
+    /// out, or came back out of step) once printed ACTIVE=0 beside good
+    /// clocks, and one such line ended a job's WAIT mid-count. It says ERR,
+    /// which the far side already takes as "cannot tell".
+    #[test]
+    fn a_counting_flag_that_cannot_be_read_is_an_err_never_idle() {
+        let bench = Bench::new();
+        bench
+            .flag
+            .borrow_mut()
+            .push_back(Err("SHOW_ACTIVE timed out".into()));
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        let reply = session.handle("SHOW_STATUS");
+        assert!(reply.starts_with("ERR "), "{reply}");
+        assert!(!reply.contains("ACTIVE="), "{reply}");
+        assert!(reply.contains("SHOW_ACTIVE timed out"), "{reply}");
+    }
+
+    /// One failed flag read changes nothing after it: the next status is the
+    /// ordinary line, word for word.
+    #[test]
+    fn one_failed_flag_read_leaves_the_next_status_as_it_was() {
+        let bench = Bench::new();
+        bench.flag.borrow_mut().push_back(Err("timed out".into()));
+        let mut session = Session {
+            instrument: &bench,
+            total: 0,
+        };
+        assert!(session.handle("SHOW_STATUS").starts_with("ERR "));
+        assert_eq!(
+            session.handle("SHOW_STATUS"),
+            "RT=157851.12 LT=153272.64 DT=2.90% ICR=0 ACTIVE=1 TOTAL=0"
+        );
+    }
+
+    /// The USB roads' flag: a `$C` record, or no answer at all.
+    #[test]
+    fn the_flag_record_is_read_or_refused() {
+        assert_eq!(active_record(Ok("$C00001088".into())), Ok(true));
+        assert_eq!(active_record(Ok("$C00000087".into())), Ok(false));
+        assert!(active_record(Err("timed out".into())).is_err());
+        // One behind: SHOW_LIVE's reply where the flag's should be.
+        assert!(active_record(Ok("$G0007663632108".into())).is_err());
+        assert!(active_record(Ok(String::new())).is_err());
     }
 
     #[test]
@@ -930,8 +983,8 @@ mod tests {
             fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
                 Ok(vec![0; 4])
             }
-            fn is_counting(&self) -> bool {
-                false
+            fn is_counting(&self) -> Result<bool, String> {
+                Ok(false)
             }
             fn model(&self) -> String {
                 String::new()
@@ -988,8 +1041,8 @@ mod tests {
             fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
                 Ok(vec![0])
             }
-            fn is_counting(&self) -> bool {
-                true
+            fn is_counting(&self) -> Result<bool, String> {
+                Ok(true)
             }
             fn model(&self) -> String {
                 String::new()
@@ -1049,8 +1102,8 @@ mod tests {
             fn read(&self, _start: usize, _count: usize) -> Result<Vec<u64>, String> {
                 Ok(vec![0; 4])
             }
-            fn is_counting(&self) -> bool {
-                false
+            fn is_counting(&self) -> Result<bool, String> {
+                Ok(false)
             }
             fn model(&self) -> String {
                 "0926-001".into()
