@@ -411,7 +411,11 @@ impl ShapeCalibration {
 ///
 /// Adding points refits automatically; the table is capped at
 /// [`MAX_CALIBRATION_POINTS`].
+///
+/// Saved in the crash snapshot; a part missing from an older one reads as
+/// the empty table's.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CalibrationTable {
     points: Vec<CalibrationPoint>,
     units: String,

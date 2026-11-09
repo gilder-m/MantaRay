@@ -14,6 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use mantaray_core::{CalibrationTable, Spectrum};
+use mantaray_formats::FormatError;
+use mantaray_formats::version::{Probe, Tagged};
 use serde::{Deserialize, Serialize};
 
 use crate::viewmodel::DisplayState;
@@ -143,20 +145,50 @@ pub fn write(session: &Session) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_string(session)
+    let text = to_text(session)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let scratch = path.with_extension("json.part");
     std::fs::write(&scratch, text)?;
     std::fs::rename(&scratch, &path)
 }
 
+/// Format tag of the snapshot; older snapshots carry none and are read as this.
+pub const FORMAT_TAG: &str = "session/1";
+
+/// The newest major version of the snapshot layout this build reads.
+const NEWEST: u32 = 1;
+
+/// A snapshot as it is written: the session's own fields, with the format tag
+/// and writer stamp beside them, which versions before the tag ignore.
+pub fn to_text(session: &Session) -> serde_json::Result<String> {
+    serde_json::to_string(&Tagged::new(FORMAT_TAG, session))
+}
+
+/// Parses a snapshot, refusing one from a newer major format by name.
+pub fn parse(text: &str) -> Result<Session, FormatError> {
+    match Probe::check(text, "session", NEWEST)? {
+        1 => Ok(serde_json::from_str(text)?),
+        other => Err(FormatError::Unsupported {
+            detail: format!("session/{other}"),
+        }),
+    }
+}
+
 /// Reads the snapshot, if one was left behind.
 ///
-/// An unreadable one is treated as none: a snapshot from an older version, or
-/// a truncated file, is not worth an error message on start-up.
-pub fn read() -> Option<Session> {
-    let text = std::fs::read_to_string(path()).ok()?;
-    serde_json::from_str(&text).ok()
+/// An unreadable one is treated as none: a truncated file is not worth an
+/// error message on start-up. One from a newer mantaray is different - it is
+/// somebody's unsaved work that this build cannot read but the next one can -
+/// so it comes back as `Err` with the reason, for the caller to leave alone.
+pub fn read() -> Result<Option<Session>, String> {
+    let Ok(text) = std::fs::read_to_string(path()) else {
+        return Ok(None);
+    };
+    match parse(&text) {
+        Ok(session) => Ok(Some(session)),
+        Err(error @ FormatError::TooNew { .. }) => Err(error.to_string()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Removes the snapshot, which is what a clean exit does.

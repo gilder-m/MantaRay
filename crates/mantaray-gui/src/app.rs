@@ -984,6 +984,9 @@ pub struct App {
     autosaved_empty: bool,
     /// A snapshot found at start-up, waiting to be offered back.
     pub recovered: Option<crate::session::Session>,
+    /// Whether the snapshot on disk came from a newer mantaray, which this
+    /// build may neither offer back nor write over.
+    pub snapshot_from_newer: bool,
     /// How each detector's count has behaved while it ran, by detector number.
     pub stability: std::collections::HashMap<u16, crate::stability::StabilityLog>,
     /// Font size of the in-plot peak-information card.
@@ -1104,7 +1107,30 @@ impl App {
     /// back rather than restored silently. Silently would be worse: windows
     /// appearing unbidden is how somebody ends up working on the wrong data.
     pub fn look_for_unfinished_work(&mut self) {
-        self.recovered = crate::session::read().filter(|session| !session.is_empty());
+        self.offer_unfinished_work(crate::session::read());
+    }
+
+    /// Offers back what [`crate::session::read`] found.
+    ///
+    /// A snapshot from a newer mantaray cannot be offered, but it is still
+    /// somebody's unsaved work: it is kept, untouched, for that version to
+    /// reopen, and this run takes no snapshot of its own over it.
+    pub fn offer_unfinished_work(
+        &mut self,
+        found: Result<Option<crate::session::Session>, String>,
+    ) {
+        let found = match found {
+            Ok(found) => found,
+            Err(reason) => {
+                self.snapshot_from_newer = true;
+                self.status = format!(
+                    "unfinished work from a newer mantaray was kept on disk, untouched, and this \
+                     run saves no crash snapshot over it: {reason}"
+                );
+                return;
+            }
+        };
+        self.recovered = found.filter(|session| !session.is_empty());
         if let Some(session) = &self.recovered {
             let count = session.windows.len();
             self.status = format!(
@@ -1207,6 +1233,7 @@ impl App {
             last_autosave: Instant::now(),
             autosaved_empty: false,
             recovered: None,
+            snapshot_from_newer: false,
             stability: std::collections::HashMap::new(),
             peak_font: 11.0,
             default_format: "chn".into(),
@@ -1380,9 +1407,10 @@ impl App {
     ///
     /// Not while unfinished work is still being offered back: until that
     /// question is answered, the file is the only copy of it that would
-    /// survive this run ending badly too.
+    /// survive this run ending badly too. And never over a snapshot from a
+    /// newer mantaray, which this build cannot read and so cannot judge.
     pub fn may_replace_snapshot(&self) -> bool {
-        self.recovered.is_none()
+        self.recovered.is_none() && !self.snapshot_from_newer
     }
 
     /// The work in progress, as it would come back after a crash.

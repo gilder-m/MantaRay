@@ -49,7 +49,12 @@ pub const MIN_VIEW_WIDTH: usize = 8;
 pub const ZOOM_STEP: f64 = 1.2;
 
 /// What the expanded view shows and where the marker sits.
+///
+/// Saved in the crash snapshot, so a setting missing from an older one reads
+/// as its default rather than costing the spectrum it sits beside; restoring
+/// sets the length from the spectrum again.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplayState {
     /// Marker channel.
     pub marker: usize,
