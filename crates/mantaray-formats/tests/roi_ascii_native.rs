@@ -17,9 +17,9 @@ fn roi_file_stores_the_end_channel_exclusively() {
     // The manual's reader subtracts one from the stored end channel.
     let set = RoiSet::from_pairs([(10, 20)]);
     let bytes = roi::write(&set);
-    // Two i16 of header, then begin and end.
-    let begin = i16::from_le_bytes([bytes[4], bytes[5]]);
-    let end = i16::from_le_bytes([bytes[6], bytes[7]]);
+    // One i16 of header (ORTEC's -2), then begin and end.
+    let begin = i16::from_le_bytes([bytes[2], bytes[3]]);
+    let end = i16::from_le_bytes([bytes[4], bytes[5]]);
     assert_eq!(begin, 10);
     assert_eq!(end, 21, "stored end is one past the last channel");
 }

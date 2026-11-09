@@ -26,6 +26,31 @@ left a cut one. What changes for the operator:
 - A symbolic link is followed (also to a file not there yet) and survives; a
   file name too long for the temporary name still saves.
 
+**ORTEC file layouts, checked against the File Structure Manual (2026-11-08).**
+- `.Roi` region files have ORTEC's one-word header (-2) and end at -1.
+  0.2.4 wrote two header words (the count and a zero), so MAESTRO saw no
+  regions in them, and a MAESTRO `.Roi` read back as the gaps between its
+  regions. Both now read right; 0.2.4's `.Roi` files still open (a positive
+  header followed by a zero is only ever theirs).
+- A `.Chn` of an uncalibrated spectrum stores ORTEC's "uncalibrated" values
+  (energy 0, 1, 0 and FWHM 1, 0, 0) instead of zeros, and MAESTRO's own
+  uncalibrated `.Chn` now opens as uncalibrated, not as 1 keV per channel.
+  A spectrum really calibrated at exactly 0 + 1 keV/ch reads as uncalibrated
+  too, as it does in SpecUtils. A segment number of 0 is written as 1.
+- `.Spc` ACQTIM/ACQTI8 hold the acquisition start as a DECDAY date, not the
+  real time (an 1800 s count read as starting in December 1983). The sample
+  collection start and stop are left blank: they were the acquisition start,
+  the start date two bytes late, and nobody had entered them.
+- Real-format `.Spc` files (FILTYP 5, from GammaVision or CONVERT) open;
+  FILTYP 2 was a misreading and is refused.
+- An energy calibration in MeV or eV is stored in keV in `.Chn` and `.Spc`,
+  which have no units field (a MeV calibration used to reload 1000x off), and
+  in `.Spe`, whose `$MCA_CAL` SpecUtils reads only in keV. Units that are not
+  an energy are refused by name for `.Chn`/`.Spc` and kept in `.Spe`.
+- A `.Spe` description is written as one line that cannot be read as a
+  keyword: line breaks become spaces, and a leading `$` gets a space.
+- `.Spc` is listed as writable (`can_write`), as the save path has been.
+
 **ORTEC files read the same in MAESTRO (2026-11-08).**
 - A `.Spe` of a spectrum with a channel offset writes its `$DATA:` range as
   the first and the last channel (`100 1123` for 1024 channels from 100), as

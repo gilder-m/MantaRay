@@ -357,13 +357,18 @@ fn a_library_written_now_carries_its_format_and_writer() {
 //
 // ORTEC's layout has no room for a version or a stray field, and it is
 // MAESTRO's format, not ours to extend; the golden file pins what mantaray
-// reads and writes.
+// reads. 0.2.4 wrote a two-word header (count, 0) where ORTEC has one word,
+// so the file is still read, but is now written in ORTEC's layout: the same
+// pairs behind a single -2, with -1 to end them.
 
 #[test]
 fn a_v0_2_4_region_file_reads_back_exactly() {
     let set = roi::read(REGIONS).expect("the v0.2.4 region file opens");
     assert_eq!(set.to_pairs(), vec![(150, 229), (318, 344), (578, 596)]);
-    assert_eq!(roi::write(&set), REGIONS, "written byte for byte as before");
+    let mut ortec = (-2i16).to_le_bytes().to_vec();
+    ortec.extend_from_slice(&REGIONS[4..REGIONS.len() - 4]);
+    ortec.extend_from_slice(&(-1i16).to_le_bytes());
+    assert_eq!(roi::write(&set), ortec, "the same pairs, in ORTEC's layout");
     assert_eq!(
         set,
         RoiSet::from_pairs([(150, 229), (318, 344), (578, 596)])

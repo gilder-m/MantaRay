@@ -4,7 +4,7 @@
 //! |---|---|---|---|
 //! | `.Chn` | yes | yes | ORTEC integer binary, layout from the MAESTRO manual |
 //! | `.Spe` | yes | yes | IAEA/CTBTO ASCII |
-//! | `.Spc` | histogram only | no | see [`spc`] for why |
+//! | `.Spc` | histogram only | integer data, no regions | see [`spc`] |
 //! | `.Roi` | yes | yes | channel pairs |
 //! | `.txt`/`.asc` | yes | yes | TRANSLT-style ASCII dump |
 //! | `.json` | yes | yes | native, lossless |
@@ -28,6 +28,7 @@ pub mod nndc;
 pub mod roi;
 pub mod spc;
 pub mod spe;
+mod units;
 pub mod version;
 
 use std::path::Path;
@@ -208,7 +209,7 @@ impl SpectrumFormat {
 
     /// True when mantaray can write the format.
     pub fn can_write(&self) -> bool {
-        !matches!(self, Self::Spc | Self::List | Self::N42)
+        !matches!(self, Self::List | Self::N42)
     }
 }
 
@@ -468,6 +469,22 @@ pub fn text_notes(spectrum: &Spectrum, format: SpectrumFormat) -> Vec<String> {
                 "{name}: cut to {width} characters, the most a {kind} file holds"
             ));
         }
+        if format == SpectrumFormat::Spe && spe::one_line(text) != text {
+            notes.push(format!(
+                "{name}: saved on one line without a leading '$', so a .Spe reader cannot \
+                 take it for a keyword"
+            ));
+        }
+    }
+    if let Some(calibration) = &spectrum.energy_calibration
+        && units::in_kev(calibration).is_some()
+        && !calibration.units.trim().is_empty()
+        && !calibration.units.trim().eq_ignore_ascii_case("keV")
+    {
+        notes.push(format!(
+            "energy calibration: stored in keV, converted from {}",
+            calibration.units.trim()
+        ));
     }
     notes
 }
