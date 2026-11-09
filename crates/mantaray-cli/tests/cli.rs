@@ -263,6 +263,63 @@ fn analyse_refuses_an_efficiency_that_is_not_a_fraction() {
 }
 
 #[test]
+fn analyse_refuses_a_quantity_that_is_not_positive() {
+    // 0, a negative or NaN used to become 1 while the report still read
+    // Bq/kg: per-sample figures under a per-kilogram label.
+    let dir = workspace();
+    let path = dir.join("analyse-quantity.chn");
+    sample(&path);
+    for bad in ["0", "-2", "NaN", "inf", "abc"] {
+        let (stdout, stderr, ok) = run(&[
+            "analyse",
+            path.to_str().unwrap(),
+            "--library",
+            library_file().to_str().unwrap(),
+            "--efficiency",
+            "0.05",
+            "--quantity",
+            bad,
+            "--unit",
+            "kg",
+        ]);
+        assert!(!ok, "--quantity {bad} was accepted: {stdout}");
+        assert!(stderr.contains("sample quantity"), "{bad}: {stderr}");
+    }
+    // Without --quantity the activity is in plain Bq, as before.
+    let (stdout, stderr, ok) = run(&[
+        "analyse",
+        path.to_str().unwrap(),
+        "--library",
+        library_file().to_str().unwrap(),
+        "--efficiency",
+        "0.05",
+    ]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("Bq") && !stdout.contains("Bq/"), "{stdout}");
+}
+
+#[test]
+fn info_never_shows_a_negative_dead_time() {
+    // The 926 on the bench (11/8) ended a count at RT 9.98, LT 10.00.
+    let dir = workspace();
+    let path = dir.join("info-dead.chn");
+    let mut spectrum = mantaray_core::Spectrum::from_counts(vec![3; 64]);
+    spectrum.live_time = 10.0;
+    spectrum.real_time = 9.98;
+    mantaray_formats::save_spectrum(&spectrum, &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let (stdout, stderr, ok) = run(&["info", path.to_str().unwrap()]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("dead time 0.00 %"), "{stdout}");
+    assert!(!stdout.contains("-0."), "{stdout}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "info changed the file"
+    );
+}
+
+#[test]
 fn calibrate_fits_and_saves() {
     let dir = workspace();
     let path = dir.join("calibrate.chn");

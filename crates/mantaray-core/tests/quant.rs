@@ -2353,3 +2353,45 @@ fn an_efficiency_of_exactly_zero_is_no_efficiency_not_a_fault_and_not_a_measurem
         ]
     );
 }
+
+/// A sample quantity of 0, a negative one or NaN used to become 1 without a
+/// word while the column still read Bq/kg: per-sample figures labelled per
+/// kilogram. Now the label is dropped and a note says why.
+#[test]
+fn a_quantity_that_is_not_positive_is_not_reported_per_unit() {
+    let mut s = calibrated_spectrum();
+    let lib = NuclideLibrary::sample_for_tests();
+    s.rois.mark(Roi::new(650, 674));
+    for quantity in [0.0, -2.0, f64::NAN, f64::INFINITY] {
+        let mut opts = options();
+        opts.sample = SampleInfo {
+            quantity,
+            unit: "kg".into(),
+            ..SampleInfo::default()
+        };
+        let report = analyse(&s, &lib, &opts);
+        assert_eq!(report.activity_unit(), "Bq", "quantity {quantity}");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("sample quantity") && note.contains("not per kg")),
+            "quantity {quantity}: notes {:?}",
+            report.notes
+        );
+        assert!(mantaray_core::sample_quantity_problem(quantity).is_some());
+    }
+    // No quantity (1, no unit) is plain Bq with nothing said, as before.
+    let report = analyse(&s, &lib, &options());
+    assert_eq!(report.activity_unit(), "Bq");
+    assert!(
+        !report
+            .notes
+            .iter()
+            .any(|note| note.contains("sample quantity")),
+        "{:?}",
+        report.notes
+    );
+    assert!(mantaray_core::sample_quantity_problem(1.0).is_none());
+    assert!(mantaray_core::sample_quantity_problem(0.25).is_none());
+}

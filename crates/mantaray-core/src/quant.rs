@@ -47,6 +47,20 @@ pub fn bq_to_uci(bq: f64) -> f64 {
     bq / 37_000.0
 }
 
+/// Why `quantity` cannot be a sample quantity, or `None` when it can: it has
+/// to be a finite number above 0. "No quantity" is 1 with no unit, which is
+/// plain Bq. The command line and the interface refuse what this names; the
+/// analysis itself reports per sample, with a note, when it is given one.
+pub fn sample_quantity_problem(quantity: f64) -> Option<String> {
+    if quantity.is_finite() && quantity > 0.0 {
+        None
+    } else {
+        Some(format!(
+            "{quantity} is not a sample quantity: give a number above 0"
+        ))
+    }
+}
+
 /// What the sample is, for per-unit results and decay correction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SampleInfo {
@@ -366,14 +380,37 @@ pub fn analyse(
         .efficiency
         .as_ref()
         .is_some_and(|efficiency| !efficiency.is_empty());
-    let quantity = if options.sample.quantity > 0.0 {
-        options.sample.quantity
-    } else {
+    // A quantity that cannot divide (0, negative, NaN, infinite) used to become
+    // 1 while the column still read Bq/<unit>: per-sample figures under a
+    // per-unit label. They are still per sample, but now say so.
+    let bad_quantity = sample_quantity_problem(options.sample.quantity).is_some();
+    let quantity = if bad_quantity {
         1.0
+    } else {
+        options.sample.quantity
+    };
+    let sample_unit = if bad_quantity {
+        String::new()
+    } else {
+        options.sample.unit.clone()
     };
     let live_time = spectrum.live_time;
 
     let mut notes: Vec<String> = Vec::new();
+    if bad_quantity {
+        let given = options.sample.quantity;
+        let unit = options.sample.unit.trim();
+        notes.push(if unit.is_empty() {
+            format!(
+                "sample quantity {given} is not a number above 0: activities are not divided by it"
+            )
+        } else {
+            format!(
+                "sample quantity {given} {unit} is not a number above 0: activities are for the \
+                 whole sample, not per {unit}"
+            )
+        });
+    }
     let mut withheld: Vec<Withheld> = Vec::new();
     // Library nuclides that were not found and whose detection limit could not
     // be built, with the reason: one note for all of them, below.
@@ -526,7 +563,7 @@ pub fn analyse(
         nuclides,
         unidentified,
         has_efficiency,
-        sample_unit: options.sample.unit.clone(),
+        sample_unit,
         live_time,
         real_time: spectrum.real_time,
         notes,

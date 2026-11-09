@@ -3426,6 +3426,9 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                 "detection limits for absent nuclides",
             );
         });
+        if let Some(error) = app.sample_quantity_error() {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut app.dialogs.correct_during_count,
@@ -4552,6 +4555,9 @@ fn sample_dialog(app: &mut App, ctx: &egui::Context) {
             ui.add(egui::TextEdit::singleline(&mut app.sample.unit).desired_width(60.0))
                 .labelled_by(label);
         });
+        if let Some(error) = app.sample_quantity_error() {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         ui.horizontal(|ui| {
             let label = ui.label("Reference date").id;
             let field = ui

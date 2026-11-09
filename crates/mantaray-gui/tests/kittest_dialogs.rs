@@ -644,3 +644,78 @@ fn start_all_with_no_detectors_says_there_are_none() {
     let status = harness.state().status.clone();
     assert!(status.contains("no detectors"), "{status}");
 }
+
+/// The app holding one buffer spectrum, a library and no instrument.
+fn buffer_harness(spectrum: mantaray_core::Spectrum) -> Harness<'static, App> {
+    let mut app = App::headless();
+    app.library = mantaray_core::NuclideLibrary::sample_for_tests();
+    app.open_buffer("buffer.Spe".into(), spectrum, None);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+    harness
+        .ctx
+        .all_styles_mut(|style| style.animation_time = 0.0);
+    harness.run();
+    harness
+}
+
+/// A sample quantity of 0 or below is shown as wrong under the field, and
+/// Analyse refuses it instead of reporting per-sample figures per kilogram.
+#[test]
+fn a_sample_quantity_that_is_not_positive_is_refused_at_the_field() {
+    let mut spectrum = mantaray_core::Spectrum::new(1024);
+    spectrum.live_time = 600.0;
+    spectrum.real_time = 620.0;
+    let mut harness = buffer_harness(spectrum);
+    harness.state_mut().sample.unit = "kg".into();
+    harness
+        .state_mut()
+        .apply_action(Action::Show(Dialog::Analysis));
+    harness.run();
+    // Only what the dialog shows is counted: the status line is cleared first.
+    let shown = |harness: &mut Harness<'_, App>| {
+        harness.state_mut().status.clear();
+        harness.run();
+        harness
+            .query_all_by_label_contains("is not a sample quantity")
+            .count()
+    };
+    for bad in ["0", "-2"] {
+        type_into(&mut harness, "Sample quantity", bad);
+        assert!(shown(&mut harness) > 0, "{bad}: no error under the field");
+        harness.state_mut().analysis = None;
+        // The menu bar has an "Analyse" too; the dialog's button sends this.
+        harness.state_mut().apply_action(Action::Analyse);
+        harness.run();
+        let app = harness.state_mut();
+        assert!(app.analysis.is_none(), "{bad}: analysed anyway");
+        assert!(
+            app.status.contains("is not a sample quantity"),
+            "{bad}: status {:?}",
+            app.status
+        );
+    }
+    // No quantity: 1 and no unit, plain Bq, no error.
+    type_into(&mut harness, "Sample quantity", "1");
+    harness.state_mut().sample.unit.clear();
+    assert_eq!(shown(&mut harness), 0, "an error is shown for 1");
+    harness.state_mut().apply_action(Action::Analyse);
+    harness.run();
+    assert!(
+        harness.state_mut().analysis.is_some(),
+        "a good quantity analyses"
+    );
+}
+
+/// The bench 926 ended a count at RT 9.98, LT 10.00. No panel shows a
+/// negative dead time for it.
+#[test]
+fn live_time_past_real_time_never_shows_a_negative_dead_time() {
+    let mut spectrum = mantaray_core::Spectrum::new(1024);
+    spectrum.live_time = 10.0;
+    spectrum.real_time = 9.98;
+    let harness = buffer_harness(spectrum);
+    assert_eq!(harness.query_all_by_label_contains("-0.2").count(), 0);
+    assert!(harness.query_by_label_contains("0.00 %").is_some());
+}

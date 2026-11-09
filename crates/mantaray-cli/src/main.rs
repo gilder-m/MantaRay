@@ -106,8 +106,9 @@ enum Commands {
         /// Constant absolute efficiency, as a fraction (5 % is 0.05).
         #[arg(long, value_parser = efficiency_fraction)]
         efficiency: Option<f64>,
-        /// Sample quantity for per-unit results.
-        #[arg(long)]
+        /// Sample quantity for per-unit results, a number above 0; leave it
+        /// out for activity in plain Bq.
+        #[arg(long, value_parser = sample_quantity, allow_negative_numbers = true)]
         quantity: Option<f64>,
         /// Unit of the sample quantity.
         #[arg(long, default_value = "")]
@@ -399,6 +400,21 @@ fn efficiency_fraction(text: &str) -> Result<f64, String> {
         Err(format!(
             "{text} is not an efficiency: give a fraction above 0 and at most 1 (5 % is 0.05)"
         ))
+    }
+}
+
+/// Reads `--quantity`, which must be a number above 0.
+///
+/// Taken as given, 0, a negative number or NaN became 1 while the report still
+/// read Bq/<unit>: per-sample figures under a per-unit label.
+fn sample_quantity(text: &str) -> Result<f64, String> {
+    let hint = "leave out --quantity for activity in plain Bq";
+    let value: f64 = text.trim().parse().map_err(|_| {
+        format!("{text:?} is not a sample quantity: give a number above 0 ({hint})")
+    })?;
+    match mantaray_core::sample_quantity_problem(value) {
+        None => Ok(value),
+        Some(problem) => Err(format!("{problem} ({hint})")),
     }
 }
 

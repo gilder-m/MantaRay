@@ -54,7 +54,7 @@ pub use qa::{ControlLimits, QaChart, QaMetric, QaRecord, QaStatistics, QaStatus}
 pub use quant::{
     AnalysisOptions, Identification, LineResult, NuclideResult, PeakResult, QuantitativeReport,
     SampleInfo, Withheld, analyse, bq_to_uci, decay_during_acquisition, decay_to_reference,
-    one_line,
+    one_line, sample_quantity_problem,
 };
 pub use roi::{Roi, RoiSet};
 pub use settings::CalculationSettings;

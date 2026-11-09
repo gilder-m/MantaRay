@@ -2696,6 +2696,11 @@ impl App {
                     .into();
             return;
         }
+        // Refused, not quietly taken as 1 under a per-unit label.
+        if let Some(error) = self.sample_quantity_error() {
+            self.status = error;
+            return;
+        }
         // The spectrum and the library are borrowed, not cloned: cloning both
         // per click was sixteen thousand channels and every line of an
         // evaluated library copied to satisfy a borrow the analysis releases
@@ -3135,6 +3140,15 @@ impl App {
     /// Places a window at a rect on the next frame (the JOB `ZOOM:` command).
     pub fn place_window(&mut self, id: usize, rect: egui::Rect) {
         self.pending_place = Some((id, rect));
+    }
+
+    /// What is wrong with the sample quantity, as the Sample Description and
+    /// Nuclide analysis fields show it and Analyse refuses it; `None` when it
+    /// can divide an activity. No quantity is 1 with no unit (plain Bq).
+    pub fn sample_quantity_error(&self) -> Option<String> {
+        mantaray_core::sample_quantity_problem(self.sample.quantity).map(|problem| {
+            format!("{problem} (for activity in plain Bq, set it to 1 and leave the unit empty)")
+        })
     }
 
     /// Sets the sample's reference date from typed text (Sample Description).
