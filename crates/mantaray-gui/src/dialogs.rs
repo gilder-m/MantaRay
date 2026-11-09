@@ -451,6 +451,62 @@ fn significant_drag(value: &mut f64) -> egui::DragValue<'_> {
         .custom_parser(move |text| reparse(text, original))
 }
 
+/// Gives a widget with no label beside it a name of its own, for screen
+/// readers and for tests that find it by what it is.
+pub(crate) fn named(response: &egui::Response, name: &str) {
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_label(name));
+}
+
+/// Adds a slider named by the label `label`, number box and all.
+///
+/// A slider with no text of its own is two widgets - the bar and the number
+/// box egui draws beside it - and egui hands back only the bar, so the box
+/// would be read out as a bare "spin button". egui gives neither a handle to
+/// the other. Their ids follow from egui's own rule, though: the slider builds
+/// one row (a child of whatever it is added to) and allocates the bar, then
+/// the box, from that row's id. So the slider goes in a scope, whose ids are
+/// known, and the two are worked out from it and named.
+///
+/// Every id is checked against what egui actually drew before it is touched,
+/// so if egui's rule ever changes nothing is named by mistake: the box is
+/// simply left unnamed, and the test that walks every screen for unnamed
+/// controls says so. The scope is invisible, holding only the slider's row.
+fn named_slider(ui: &mut egui::Ui, slider: egui::Slider<'_>, label: egui::Id) -> egui::Response {
+    let mut first_child = None;
+    let scope = ui.scope(|ui| {
+        // The row a child Ui of this scope gets: egui's `Ui::new_child`.
+        first_child = Some(
+            ui.id()
+                .with(egui::IdSalt::new("child"))
+                .with(ui.unique_id().value().wrapping_add(1)),
+        );
+        ui.add(slider)
+    });
+    let ctx = ui.ctx();
+    let children = |id: egui::Id| {
+        ctx.accesskit_node_builder(id, |node| node.children().to_vec())
+            .unwrap_or_default()
+    };
+    let Some(row) =
+        first_child.filter(|row| children(scope.response.id).contains(&row.accesskit_id()))
+    else {
+        return scope.inner;
+    };
+    let drawn = children(row);
+    // The bar and then the box, in the order the row allocated them.
+    for step in 1..=2_u64 {
+        let widget = egui::Id::new(row.value().wrapping_add(step));
+        if drawn.contains(&widget.accesskit_id()) {
+            ctx.accesskit_node_builder(widget, |node| {
+                node.push_labelled_by(label.accesskit_id());
+            });
+        }
+    }
+    scope.inner
+}
+
 /// What such a field makes of its text, given the value it was showing.
 ///
 /// Text the formatter itself would have produced means nothing was typed, so
@@ -1395,6 +1451,8 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                     .hint_text("energy"),
             )
             .on_hover_text("jump to an energy: type keV and press Enter");
+        // No label beside it: the hint is the word it shows.
+        named(&goto, "energy");
         if goto.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             match app.dialogs.goto_input.trim().parse::<f64>() {
                 Ok(value) => {
@@ -1422,7 +1480,7 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
             ),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                egui::ComboBox::from_id_salt("detector-picker")
+                let picker = egui::ComboBox::from_id_salt("detector-picker")
                     .selected_text(detector_label)
                     .show_ui(ui, |ui| {
                         if ui.selectable_label(false, "Buffer").clicked() {
@@ -1434,7 +1492,8 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
                             }
                         }
                     });
-                ui.label(egui::RichText::new("detector").weak());
+                let label = ui.label(egui::RichText::new("detector").weak());
+                picker.response.labelled_by(label.id);
             },
         );
     });
@@ -1864,11 +1923,13 @@ pub fn status_sidebar(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         ui.separator();
         ui.heading("Simulation");
         ui.horizontal(|ui| {
-            ui.label("speed");
-            ui.add(
+            let label = ui.label("speed").id;
+            named_slider(
+                ui,
                 egui::Slider::new(&mut app.time_scale, 1.0..=200.0)
                     .logarithmic(true)
                     .suffix("x"),
+                label,
             );
         });
         ui.label("simulated seconds per real second");
@@ -4600,7 +4661,7 @@ fn list_range_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
 pub fn workspace_picker(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
     let mut actions = Vec::new();
     let mut chosen: Option<crate::workspace::Workspace> = None;
-    egui::ComboBox::from_id_salt("workspace")
+    let picker = egui::ComboBox::from_id_salt("workspace")
         .selected_text(&app.workspace.name)
         .width(120.0)
         .show_ui(ui, |ui| {
@@ -4639,6 +4700,8 @@ pub fn workspace_picker(app: &mut App, ui: &mut egui::Ui) -> Vec<Action> {
         })
         .response
         .on_hover_text("what is on screen, for the job in hand");
+    // Nothing beside it says what it is; the dialog it opens is "Workspace".
+    named(&picker, "Workspace");
     if let Some(workspace) = chosen {
         app.status = format!("{} workspace", workspace.name);
         app.workspace = workspace;
@@ -5708,15 +5771,17 @@ fn exit_dialog(app: &mut App, ctx: &egui::Context) {
 /// progress.
 fn isotope_check(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
-    ui.heading("Isotope");
+    let heading = ui.heading("Isotope").id;
 
     let mut look_up = false;
     ui.horizontal(|ui| {
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut app.isotope.typed)
-                .desired_width(96.0)
-                .hint_text("Cs-137"),
-        );
+        let field = ui
+            .add(
+                egui::TextEdit::singleline(&mut app.isotope.typed)
+                    .desired_width(96.0)
+                    .hint_text("Cs-137"),
+            )
+            .labelled_by(heading);
         look_up |= field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         look_up |= ui
             .button("Show")
@@ -5770,13 +5835,15 @@ fn isotope_check(app: &mut App, ui: &mut egui::Ui) {
     });
 
     ui.horizontal(|ui| {
-        ui.label("Above");
-        let cutoff = ui.add(
-            egui::DragValue::new(&mut app.isotope.min_intensity)
-                .speed(0.1)
-                .range(0.0..=100.0)
-                .suffix(" %"),
-        );
+        let label = ui.label("Above").id;
+        let cutoff = ui
+            .add(
+                egui::DragValue::new(&mut app.isotope.min_intensity)
+                    .speed(0.1)
+                    .range(0.0..=100.0)
+                    .suffix(" %"),
+            )
+            .labelled_by(label);
         cutoff.on_hover_text("hide lines fainter than this, which no count would resolve");
     });
 

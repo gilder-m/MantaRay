@@ -307,6 +307,12 @@ pub fn tinted(
         egui::Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
+    // A drawn symbol is no name. The button answers to the words it shows
+    // beside the symbol in the Both arrangement, so a screen reader, or a
+    // test, finds it by the same name whichever way it is drawn.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, worded(label))
+    });
     if !ui.is_rect_visible(rect) {
         return response;
     }

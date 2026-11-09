@@ -221,6 +221,7 @@ pub fn draw(ui: &mut Ui, input: ViewInput<'_>) -> Vec<ViewEvent> {
     let plot_height = (available.y - footer).max(90.0);
     let (response, painter) =
         ui.allocate_painter(Vec2::new(available.x, plot_height), Sense::click_and_drag());
+    crate::dialogs::named(&response, "Spectrum");
     let outer = response.rect;
     painter.rect_filled(outer, CornerRadius::same(3), colors.background.to_color());
     draw_background_wash(&painter, outer, colors, style);
