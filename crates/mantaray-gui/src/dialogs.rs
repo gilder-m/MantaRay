@@ -4021,11 +4021,12 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
 fn job_control(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(app, ctx, Dialog::JobControl, "Run JOB File", |app, ui| {
         ui.horizontal(|ui| {
-            ui.label("Directory");
+            let label = ui.label("Directory").id;
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut app.dialogs.job_directory).desired_width(220.0),
                 )
+                .labelled_by(label)
                 .changed()
             {
                 app.dialogs.job_refreshed = None;
@@ -4235,11 +4236,14 @@ fn instruments_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
                     )
                     .weak(),
                 );
-                ui.add(
+                let folder = ui.add(
                     egui::TextEdit::singleline(&mut app.dialogs.local_umcbi)
                         .hint_text("only if asked to")
                         .desired_width(380.0),
                 );
+                // The same field as the Detector List's, named the way its
+                // hint there names it.
+                named(&folder, "ORTEC library directory");
             });
 
             if !app.dialogs.local_scan.is_empty() {
@@ -4268,9 +4272,15 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                 .num_columns(5)
                 .striped(true)
                 .show(ui, |ui| {
-                    for header in ["#", "name", "model", "channels", ""] {
-                        ui.label(egui::RichText::new(header).strong());
-                    }
+                    // The "name" header names the name boxes under it. The
+                    // last header is empty and not selectable.
+                    let headers = ["#", "name", "model", "channels", ""].map(|header| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(header).strong())
+                                .selectable(!header.is_empty()),
+                        )
+                        .id
+                    });
                     ui.end_row();
                     let entries = app.detector_list.entries().to_vec();
                     for entry in entries {
@@ -4291,11 +4301,13 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                                 &mut slot.as_mut().expect("just set").1
                             }
                         };
-                        let editor = ui.add(
-                            egui::TextEdit::singleline(typing)
-                                .desired_width(140.0)
-                                .hint_text("name"),
-                        );
+                        let editor = ui
+                            .add(
+                                egui::TextEdit::singleline(typing)
+                                    .desired_width(140.0)
+                                    .hint_text("name"),
+                            )
+                            .labelled_by(headers[1]);
                         let committed = editor.lost_focus()
                             && ui.input(|input| input.key_pressed(egui::Key::Enter));
                         if committed || (editor.lost_focus() && *typing != entry.name) {
@@ -4333,16 +4345,19 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                 ui.separator();
                 ui.label("Add a simulated detector (test builds only)");
                 ui.horizontal(|ui| {
-                    ui.add(
+                    // No labels in this row: named after the list's headers.
+                    let number = ui.add(
                         egui::DragValue::new(&mut app.dialogs.new_detector.number)
                             .range(1..=999)
                             .prefix("#"),
                     );
-                    ui.add(
+                    named(&number, "number");
+                    let name = ui.add(
                         egui::TextEdit::singleline(&mut app.dialogs.new_detector.name)
                             .desired_width(90.0),
                     );
-                    egui::ComboBox::from_id_salt("new-detector-channels")
+                    named(&name, "name");
+                    let channels = egui::ComboBox::from_id_salt("new-detector-channels")
                         .selected_text(app.dialogs.new_detector.channels.to_string())
                         .show_ui(ui, |ui| {
                             for option in [1024usize, 2048, 4096, 8192, 16384] {
@@ -4353,6 +4368,7 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                                 );
                             }
                         });
+                    named(&channels.response, "channels");
                     if ui.button("Add").clicked() {
                         let mut entry = app.dialogs.new_detector.clone();
                         entry.kind = DetectorKind::Simulated;
@@ -4375,16 +4391,19 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                 .small(),
             );
             ui.horizontal(|ui| {
-                ui.add(
+                // Named by their hint and prefix, the words they show.
+                let name = ui.add(
                     egui::TextEdit::singleline(&mut app.dialogs.local_name)
                         .hint_text("name")
                         .desired_width(90.0),
                 );
-                ui.add(
+                named(&name, "name");
+                let number = ui.add(
                     egui::DragValue::new(&mut app.dialogs.local_detector)
                         .range(1..=999)
                         .prefix("detector #"),
                 );
+                named(&number, "detector number");
                 if ui.button("Open").clicked() {
                     let name = if app.dialogs.local_name.trim().is_empty() {
                         format!("MCB-{}", app.dialogs.local_detector)
@@ -4412,11 +4431,12 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                     actions.push(Action::ScanLocalInstruments);
                 }
             });
-            ui.add(
+            let folder = ui.add(
                 egui::TextEdit::singleline(&mut app.dialogs.local_umcbi)
                     .hint_text("ORTEC library directory (only if not installed system-wide)")
                     .desired_width(360.0),
             );
+            named(&folder, "ORTEC library directory");
             if !app.dialogs.local_scan.is_empty() {
                 egui::ScrollArea::vertical()
                     .max_height(140.0)
@@ -4436,16 +4456,19 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
                 .small(),
             );
             ui.horizontal(|ui| {
-                ui.add(
+                // Named by their hints, the words they show.
+                let name = ui.add(
                     egui::TextEdit::singleline(&mut app.dialogs.network_name)
                         .hint_text("name")
                         .desired_width(90.0),
                 );
-                ui.add(
+                named(&name, "name");
+                let address = ui.add(
                     egui::TextEdit::singleline(&mut app.dialogs.network_address)
                         .hint_text("host:port")
                         .desired_width(150.0),
                 );
+                named(&address, "host:port");
                 if ui.button("Connect").clicked() {
                     let name = if app.dialogs.network_name.trim().is_empty() {
                         "REMOTE".to_string()
@@ -4472,23 +4495,30 @@ fn detector_list_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Ac
 fn sample_dialog(app: &mut App, ctx: &egui::Context) {
     dialog_window(app, ctx, Dialog::Sample, "Sample Description", |app, ui| {
         ui.label("Saved with the spectrum and printed on reports (63 characters in .Chn).");
-        ui.add(
+        let description = ui.add(
             egui::TextEdit::multiline(&mut app.sample.description)
                 .desired_rows(3)
                 .desired_width(360.0),
         );
+        // No label of its own: it is what the window's title names.
+        named(&description, "Sample Description");
         ui.horizontal(|ui| {
-            ui.label("Quantity");
-            ui.add(egui::DragValue::new(&mut app.sample.quantity).speed(0.1));
-            ui.add(egui::TextEdit::singleline(&mut app.sample.unit).desired_width(60.0));
+            // The amount and its unit are both read as "Quantity".
+            let label = ui.label("Quantity").id;
+            ui.add(egui::DragValue::new(&mut app.sample.quantity).speed(0.1))
+                .labelled_by(label);
+            ui.add(egui::TextEdit::singleline(&mut app.sample.unit).desired_width(60.0))
+                .labelled_by(label);
         });
         ui.horizontal(|ui| {
-            ui.label("Reference date");
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut app.dialogs.reference_input)
-                    .hint_text("YYYY-MM-DD [HH:MM]")
-                    .desired_width(150.0),
-            );
+            let label = ui.label("Reference date").id;
+            let field = ui
+                .add(
+                    egui::TextEdit::singleline(&mut app.dialogs.reference_input)
+                        .hint_text("YYYY-MM-DD [HH:MM]")
+                        .desired_width(150.0),
+                )
+                .labelled_by(label);
             if field.lost_focus() {
                 let text = app.dialogs.reference_input.clone();
                 match app.set_reference_date(&text) {
@@ -4530,18 +4560,20 @@ fn lock_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
         "Lock / Unlock Detector",
         |app, ui| {
             ui.horizontal(|ui| {
-                ui.label("Password");
+                let label = ui.label("Password").id;
                 ui.add(
                     egui::TextEdit::singleline(&mut app.dialogs.lock_password)
                         .password(true)
                         .desired_width(140.0),
-                );
+                )
+                .labelled_by(label);
             });
             ui.horizontal(|ui| {
-                ui.label("Owner");
+                let label = ui.label("Owner").id;
                 ui.add(
                     egui::TextEdit::singleline(&mut app.dialogs.lock_owner).desired_width(140.0),
-                );
+                )
+                .labelled_by(label);
             });
             let Some(index) = app.active else { return };
             let Target::Detector(detector) = app.windows[index].target else {
@@ -4579,8 +4611,9 @@ fn lock_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
 fn strip_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(app, ctx, Dialog::Strip, "Strip Spectrum", |app, ui| {
         ui.horizontal(|ui| {
-            ui.label("File");
-            ui.add(egui::TextEdit::singleline(&mut app.dialogs.strip_path).desired_width(240.0));
+            let label = ui.label("File").id;
+            ui.add(egui::TextEdit::singleline(&mut app.dialogs.strip_path).desired_width(240.0))
+                .labelled_by(label);
             if ui.button("Browse...").clicked()
                 && let Some(path) = pick_open_file(&[("Spectrum", &["chn", "spc", "spe", "json"])])
             {
@@ -4588,10 +4621,12 @@ fn strip_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
             }
         });
         ui.checkbox(&mut app.dialogs.strip_use_ratio, "Use ratio of live times");
-        ui.add_enabled(
+        let factor = ui.add_enabled(
             !app.dialogs.strip_use_ratio,
             egui::DragValue::new(&mut app.dialogs.strip_factor).speed(0.01),
         );
+        // No label beside it; the note under it calls it the factor.
+        named(&factor, "factor");
         ui.label("A negative factor adds the spectra instead of subtracting them.");
         if ui.button("Strip").clicked() {
             let path = PathBuf::from(app.dialogs.strip_path.clone());
@@ -4623,10 +4658,12 @@ fn list_range_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 list.real_time
             ));
             ui.horizontal(|ui| {
-                ui.label("Start (s)");
-                ui.add(egui::DragValue::new(&mut app.dialogs.list_start).speed(1.0));
-                ui.label("Duration (s)");
-                ui.add(egui::DragValue::new(&mut app.dialogs.list_duration).speed(1.0));
+                let label = ui.label("Start (s)").id;
+                ui.add(egui::DragValue::new(&mut app.dialogs.list_start).speed(1.0))
+                    .labelled_by(label);
+                let label = ui.label("Duration (s)").id;
+                ui.add(egui::DragValue::new(&mut app.dialogs.list_duration).speed(1.0))
+                    .labelled_by(label);
             });
             ui.horizontal(|ui| {
                 if ui.button("Apply").clicked() {
@@ -4675,11 +4712,13 @@ fn list_range_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                         app.dialogs.list_start = 0.0;
                     }
                 }
-                ui.label("speed");
-                ui.add(
+                let label = ui.label("speed").id;
+                named_slider(
+                    ui,
                     egui::Slider::new(&mut app.dialogs.list_speed, 1.0..=50.0)
                         .logarithmic(true)
                         .suffix("x"),
+                    label,
                 );
             });
             scrubbed |= ui
