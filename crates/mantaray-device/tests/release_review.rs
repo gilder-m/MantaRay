@@ -104,7 +104,10 @@ fn a_status_the_bridge_cannot_read_the_flag_for_does_not_end_the_wait() {
     });
     assert!(armed);
     assert_eq!(state, CountState::Over);
-    assert!(!rig.counting(), "the WAIT ended while the instrument counts");
+    assert!(
+        !rig.counting(),
+        "the WAIT ended while the instrument counts"
+    );
     assert!((mcb.spectrum().live_time - 5.0).abs() < 1e-9);
     assert_whole(&mcb, 100.0);
 }

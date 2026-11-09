@@ -145,14 +145,11 @@ fn direct_main() -> Result<(), String> {
                             println!("      model    {model}");
                         }
                         println!("      channels {}", instrument.channels());
-                        println!(
-                            "      state    {}",
-                            if instrument.is_counting() {
-                                "counting"
-                            } else {
-                                "idle"
-                            }
-                        );
+                        match instrument.is_counting() {
+                            Ok(true) => println!("      state    counting"),
+                            Ok(false) => println!("      state    idle"),
+                            Err(error) => println!("      state    unknown ({error})"),
+                        }
                     }
                     Err(error) => {
                         println!("  {number}: {serial}");

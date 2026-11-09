@@ -38,8 +38,10 @@ pub trait Instrument {
     fn channels(&self) -> usize;
     /// Reads channel counts.
     fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String>;
-    /// Whether the ADC is acquiring.
-    fn is_counting(&self) -> bool;
+    /// Whether the ADC is acquiring, or why that cannot be told. A failed
+    /// read is never "not acquiring": one false idle mid-count ended a job's
+    /// wait and saved a partial spectrum (release review S1).
+    fn is_counting(&self) -> Result<bool, String>;
     /// Model name, empty when the instrument does not offer one.
     fn model(&self) -> String;
     /// What to report as the serial: a detector number or an adapter serial.
@@ -383,7 +385,16 @@ impl Session<'_> {
         // beside clocks that have run on a little - is the ordinary state of
         // any status read from a live instrument. Caught by the bench 926
         // counting out a one-second live preset.
-        let active = i32::from(self.instrument.is_counting());
+        //
+        // A flag that cannot be read makes the whole status an ERR, which the
+        // far side takes as "cannot tell": it keeps the last good reading and
+        // refuses changes. Printed as ACTIVE=0 beside good clocks, it read as
+        // a count that had ended.
+        let active = self
+            .instrument
+            .is_counting()
+            .map(i32::from)
+            .map_err(|error| format!("the counting flag cannot be read: {error}"))?;
         // Live first, then real. The two clocks are separate commands, so they
         // are sampled a round trip apart, and whichever is read second has run
         // on: reading real time second keeps it the larger of the two, which is
@@ -463,8 +474,9 @@ impl Instrument for ViaUmcbi<'_> {
         let count = u16::try_from(count).map_err(|_| format!("{count} channels is too many"))?;
         self.library.read(self.detector, start, count)
     }
-    fn is_counting(&self) -> bool {
-        self.library.is_counting(self.detector)
+    fn is_counting(&self) -> Result<bool, String> {
+        // `MIOIsActive` has no failure of its own to report.
+        Ok(self.library.is_counting(self.detector))
     }
     fn model(&self) -> String {
         self.library.model(self.detector)
@@ -545,12 +557,8 @@ impl Instrument for ViaUsb {
             .map(u64::from)
             .collect())
     }
-    fn is_counting(&self) -> bool {
-        // `$C00001088` when the ADC is acquiring, `$C00000087` when it is not.
-        self.command("SHOW_ACTIVE")
-            .ok()
-            .and_then(|reply| record_number(&reply, 'C').ok())
-            .is_some_and(|active| active != 0.0)
+    fn is_counting(&self) -> Result<bool, String> {
+        active_record(self.command("SHOW_ACTIVE"))
     }
     fn model(&self) -> String {
         self.model.clone()
@@ -645,12 +653,8 @@ impl Instrument for ViaDirect {
             .map(u64::from)
             .collect())
     }
-    fn is_counting(&self) -> bool {
-        // `$C00001088` when the ADC is acquiring, `$C00000087` when it is not.
-        self.command("SHOW_ACTIVE")
-            .ok()
-            .and_then(|reply| record_number(&reply, 'C').ok())
-            .is_some_and(|active| active != 0.0)
+    fn is_counting(&self) -> Result<bool, String> {
+        active_record(self.command("SHOW_ACTIVE"))
     }
     fn model(&self) -> String {
         self.model.clone()
@@ -717,6 +721,14 @@ pub fn calibration_for(mcb: i32) -> Option<(f64, f64, f64)> {
 /// checksum. Only the leading field is wanted here, and every record this is
 /// used on carries exactly one. The letter is checked: under a reply desync a
 /// version record's digits would otherwise parse as a plausible clock.
+/// The counting flag in a `SHOW_ACTIVE` reply: `$C00001088` when the ADC is
+/// acquiring, `$C00000087` when it is not. A failed read, or a reply that is
+/// not a `$C` record (one out of step), says nothing either way.
+pub(crate) fn active_record(reply: Result<String, String>) -> Result<bool, String> {
+    let reply = reply.map_err(|error| format!("SHOW_ACTIVE failed: {error}"))?;
+    Ok(record_number(&reply, 'C')? != 0.0)
+}
+
 pub(crate) fn record_number(reply: &str, letter: char) -> Result<f64, String> {
     let body = reply
         .trim()
