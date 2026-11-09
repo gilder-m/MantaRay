@@ -65,6 +65,11 @@ pub struct Probe {
 impl Probe {
     /// Reads the tag and stamp of a JSON document and checks them, returning
     /// the major version (see [`check`]).
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::Json`] when the text is not a JSON object, otherwise as
+    /// [`check`].
     pub fn check(text: &str, kind: &str, newest: u32) -> Result<u32, FormatError> {
         let probe: Self = serde_json::from_str(text)?;
         check(
@@ -80,6 +85,13 @@ impl Probe {
 ///
 /// `tag` is `None` for a file written before the kind carried a tag, which is
 /// read as major 1. Returns the major version, for the caller to dispatch on.
+///
+/// # Errors
+///
+/// [`FormatError::BadMagic`] for a tag of another kind,
+/// [`FormatError::Invalid`] for a version that is not `<major>[.<minor>]`
+/// with a major of at least 1, and [`FormatError::TooNew`] for a major newer
+/// than `newest`.
 pub fn check(
     kind: &str,
     tag: Option<&str>,

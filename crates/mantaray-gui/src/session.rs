@@ -160,11 +160,20 @@ const NEWEST: u32 = 1;
 
 /// A snapshot as it is written: the session's own fields, with the format tag
 /// and writer stamp beside them, which versions before the tag ignore.
+///
+/// # Errors
+///
+/// Only if the session cannot be represented as JSON.
 pub fn to_text(session: &Session) -> serde_json::Result<String> {
     serde_json::to_string(&Tagged::new(FORMAT_TAG, session))
 }
 
 /// Parses a snapshot, refusing one from a newer major format by name.
+///
+/// # Errors
+///
+/// [`FormatError::TooNew`] for a snapshot from a newer major format, and the
+/// JSON or tag error for one that is not a snapshot.
 pub fn parse(text: &str) -> Result<Session, FormatError> {
     match Probe::check(text, "session", NEWEST)? {
         1 => Ok(serde_json::from_str(text)?),
@@ -180,6 +189,10 @@ pub fn parse(text: &str) -> Result<Session, FormatError> {
 /// error message on start-up. One from a newer mantaray is different - it is
 /// somebody's unsaved work that this build cannot read but the next one can -
 /// so it comes back as `Err` with the reason, for the caller to leave alone.
+///
+/// # Errors
+///
+/// The reason, when the snapshot is from a newer mantaray.
 pub fn read() -> Result<Option<Session>, String> {
     let Ok(text) = std::fs::read_to_string(path()) else {
         return Ok(None);

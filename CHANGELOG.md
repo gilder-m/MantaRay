@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**Saved files keep opening (2026-11-08).** Native spectra (`spectrum/1`), JSON
+libraries (now tagged `library/1`; untagged ones read as before) and the crash
+snapshot (now `session/1`) carry a format tag and the version that wrote them
+(`written_by`). A file from a newer major format is refused with a message
+naming both versions, instead of being read with the old rules; a crash
+snapshot from a newer mantaray is kept on disk untouched rather than written
+over. Descriptive fields missing from a file read as their defaults; counts,
+live and real time, line energies and yields stay required. Files written now
+still open in 0.2.4. Files saved by 0.2.4 are kept in the tests, which every
+later version must open field for field.
+
 **Instrument control, built against an end-to-end rig (2026-11-07).** Every
 command that changes a detector goes through one gate: locked first, then
 (presets only) whether it is counting, asked of the detector right then, then
