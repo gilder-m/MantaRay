@@ -130,6 +130,10 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     out.extend_from_slice(&(spectrum.detector_id as i16).to_le_bytes());
     out.extend_from_slice(&(spectrum.segment as i16).to_le_bytes());
 
+    // ORTEC's File Structure Manual: the start date is ASCII, "or binary
+    // zeros if not known". Time and seconds go with it: they mean nothing
+    // without a date. The reader takes zeros and the spaces 0.2.4 wrote alike
+    // as no date.
     let (date_field, time_field, seconds_field) = match spectrum.start_time {
         Some(start) => (
             format!(
@@ -142,7 +146,7 @@ pub fn write(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
             format!("{:02}{:02}", start.hour(), start.minute()),
             format!("{:02}", start.second()),
         ),
-        None => ("        ".to_string(), "    ".to_string(), "  ".to_string()),
+        None => ("\0".repeat(8), "\0".repeat(4), "\0".repeat(2)),
     };
     out.extend_from_slice(seconds_field.as_bytes());
     let real_ticks = (spectrum.real_time / TICK_SECONDS)
@@ -240,5 +244,6 @@ mod tests {
     #[test]
     fn a_blank_date_field_is_not_a_time() {
         assert!(parse_start("        ", "    ", "  ").is_none());
+        assert!(parse_start(&"\0".repeat(8), &"\0".repeat(4), "\0\0").is_none());
     }
 }

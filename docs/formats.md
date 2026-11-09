@@ -37,7 +37,10 @@ Then a 512-byte trailer:
 ```
 
 The trailer is optional on read: files that stop after the channel data load
-without a calibration. Counts above `i32::MAX` are clamped. Regions are not part
+without a calibration. A count with no start date stores binary zeros in the
+seconds, date and time fields, as ORTEC's File Structure Manual has it for a start
+"not known" (0.2.4 and earlier wrote spaces; both read as no date). Counts above
+`i32::MAX` are clamped. Regions are not part
 of the format - save them to a `.Roi` file.
 
 ## `.Spc` - ORTEC binary spectrum
