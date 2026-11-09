@@ -516,25 +516,23 @@ impl ViaUsb {
     /// Opens an instrument and asks it what it is.
     pub fn open(device: crate::usb::Device) -> Result<Self, String> {
         let serial = serial_of(device.path());
-        let memory = crate::dpm::Dpm::new(&device);
-        let gain = memory.command("SHOW_GAIN_CONVERSION")?;
-        let channels = record_number(&gain, 'C')
-            .map_err(|_| format!("SHOW_GAIN_CONVERSION answered {gain:?}"))?
-            as usize;
-        if channels == 0 || channels > 1 << 20 {
-            return Err(format!("{channels} channels is not a conversion gain"));
-        }
-        let model = record_text(&memory.command("SHOW_VERSION").unwrap_or_default());
+        let (channels, model) = {
+            let memory = crate::dpm::Dpm::new(&device);
+            identify(&mut |text: &str| memory.command(text), &mut || {
+                device.settle()
+            })?
+        };
         Ok(Self {
             device,
             channels,
-            model: if model == "unknown" {
-                String::new()
-            } else {
-                model
-            },
+            model,
             serial,
         })
+    }
+
+    /// The device path this instrument was opened by.
+    pub fn path(&self) -> &str {
+        self.device.path()
     }
 }
 
@@ -580,18 +578,8 @@ impl Instrument for ViaUsb {
     }
 }
 
-/// The adapter serial out of a device path.
-///
-/// A path reads `\\?\USB#VID_0A2D&PID_0016#08134079#{guid}`, and the serial is
-/// the field before the interface GUID.
 #[cfg(windows)]
-fn serial_of(path: &str) -> String {
-    path.split('#')
-        .nth(2)
-        .filter(|field| !field.is_empty())
-        .unwrap_or(path)
-        .to_string()
-}
+use crate::pick::serial_of;
 
 /// An instrument reached over libusb, with no vendor driver at all.
 ///
@@ -613,23 +601,16 @@ pub struct ViaDirect {
 impl ViaDirect {
     /// Opens an instrument and asks it what it is.
     pub fn open(device: crate::direct::Device) -> Result<Self, String> {
-        let memory = crate::dpm::Dpm::new(&device);
-        let gain = memory.command("SHOW_GAIN_CONVERSION")?;
-        let channels = record_number(&gain, 'C')
-            .map_err(|_| format!("SHOW_GAIN_CONVERSION answered {gain:?}"))?
-            as usize;
-        if channels == 0 || channels > 1 << 20 {
-            return Err(format!("{channels} channels is not a conversion gain"));
-        }
-        let model = record_text(&memory.command("SHOW_VERSION").unwrap_or_default());
+        let (channels, model) = {
+            let memory = crate::dpm::Dpm::new(&device);
+            identify(&mut |text: &str| memory.command(text), &mut || {
+                device.settle()
+            })?
+        };
         Ok(Self {
             device,
             channels,
-            model: if model == "unknown" {
-                String::new()
-            } else {
-                model
-            },
+            model,
         })
     }
 }
@@ -753,6 +734,93 @@ pub(crate) fn record_text(reply: &str) -> String {
     } else {
         text.replace(' ', "_")
     }
+}
+
+/// How many times opening clears the pipes and asks again before giving up.
+pub(crate) const OPEN_ATTEMPTS: usize = 3;
+
+/// Whether a reply is the `$F` record `SHOW_VERSION` answers with.
+fn is_version_record(reply: &str) -> bool {
+    reply
+        .trim()
+        .strip_prefix("$F")
+        .is_some_and(|rest| !rest.is_empty())
+}
+
+/// Asks a freshly opened adapter what it is, and makes sure it is in step.
+///
+/// An adapter left out of step answers each question with the reply to the one
+/// before, so every answer looks right but belongs to the wrong question: a
+/// channel count read off a version string, or a version read off a status.
+/// Each reply is therefore checked for the record letter its question gets
+/// (`$F` for `SHOW_VERSION`, `$C` for `SHOW_GAIN_CONVERSION`), and the version
+/// is asked again last, so a reply one behind shows up as the wrong letter.
+/// On any mismatch the pipes are settled, as a timed-out request settles them,
+/// and the whole exchange starts over, up to [`OPEN_ATTEMPTS`] times.
+///
+/// Returns the conversion gain in channels and the model ("" when unknown).
+pub(crate) fn identify(
+    ask: &mut dyn FnMut(&str) -> Result<String, String>,
+    settle: &mut dyn FnMut(),
+) -> Result<(usize, String), String> {
+    let mut last = String::new();
+    for attempt in 0..OPEN_ATTEMPTS {
+        if attempt > 0 {
+            settle();
+        }
+        let version = match ask("SHOW_VERSION") {
+            Ok(reply) if is_version_record(&reply) => reply,
+            Ok(reply) => {
+                last = format!("SHOW_VERSION answered {reply:?}, not a $F record");
+                continue;
+            }
+            Err(error) => {
+                last = format!("SHOW_VERSION: {error}");
+                continue;
+            }
+        };
+        let gain = match ask("SHOW_GAIN_CONVERSION") {
+            Ok(reply) => reply,
+            Err(error) => {
+                last = format!("SHOW_GAIN_CONVERSION: {error}");
+                continue;
+            }
+        };
+        let Ok(channels) = record_number(&gain, 'C') else {
+            last = format!("SHOW_GAIN_CONVERSION answered {gain:?}, not a $C record");
+            continue;
+        };
+        match ask("SHOW_VERSION") {
+            Ok(reply) if is_version_record(&reply) => {}
+            Ok(reply) => {
+                last = format!("SHOW_VERSION asked again answered {reply:?}");
+                continue;
+            }
+            Err(error) => {
+                last = format!("SHOW_VERSION asked again: {error}");
+                continue;
+            }
+        }
+        // In step and well formed, so a nonsense gain is the instrument's own
+        // answer, not a stale one: there is no point asking again.
+        if !(1.0..=f64::from(1_u32 << 20)).contains(&channels) {
+            return Err(format!("{channels} channels is not a conversion gain"));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let channels = channels as usize;
+        let model = record_text(&version);
+        let model = if model == "unknown" {
+            String::new()
+        } else {
+            model
+        };
+        return Ok((channels, model));
+    }
+    Err(format!(
+        "the adapter is not answering in step ({last}) after {OPEN_ATTEMPTS} tries with the \
+         pipes cleared between them. Close MantaRay and run `mantaray-mcb usbtalk SHOW_VERSION` \
+         twice; a healthy adapter answers $F0926-001 both times"
+    ))
 }
 
 #[cfg(test)]
@@ -1200,5 +1268,150 @@ mod tests {
 
         // A line without a route is refused as such.
         assert!(hub_line("SHOW_STATUS", &mut entries, &mut open).starts_with("ERR "));
+    }
+
+    /// A scripted adapter: answers in step, or one reply behind until settled
+    /// often enough.
+    struct Scripted {
+        behind: Option<String>,
+        settles_needed: usize,
+        settles: usize,
+        asked: usize,
+        version: String,
+        gain: String,
+    }
+
+    impl Scripted {
+        fn new(stale: Option<&str>, settles_needed: usize) -> Self {
+            Self {
+                behind: stale.map(str::to_string),
+                settles_needed,
+                settles: 0,
+                asked: 0,
+                version: "$F0926-001".into(),
+                gain: "$C04096087".into(),
+            }
+        }
+
+        fn answer(&mut self, text: &str) -> Result<String, String> {
+            self.asked += 1;
+            let fresh = match text {
+                "SHOW_VERSION" => self.version.clone(),
+                "SHOW_GAIN_CONVERSION" => self.gain.clone(),
+                other => return Err(format!("unscripted {other}")),
+            };
+            if self.settles >= self.settles_needed {
+                return Ok(fresh);
+            }
+            // Out of step: this question gets the previous one's reply.
+            Ok(self.behind.replace(fresh).unwrap_or_default())
+        }
+
+        fn identify(&mut self) -> Result<(usize, String), String> {
+            let cell = std::cell::RefCell::new(self);
+            identify(
+                &mut |text: &str| cell.borrow_mut().answer(text),
+                &mut || {
+                    let mut adapter = cell.borrow_mut();
+                    adapter.settles += 1;
+                    if adapter.settles >= adapter.settles_needed {
+                        adapter.behind = None;
+                    }
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn an_adapter_in_step_opens_without_settling() {
+        let mut adapter = Scripted::new(None, 0);
+        assert_eq!(adapter.identify(), Ok((4096, "0926-001".into())));
+        assert_eq!(adapter.settles, 0);
+        assert_eq!(adapter.asked, 3);
+    }
+
+    #[test]
+    fn an_adapter_one_behind_is_settled_and_asked_again() {
+        // A status reply left over from the last session answers the first
+        // question; before, the gain was asked first and read off the version
+        // that came back for it.
+        let mut adapter = Scripted::new(Some("$M000372850500037299040000000000081"), 1);
+        assert_eq!(adapter.identify(), Ok((4096, "0926-001".into())));
+        assert_eq!(adapter.settles, 1);
+    }
+
+    #[test]
+    fn a_stale_version_reply_is_caught_by_the_gain_letter() {
+        // The stale reply is itself a $F, so the first check passes; the gain
+        // question then gets the version and must be refused, not read.
+        let mut adapter = Scripted::new(Some("$F0926-001"), 1);
+        assert_eq!(adapter.identify(), Ok((4096, "0926-001".into())));
+        assert_eq!(adapter.settles, 1);
+    }
+
+    #[test]
+    fn a_stale_gain_reply_is_caught_by_the_second_version() {
+        // Stale replies that happen to carry the right letters for the first
+        // two questions: only asking the version again shows the third one is
+        // not a version, and the adapter is refused rather than believed.
+        let mut asked = 0;
+        let replies = ["$F0926-001", "$C04096087", "$M0000"];
+        let error = identify(
+            &mut |_: &str| {
+                asked += 1;
+                Ok(replies[(asked - 1) % 3].to_string())
+            },
+            &mut || {},
+        )
+        .unwrap_err();
+        assert!(error.contains("asked again"), "{error}");
+        assert_eq!(asked, 3 * OPEN_ATTEMPTS);
+    }
+
+    #[test]
+    fn an_adapter_that_never_comes_into_step_is_refused_clearly() {
+        let mut adapter = Scripted::new(Some("$M0000"), usize::MAX);
+        let error = adapter.identify().unwrap_err();
+        assert_eq!(adapter.settles, OPEN_ATTEMPTS - 1);
+        assert!(error.contains("not answering in step"), "{error}");
+        assert!(error.contains("usbtalk SHOW_VERSION"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_request_on_open_is_retried_after_settling() {
+        let mut failures = 1;
+        let mut settles = 0;
+        let mut adapter = Scripted::new(None, 0);
+        let result = identify(
+            &mut |text: &str| {
+                if failures > 0 {
+                    failures -= 1;
+                    return Err("the instrument did not answer within 5000 ms".into());
+                }
+                adapter.answer(text)
+            },
+            &mut || settles += 1,
+        );
+        assert_eq!(result, Ok((4096, "0926-001".into())));
+        assert_eq!(settles, 1);
+    }
+
+    #[test]
+    fn a_malformed_gain_is_never_taken_as_a_channel_count() {
+        let mut adapter = Scripted::new(None, 0);
+        adapter.gain = "$CX".into();
+        let error = adapter.identify().unwrap_err();
+        assert!(error.contains("not a $C record"), "{error}");
+        let mut adapter = Scripted::new(None, 0);
+        adapter.gain = "$C00000087".into();
+        let error = adapter.identify().unwrap_err();
+        assert!(error.contains("not a conversion gain"), "{error}");
+    }
+
+    #[test]
+    fn a_bare_f_is_not_a_version() {
+        assert!(!is_version_record("$F"));
+        assert!(!is_version_record("$C04096087"));
+        assert!(is_version_record("$F0926-001\r"));
     }
 }

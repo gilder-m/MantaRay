@@ -4517,7 +4517,9 @@ impl App {
         };
         self.detector_list.push(entry);
         self.detectors.push(mcb);
-        if !self.status.starts_with("connected") {
+        // "connected to ..." and "opened MODEL (N channels)" say more than
+        // "detector added" and are what the person needs to check the unit.
+        if !self.status.starts_with("connected") && !self.status.starts_with("opened ") {
             self.status = "detector added".into();
         }
     }

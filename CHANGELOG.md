@@ -51,6 +51,31 @@ left a cut one. What changes for the operator:
   keyword: line breaks become spaces, and a leading `$` gets a space.
 - `.Spc` is listed as writable (`can_write`), as the save path has been.
 
+**The Windows USB road picks and opens the right 926 (2026-11-08).**
+Unit-tested with scripted adapters; not yet run on Windows hardware.
+- A local instrument's detector number now counts only the adapters connected
+  now. Windows keeps a record of every adapter ever bound, and the hub counted
+  down all of them, so a 926 unplugged long ago took position 1 and, with two
+  926s attached, each detector could open the other one. When ORTEC's library
+  is loaded and MAESTRO's name for the detector carries an adapter serial, that
+  serial decides, and one that is not connected is refused by name. The
+  application still checks the serial it remembered on every later open.
+- Opening an adapter (over Windows' driver or libusb) checks it is in step
+  before believing it: the version
+  must come back as a `$F` record and the conversion gain as a `$C`, asked as
+  version, gain, version. An adapter answering the question before is settled
+  and asked again, up to three times, then refused with the `usbtalk
+  SHOW_VERSION` check to run. Before, a stale reply could become the channel
+  count or the model.
+- Scan on a Windows PC without ORTEC's `Mcbcio32.dll` says which adapters
+  answer over USB and points to Add a local instrument, detector # 1, which
+  needs no ORTEC software. `docs/ortec-hardware.md` said a machine without
+  MAESTRO could do everything; Scan was the exception.
+- The status line keeps "opened MODEL (N channels)" after a local instrument
+  opens, instead of replacing it with "detector added".
+- README: `serve` needs `--features simulator`. TODO: macOS has run on
+  hardware (2026-08-07); multiple adapters remain untried everywhere.
+
 **ORTEC files read the same in MAESTRO (2026-11-08).**
 - A `.Spe` of a spectrum with a channel offset writes its `$DATA:` range as
   the first and the last channel (`100 1123` for 1024 channels from 100), as

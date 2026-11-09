@@ -20,6 +20,9 @@ mod bridge;
 mod direct;
 mod dpm;
 mod journal;
+// Used by the Windows road only; tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pick;
 mod serve;
 #[cfg(windows)]
 mod umcbi;

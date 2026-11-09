@@ -697,6 +697,29 @@ path needs nothing but the kernel driver, so a machine that has never had
 MAESTRO installed drives its own detector. `--usb` or `--umcbi` insists on one
 or the other, which is what a person debugging one of them wants.
 
+**Scan is the exception on Windows.** Scan runs `mantaray-mcb probe`, which
+reads MAESTRO's detector list, and only ORTEC's library (`Mcbcio32.dll`) can
+read that list. On a machine without it, Scan says so, names the adapters that
+answer over USB, and points to **Services > Edit Detector List > Add a local
+instrument** with detector # 1: that entry opens over USB with no ORTEC
+software at all. (Away from Windows, `probe` asks libusb and needs nothing.)
+
+A detector number on the USB road is a **position among the adapters
+connected now** (see the stale-record note below), not an index into the
+registry. When ORTEC's library is loaded and MAESTRO's name for that number
+carries an adapter serial, the serial decides instead, and a serial that is not
+connected is refused by name rather than replaced by another unit. The pick is
+in `crates/mantaray-mcb/src/pick.rs`. MAESTRO's numbering and USB positions
+still need not agree on a PC with two 926s, so the application checks the
+serial it remembered for the detector on every open after the first.
+
+Opening also checks the adapter is in step: `SHOW_VERSION` must answer a `$F`
+record and `SHOW_GAIN_CONVERSION` a `$C`, and the version is asked again last.
+A reply with the wrong letter means the adapter is answering the question
+before; the pipes are settled, as a timed-out request settles them, and the
+exchange starts over, up to three times, before the open is refused with the
+`usbtalk SHOW_VERSION` check to run (`identify` in `serve.rs`).
+
 Both routes implement the same `Instrument` trait, so the translation above them
 - clocks in ticks, presets in seconds, dead time from the two clocks - is
 written once.
@@ -716,7 +739,11 @@ Two things that were quietly wrong and are worth not repeating:
 - **Windows keeps an interface record for every adapter ever bound**, so the
   list outlives the cable. Unasked, take the first that actually opens rather
   than the first recorded, or a serve session picks an adapter that left months
-  ago.
+  ago. The hub broke this rule until 2026-11-08: it counted detector numbers
+  down the whole list, so a ghost record took position 1 and, with two 926s,
+  each detector reached the wrong one. Positions now count only adapters that
+  open (or that the hub already holds); an adapter open in another program
+  counts as absent.
 
 ### Away from Windows
 

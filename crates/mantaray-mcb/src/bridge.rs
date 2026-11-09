@@ -73,7 +73,21 @@ fn usage() {
 
 /// Reports what this machine can reach.
 fn probe(directory: Option<&str>) -> Result<(), String> {
-    let library = Umcbi::load(directory)?;
+    // Scan reads MAESTRO's detector list, and only ORTEC's library can read
+    // it. Without the library the USB road still works, so say what answers
+    // over USB and how to open it instead of failing on the DLL alone.
+    let library = match Umcbi::load(directory) {
+        Ok(library) => library,
+        Err(error) => {
+            let paths = usb::devices();
+            let connected: Vec<String> = paths
+                .iter()
+                .filter(|path| usb::Device::open(path).is_ok())
+                .map(|path| crate::pick::serial_of(path))
+                .collect();
+            return Err(crate::pick::no_library_message(&error, &connected));
+        }
+    };
     println!("{} loaded", umcbi::LIBRARY);
     // SAFETY: the revision call takes nothing and returns an int.
     println!("UMCBI revision {}", unsafe { (library.get_revision)() });
@@ -370,8 +384,12 @@ fn serve_hub(directory: Option<&str>) -> Result<(), String> {
     // The handles the opener takes out, so they can be closed when the pipe
     // does; the sessions holding them are gone by then.
     let opened = std::cell::RefCell::new(Vec::new());
+    // The adapters this process already holds, which no longer open a second
+    // time and must still count as connected when the next position is picked.
+    let held = std::cell::RefCell::new(Vec::new());
     let library_ref = library.as_ref();
-    let outcome = serve::run_hub(&mut |number| open_hub_detector(number, library_ref, &opened));
+    let outcome =
+        serve::run_hub(&mut |number| open_hub_detector(number, library_ref, &opened, &held));
     if let Some(library) = &library {
         for handle in opened.borrow().iter() {
             // SAFETY: each handle came from open_detector and is still open.
@@ -391,13 +409,18 @@ fn open_hub_detector<'a>(
     number: i32,
     library: Option<&'a Umcbi>,
     opened: &std::cell::RefCell<Vec<umcbi::Hdet>>,
+    held: &std::cell::RefCell<Vec<String>>,
 ) -> Result<Box<dyn serve::Instrument + 'a>, String> {
     // Each step timed into the journal: opening is where a slow bench spends
     // its time, and it is invisible from the application's side - the mirror
     // that would write fetch lines does not exist yet.
     let started = std::time::Instant::now();
-    match usb_by_position(number) {
+    // MAESTRO's name for this number, when its library is here: a serial in
+    // it says which adapter was meant better than any position can.
+    let named = library.and_then(|library| library.detector_name(number).ok());
+    match usb_by_position(number, named.as_deref(), &held.borrow()) {
         Ok(instrument) => {
+            held.borrow_mut().push(instrument.path().to_string());
             let road = serve::Instrument::route(&instrument);
             eprintln!("hub: detector {number} over USB: {road}");
             if crate::journal::on() {
@@ -442,22 +465,39 @@ fn open_hub_detector<'a>(
     }))
 }
 
-/// The USB road by strict position: adapter `number` of those bound, or a
-/// plain refusal. No lone-adapter forgiveness here - see [`serve_hub`].
+/// The USB road by strict position: adapter `number` of those connected now,
+/// or a plain refusal. No lone-adapter forgiveness here - see [`serve_hub`].
+///
+/// A position counts only adapters that open (or that this process already
+/// holds), never the registry's every-adapter-ever list, and a serial in the
+/// configured name wins over the position; see [`crate::pick`].
 #[cfg(windows)]
-fn usb_by_position(number: i32) -> Result<serve::ViaUsb, String> {
+fn usb_by_position(
+    number: i32,
+    named: Option<&str>,
+    held: &[String],
+) -> Result<serve::ViaUsb, String> {
     let paths = usb::devices();
-    let index = usize::try_from(number)
-        .ok()
-        .filter(|index| *index >= 1 && *index <= paths.len())
-        .ok_or_else(|| {
-            format!(
-                "no adapter in position {number} of the {} bound to the driver",
-                paths.len()
-            )
-        })?;
-    let device = usb::Device::open(&paths[index - 1])?;
-    serve::ViaUsb::open(device)
+    let path = crate::pick::adapter_for(
+        number,
+        &paths,
+        &mut |path| held.iter().any(|h| h == path) || usb::Device::open(path).is_ok(),
+        named,
+    )?;
+    if held.contains(&path) {
+        return Err(format!(
+            "adapter {} is already open for another detector",
+            crate::pick::serial_of(&path)
+        ));
+    }
+    // Named on standard error so the bench log says which unit each number
+    // reached; the application checks this serial against the one it
+    // remembered for the detector (RemoteMcb::connect_expecting).
+    eprintln!(
+        "hub: detector {number} is adapter {}",
+        crate::pick::serial_of(&path)
+    );
+    serve::ViaUsb::open(usb::Device::open(&path)?)
 }
 
 /// Builds the detector list from what is actually connected.
