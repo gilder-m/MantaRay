@@ -40,6 +40,9 @@ simulator = []
 mantaray-gui = { path = ".", features = ["simulator"] }
 # The scripted end-to-end instrument, for tests only.
 mantaray-device = { workspace = true, features = ["rig"] }
+# Drives the real widgets by their accessibility names, for tests only. Pinned
+# exactly: it must be built against the same egui as the app.
+egui_kittest = { version = "=0.35.0", default-features = false }
 
 [build-dependencies]
 # Embeds the icon into the Windows executable; a no-op elsewhere.
