@@ -23,6 +23,36 @@ nothing and drops the edit.
 - Start all and Stop all with no detectors say so ("no detectors, so no
   acquisition was started") instead of "acquisition started on every detector".
 
+**A file that would not open again is not written (2026-11-08).** A JSON
+library or native spectrum holding NaN or infinity used to save (as `null`)
+and then never open. The save is now refused, naming the field ("invalid
+library entry Stab-1 (not saved): half-life inf s is not a finite number,
+which a JSON library cannot hold (it would not open again); save it as .csv,
+or give a stable nuclide a half-life of 0"), and any file already there is
+left as it was. A CSV library still reads an infinite or NaN half-life and
+still saves it as CSV; a CSV line energy or yield that is NaN or infinite is
+refused by row. A `.Spe` whose `$MEAS_TIM` is not finite (`NaN inf`) and a
+`.Spc` whose time words are NaN or infinite are refused on read. File layouts
+are unchanged, so 0.2.4 opens what is written.
+
+**A sample quantity that cannot divide is refused (2026-11-08).** A quantity
+of 0, a negative number, NaN or infinity used to become 1 while the report
+still read Bq/kg. `mantaray analyse --quantity` refuses it ("0 is not a
+sample quantity: give a number above 0 (leave out --quantity for activity in
+plain Bq)"); the Nuclide analysis and Sample Description dialogs show the same
+under the field and Analyse refuses it in the status line. The analysis
+itself, given one, reports per sample in plain Bq with a note ("sample
+quantity 0 kg is not a number above 0: activities are for the whole sample,
+not per kg"). No quantity (none on the command line; 1 with no unit in the
+interface) is plain Bq as before.
+
+**Dead time is never negative (2026-11-08).** The 926's counters latch apart,
+so a count can end at RT 9.98 s, LT 10.00 s, which showed as -0.20 % dead
+time. Dead time is now shown as 0 % whenever live time reaches real time, in
+`mantaray info`, the acquire summary, the status sidebar, the window header,
+MCB information and the dashboard. The stored live and real times, and every
+file's bytes, are unchanged.
+
 **Saved files keep opening (2026-11-08).** Native spectra (`spectrum/1`), JSON
 libraries (now tagged `library/1`; untagged ones read as before) and the crash
 snapshot (now `session/1`) carry a format tag and the version that wrote them
