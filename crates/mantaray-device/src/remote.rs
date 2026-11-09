@@ -744,9 +744,8 @@ impl RemoteMcb {
                  the spectrum {})",
                 self.spectrum.len()
             )),
-            Ok(_) => parse_status(&status).ok_or_else(|| {
-                format!("the status reply is not a status line: {status:.60?}")
-            }),
+            Ok(_) => parse_status(&status)
+                .ok_or_else(|| format!("the status reply is not a status line: {status:.60?}")),
         };
         match reading {
             Ok(reading) => {

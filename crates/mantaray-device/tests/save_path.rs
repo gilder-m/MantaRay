@@ -6,9 +6,7 @@
 use std::time::Duration;
 
 use mantaray_device::rig::{Fault, Rig};
-use mantaray_device::{
-    CountState, CountWatch, Mcb, Presets, RemoteMcb, TcpTransport, advance,
-};
+use mantaray_device::{CountState, CountWatch, Mcb, Presets, RemoteMcb, TcpTransport, advance};
 
 const RATE: f64 = 1000.0;
 

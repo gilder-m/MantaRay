@@ -46,7 +46,11 @@ fn run(app: &mut App, rig: &Rig, name: &str, text: &str, mut each: impl FnMut(&R
         if app.job.is_none() {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "the job hung: {}", app.status);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the job hung: {}",
+            app.status
+        );
         let frame = each(rig);
         app.advance_by(frame);
     }
@@ -91,7 +95,10 @@ fn f1_a_job_does_not_save_a_short_spectrum_when_data_reads_fail() {
     let wrote = saved.exists();
     let _ = std::fs::remove_file(&saved);
     assert!(armed, "the count never reached LT 2");
-    assert!(!wrote, "a spectrum that was never read was saved; status: {status}");
+    assert!(
+        !wrote,
+        "a spectrum that was never read was saved; status: {status}"
+    );
     assert!(
         status.contains("job stopped") && status.contains("spectrum"),
         "{status}"
