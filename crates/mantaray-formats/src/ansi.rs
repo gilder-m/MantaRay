@@ -118,10 +118,28 @@ pub(crate) fn text(text: &str) -> Encoded {
 }
 
 /// Decodes stored text: UTF-8 if it is valid UTF-8, Windows-1252 otherwise.
+///
+/// One exception: UTF-8 cut inside its last character. 0.2.4 cut fields at
+/// a byte count (a `.Chn` description at 63 bytes), so "1 µCi ... µCi" could
+/// end on the first byte of a `µ`; read as Windows-1252 the whole field came
+/// back "1 Âµ..." and a re-save stored that (Lucius f2). When the bytes are
+/// valid UTF-8 up to an unfinished last character, and that valid part holds
+/// a character beyond ASCII (so it is UTF-8 and not Windows-1252 text that
+/// merely ends on a lead byte, as "café" does in E9), the valid part is read
+/// and the cut character dropped.
 pub(crate) fn decode(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(text) => text.to_string(),
-        Err(_) => bytes.iter().copied().map(char_of).collect(),
+        Err(error) => {
+            let valid = bytes.get(..error.valid_up_to()).unwrap_or_default();
+            if error.error_len().is_none()
+                && let Ok(text) = std::str::from_utf8(valid)
+                && !text.is_ascii()
+            {
+                return text.to_string();
+            }
+            bytes.iter().copied().map(char_of).collect()
+        }
     }
 }
 
