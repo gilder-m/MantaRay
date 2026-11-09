@@ -459,6 +459,17 @@ pub(crate) fn named(response: &egui::Response, name: &str) {
         .accesskit_node_builder(response.id, |node| node.set_label(name));
 }
 
+/// A checkbox with no words of its own, named by the label `label` in front
+/// of it. egui names a checkbox by its text even when that is empty, and an
+/// empty name would win over the label, so it is dropped first.
+fn bare_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: egui::Id) -> egui::Response {
+    let response = ui.checkbox(checked, "");
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.clear_label());
+    response.labelled_by(label)
+}
+
 /// Adds a slider named by the label `label`, number box and all.
 ///
 /// A slider with no text of its own is two widgets - the bar and the number
@@ -2572,42 +2583,46 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             }
                         }
                         ui.end_row();
-                        ui.label("Fine gain");
+                        let label = ui.label("Fine gain").id;
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut properties.amplifier.fine_gain)
                                     .speed(0.01)
                                     .range(0.4..=1.0),
                             )
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
                         ui.label("Total gain");
                         ui.label(format!("{:.3}", properties.amplifier.gain()));
                         ui.end_row();
-                        ui.label("Rise time (us)");
+                        let label = ui.label("Rise time (us)").id;
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut properties.amplifier.rise_time_us)
                                     .range(0.2..=23.0)
                                     .speed(0.1),
                             )
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
-                        ui.label("Flat top (us)");
+                        let label = ui.label("Flat top (us)").id;
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut properties.amplifier.flat_top_us)
                                     .range(0.3..=2.4)
                                     .speed(0.1),
                             )
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
-                        ui.label("Pole zero");
+                        let label = ui.label("Pole zero").id;
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut properties.amplifier.pole_zero)
                                     .range(0..=4095),
                             )
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
                     });
@@ -2628,7 +2643,7 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                 }
                 1 => {
                     egui::Grid::new("adc").num_columns(2).show(ui, |ui| {
-                        ui.label("Conversion gain");
+                        let label = ui.label("Conversion gain").id;
                         let mut gain = properties.adc.conversion_gain;
                         egui::ComboBox::from_id_salt("conversion-gain")
                             .selected_text(gain.to_string())
@@ -2642,23 +2657,27 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                                         changed = true;
                                     }
                                 }
-                            });
+                            })
+                            .response
+                            .labelled_by(label);
                         properties.adc.conversion_gain = gain;
                         ui.end_row();
-                        ui.label("Lower discriminator");
+                        let label = ui.label("Lower discriminator").id;
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut properties.adc.lower_discriminator)
                                     .range(0..=identity.channels as u32),
                             )
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
-                        ui.label("Upper discriminator");
+                        let label = ui.label("Upper discriminator").id;
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut properties.adc.upper_discriminator)
                                     .range(0..=identity.channels as u32),
                             )
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
                     });
@@ -2697,9 +2716,9 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             .unwrap_or(properties.presets)
                     };
                     let edit = |ui: &mut egui::Ui, label: &str, value: &mut Option<f64>| {
-                        ui.label(label);
+                        let label = ui.label(label).id;
                         let mut enabled = value.is_some();
-                        if ui.checkbox(&mut enabled, "").changed() {
+                        if bare_checkbox(ui, &mut enabled, label).changed() {
                             *value = enabled.then_some(0.0);
                         }
                         let mut number = value.unwrap_or(0.0);
@@ -2708,6 +2727,7 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                                 enabled,
                                 egui::DragValue::new(&mut number).range(0.0..=1e9),
                             )
+                            .labelled_by(label)
                             .changed()
                         {
                             *value = Some(number);
@@ -2720,27 +2740,29 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             .show(ui, |ui| {
                                 edit(ui, "Real time (s)", &mut presets.real_time);
                                 edit(ui, "Live time (s)", &mut presets.live_time);
-                                ui.label("ROI peak");
+                                let label = ui.label("ROI peak").id;
                                 let mut peak_on = presets.roi_peak.is_some();
-                                if ui.checkbox(&mut peak_on, "").changed() {
+                                if bare_checkbox(ui, &mut peak_on, label).changed() {
                                     presets.roi_peak = peak_on.then_some(0);
                                 }
                                 let mut peak = presets.roi_peak.unwrap_or(0);
                                 if ui
                                     .add_enabled(peak_on, egui::DragValue::new(&mut peak))
+                                    .labelled_by(label)
                                     .changed()
                                 {
                                     presets.roi_peak = Some(peak);
                                 }
                                 ui.end_row();
-                                ui.label("ROI integral");
+                                let label = ui.label("ROI integral").id;
                                 let mut integral_on = presets.roi_integral.is_some();
-                                if ui.checkbox(&mut integral_on, "").changed() {
+                                if bare_checkbox(ui, &mut integral_on, label).changed() {
                                     presets.roi_integral = integral_on.then_some(0);
                                 }
                                 let mut integral = presets.roi_integral.unwrap_or(0);
                                 if ui
                                     .add_enabled(integral_on, egui::DragValue::new(&mut integral))
+                                    .labelled_by(label)
                                     .changed()
                                 {
                                     presets.roi_integral = Some(integral);
@@ -2761,23 +2783,27 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                         }
                         if let Some(preset) = presets.uncertainty.as_mut() {
                             ui.horizontal(|ui| {
-                                ui.label("limit %");
+                                let label = ui.label("limit %").id;
                                 ui.add(
                                     egui::DragValue::new(&mut preset.limit_percent)
                                         .speed(0.1)
                                         .range(0.0..=f64::MAX),
-                                );
-                                ui.label("channels");
+                                )
+                                .labelled_by(label);
+                                // Both ends are read as "channels", low first.
+                                let label = ui.label("channels").id;
                                 // The range cannot run backwards: each end is
                                 // bounded by the other.
                                 let (low, high) = (preset.low_channel, preset.high_channel);
                                 ui.add(
                                     egui::DragValue::new(&mut preset.low_channel).range(0..=high),
-                                );
+                                )
+                                .labelled_by(label);
                                 ui.add(
                                     egui::DragValue::new(&mut preset.high_channel)
                                         .range(low..=usize::MAX),
-                                );
+                                )
+                                .labelled_by(label);
                             });
                         }
                         let mut mda_on = presets.mda.is_some();
@@ -2791,13 +2817,14 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                         }
                         if let Some(preset) = presets.mda.as_mut() {
                             ui.horizontal(|ui| {
-                                ui.label("target Bq");
+                                let label = ui.label("target Bq").id;
                                 ui.add(
                                     egui::DragValue::new(&mut preset.target)
                                         .speed(0.5)
                                         .range(0.0..=f64::MAX),
-                                );
-                                ui.label("efficiency");
+                                )
+                                .labelled_by(label);
+                                let label = ui.label("efficiency").id;
                                 // Fractions above zero and at most one: the
                                 // MDA divides by both, and the device refuses
                                 // anything else (85 for 85 % would stop at
@@ -2806,13 +2833,15 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                                     egui::DragValue::new(&mut preset.efficiency)
                                         .speed(0.001)
                                         .range(MDA_FRACTION_RANGE),
-                                );
-                                ui.label("yield");
+                                )
+                                .labelled_by(label);
+                                let label = ui.label("yield").id;
                                 ui.add(
                                     egui::DragValue::new(&mut preset.yield_fraction)
                                         .speed(0.01)
                                         .range(MDA_FRACTION_RANGE),
-                                );
+                                )
+                                .labelled_by(label);
                             });
                         }
                         ui.horizontal(|ui| {
@@ -2896,9 +2925,8 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                             }
                         }
                         ui.end_row();
-                        ui.label("Enabled");
-                        changed |= ui
-                            .checkbox(&mut properties.high_voltage.enabled, "")
+                        let label = ui.label("Enabled").id;
+                        changed |= bare_checkbox(ui, &mut properties.high_voltage.enabled, label)
                             .changed();
                         ui.end_row();
                         ui.label("Measured");
@@ -2925,16 +2953,18 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                         .checkbox(&mut properties.stabilizer.zero_enabled, "Zero stabiliser")
                         .changed();
                     egui::Grid::new("stab").num_columns(2).show(ui, |ui| {
-                        ui.label("Gain peak channel");
+                        let label = ui.label("Gain peak channel").id;
                         changed |= ui
                             .add(egui::DragValue::new(
                                 &mut properties.stabilizer.gain_channel,
                             ))
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
-                        ui.label("Gain window");
+                        let label = ui.label("Gain window").id;
                         changed |= ui
                             .add(egui::DragValue::new(&mut properties.stabilizer.gain_width))
+                            .labelled_by(label)
                             .changed();
                         ui.end_row();
                     });
