@@ -614,3 +614,18 @@ fn a_constant_efficiency_typed_as_a_percent_is_refused() {
     );
     assert!(app.status.contains("in force"), "{}", app.status);
 }
+
+#[test]
+fn interpolating_through_no_readable_point_is_not_in_force() {
+    // Comma decimals do not parse, so no point was left; the dialog still
+    // said an interpolated curve was in force.
+    let mut harness = bare_harness(mantaray_gui::dialogs::Dialog::Efficiency);
+    harness.state_mut().dialogs.efficiency_points = vec![("59,5".into(), "0,08".into())];
+    harness.run();
+    harness.get_by_label("Interpolate through points").click();
+    harness.run();
+    let app = harness.state();
+    assert_eq!(app.efficiency, None);
+    assert!(app.status.contains("not in force"), "{}", app.status);
+    assert!(app.status.contains("no point"), "{}", app.status);
+}

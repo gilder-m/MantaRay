@@ -3630,19 +3630,14 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 ui.add(egui::DragValue::new(&mut app.dialogs.efficiency_constant).speed(0.001))
                     .labelled_by(label);
                 if ui.button("Use").clicked() {
-                    // Zero is no efficiency: it reported every nuclide found
-                    // at 0 Bq.
-                    if app.dialogs.efficiency_constant > 0.0 {
-                        app.efficiency = Some(EfficiencyCalibration::constant(
-                            app.dialogs.efficiency_constant,
-                        ));
-                        actions.push(Action::Status("constant efficiency in force".into()));
-                    } else {
-                        actions.push(Action::Status(
-                            "an efficiency of 0 gives no activities - enter the fraction, \
-                             e.g. 0.05 for 5 %"
-                                .into(),
-                        ));
+                    match efficiency_refusal(app.dialogs.efficiency_constant) {
+                        None => {
+                            app.efficiency = Some(EfficiencyCalibration::constant(
+                                app.dialogs.efficiency_constant,
+                            ));
+                            actions.push(Action::Status("constant efficiency in force".into()));
+                        }
+                        Some(refusal) => actions.push(Action::Status(refusal)),
                     }
                 }
             });
