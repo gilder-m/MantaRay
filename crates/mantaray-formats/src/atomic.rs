@@ -77,16 +77,16 @@ fn write_atomic_with(
         Err(error) => return Err(error),
     };
 
-    let (scratch, mut file) = create_scratch(&directory, name)?;
+    let (scratch, mut part) = create_scratch(&directory, name)?;
     let written = (|| {
         if let Some(permissions) = existing {
             // Best effort: a FAT stick or a network share may refuse to set
             // modes at all, and that must not make the save fail.
-            file.set_permissions(permissions).ok();
+            part.set_permissions(permissions).ok();
         }
-        fill(&mut file)?;
-        file.sync_all()?;
-        drop(file);
+        fill(&mut part)?;
+        part.sync_all()?;
+        drop(part);
         fs::rename(&scratch, &target)
     })();
     if let Err(error) = written {
