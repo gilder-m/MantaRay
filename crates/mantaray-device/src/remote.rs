@@ -770,6 +770,15 @@ impl RemoteMcb {
                  the spectrum {})",
                 self.spectrum.len()
             )),
+            // A `DATA 0` beside a spectrum of channels (the UMCBI road with a
+            // zero library length) carries no channels, and believed it kept
+            // the old counts under the new clocks: a final one let a STOP
+            // succeed on them and a SAVE write them (swarm DEV-1). It is a
+            // spectrum that could not be read.
+            Ok(0) if !self.spectrum.channels.is_empty() => Err(format!(
+                "the spectrum came back empty (DATA 0) beside a spectrum of {} channels",
+                self.spectrum.len()
+            )),
             Ok(_) => parse_status(&status)
                 .ok_or_else(|| format!("the status reply is not a status line: {status:.60?}")),
         };

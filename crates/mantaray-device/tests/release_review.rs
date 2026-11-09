@@ -421,11 +421,13 @@ fn an_err_reply_on_the_final_fetch_is_still_retried() {
 /// the final clocks and a SAVE writes stale counts. An empty final DATA has
 /// to count as an unreadable fetch (tried again, then the STOP fails as F2).
 #[test]
-#[ignore = "DEV-1 open"]
 fn an_empty_final_fetch_is_not_believed() {
     let rig = Rig::new(16);
     let mut mcb = counting(&rig, 1000.0, 60.0);
     advance(&mut mcb, 0.5).expect("poll");
+    // The detector counts on after the last poll, so the final spectrum
+    // differs from the one the mirror holds.
+    rig.tick(0.4);
     rig.fault(Fault::Reply {
         verb: "SHOW_DATA".into(),
         reply: "DATA 0".into(),
@@ -452,7 +454,8 @@ fn a_gate_status_read_does_not_clear_a_failed_fetch_mark() {
         count: 1,
         execute: true,
     });
-    advance(&mut mcb, 0.5).expect("poll");
+    // The failed fetch is the poll's error.
+    let _ = advance(&mut mcb, 0.5);
     assert!(mcb.reading_untrusted().is_some(), "the failed fetch marks it");
     mcb.apply_presets(Presets::live(5.0)).expect("preset");
     assert!(
