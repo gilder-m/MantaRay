@@ -200,10 +200,10 @@ pub fn read(bytes: &[u8]) -> Result<Spectrum, FormatError> {
         let time = ascii(&record[28..38]);
         spectrum.start_time = parse_datetime(&date, &time);
         if spectrum.live_time <= 0.0 {
-            spectrum.live_time = ascii(&record[38..48]).trim().parse().unwrap_or(0.0);
+            spectrum.live_time = ascii_time(&record[38..48], "live")?;
         }
         if spectrum.real_time <= 0.0 {
-            spectrum.real_time = ascii(&record[48..58]).trim().parse().unwrap_or(0.0);
+            spectrum.real_time = ascii_time(&record[48..58], "real")?;
         }
     }
 
@@ -470,6 +470,26 @@ fn record_text(bytes: &[u8], record: u16) -> Option<String> {
 
 /// Reads a fixed-width text field, dropping the padding ORTEC leaves behind.
 /// The text is Windows-1252, as ORTEC's software writes it (see [`crate::ansi`]).
+/// An acquisition record's ten-character time, the fallback when the header
+/// time is 0. Unreadable text is 0, as before; text that reads as NaN or
+/// infinity (Rust's parser takes "inf" and "NaN") is refused, as the header
+/// path refuses such bits (Lucius c2).
+fn ascii_time(bytes: &[u8], which: &str) -> Result<f64, FormatError> {
+    let text = ascii(bytes);
+    let seconds: f64 = text.trim().parse().unwrap_or(0.0);
+    if seconds.is_finite() {
+        Ok(seconds)
+    } else {
+        Err(FormatError::invalid(
+            ".Spc acquisition record",
+            format!(
+                "{which} time {:?}: a time has to be a finite number of seconds",
+                text.trim()
+            ),
+        ))
+    }
+}
+
 fn ascii(bytes: &[u8]) -> String {
     ansi::decode(bytes)
         .chars()
