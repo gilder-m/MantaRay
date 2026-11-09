@@ -315,6 +315,8 @@ fn starting_stamps_the_measurement_date_and_clear_takes_it_back() {
         ("START", "OK"),
         ("STOP", "OK"),
         IDLE,
+        // A confirmed STOP reads the spectrum it stopped at (deep review F2).
+        ("SHOW_DATA", "DATA 2 0 0"),
         IDLE,
         ("START", "OK"),
         ("CLEAR", "OK"),
@@ -570,6 +572,8 @@ fn an_uncertainty_preset_does_stop_a_remote_instrument() {
         ("SHOW_DATA", PEAK),
         ("STOP", "OK"),
         IDLE,
+        // A confirmed STOP reads the spectrum it stopped at (deep review F2).
+        ("SHOW_DATA", PEAK),
     ]);
     let mut remote = RemoteMcb::connect(Box::new(transport), 1, "BENCH-01").expect("connect");
 

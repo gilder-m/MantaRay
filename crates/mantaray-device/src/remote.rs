@@ -96,6 +96,9 @@ pub struct RemoteMcb {
     provisional_start: bool,
     /// Whether a STOP's confirm reads are under way (they date nothing).
     confirming: bool,
+    /// The confirm read that found the detector stopped: its status reply
+    /// and when it arrived, for the final fetch ([`Self::final_fetch`]).
+    confirm_reply: Option<(String, chrono::NaiveDateTime, std::time::Instant)>,
     /// When the latest fetch's status reply arrived ([`Mcb::reading_at`]).
     reading_at: Option<std::time::Instant>,
     /// When the START behind a provisional date was accepted: no date of
@@ -146,6 +149,10 @@ const CONFIRM_READS: usize = 10;
 /// The default pause between the status reads that confirm a STOP
 /// (device-spec 2.5: every 100 ms, for up to a second).
 const CONFIRM_STEP: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How many times the spectrum is asked for after a confirmed STOP before
+/// the STOP is called failed ([`RemoteMcb::final_fetch`]).
+const FINAL_FETCH_TRIES: usize = 3;
 
 /// One `SHOW_STATUS` reading. Only a reply that carries the counting flag
 /// and both clocks is one: the 926's adapter has been seen answering with
@@ -301,6 +308,7 @@ impl RemoteMcb {
             start_unseen: None,
             provisional_start: false,
             confirming: false,
+            confirm_reply: None,
             reading_at: None,
             start_sent: None,
         };
@@ -440,6 +448,7 @@ impl RemoteMcb {
     /// sent, but could not be confirmed.
     fn confirm_stopped(&mut self) -> Result<bool, DeviceError> {
         self.confirming = true;
+        self.confirm_reply = None;
         let confirmed = self.confirm_reads();
         self.confirming = false;
         confirmed
@@ -482,6 +491,50 @@ impl RemoteMcb {
             data,
             read_at,
             read_instant,
+        })
+        .map(|_| ())
+    }
+
+    /// Reads the spectrum the detector stopped at, after a confirmed STOP:
+    /// one SHOW_DATA beside the confirming status read (taken after the
+    /// stop, so its clocks are the final ones), tried up to
+    /// [`FINAL_FETCH_TRIES`] times.
+    ///
+    /// The confirm read only the status, so the mirror kept the channels and
+    /// clocks of the last regular fetch, and a SAVE straight after STOP - a
+    /// job's STOP / SAVE, MAESTRO's own pattern - wrote that: 1.54 s / 154
+    /// counts of a detector stopped at 2.00 s / 200 (deep review F2). A
+    /// spectrum that cannot be read fails the STOP, saying the detector did
+    /// stop, and leaves the mirror marked untrusted, never quietly short.
+    fn final_fetch(&mut self) -> Result<(), DeviceError> {
+        let Some((status, read_at, read_instant)) = self.confirm_reply.take() else {
+            return Ok(());
+        };
+        let mut reason = None;
+        for _ in 0..FINAL_FETCH_TRIES {
+            let landed = self.raw("SHOW_DATA").and_then(|data| {
+                self.integrate(Fetched {
+                    status: status.clone(),
+                    data,
+                    read_at,
+                    read_instant,
+                })
+            });
+            match landed {
+                Ok(true) => return Ok(()),
+                Ok(false) => reason = self.untrusted.clone(),
+                Err(error) => reason = Some(error.to_string()),
+            }
+        }
+        let reason = reason.unwrap_or_else(|| "its channel count did not hold still".into());
+        self.untrusted = Some(format!("the final spectrum could not be read: {reason}"));
+        Err(DeviceError::Command {
+            command: "STOP".into(),
+            detail: format!(
+                "the detector stopped, but its final spectrum could not be read \
+                 ({FINAL_FETCH_TRIES} tries): {reason}; the spectrum shown is from \
+                 before the stop until a reading lands"
+            ),
         })
     }
 
@@ -628,7 +681,10 @@ impl RemoteMcb {
     /// Parsing lives here rather than with the fetch so that a courier can
     /// stay a courier: it moves bytes, and what the bytes mean - including
     /// an `ERR` where an answer should be - is decided on the caller's side.
-    fn integrate(&mut self, fetched: Fetched) -> Result<(), DeviceError> {
+    ///
+    /// `Ok(true)` when the fetch landed whole: its channels with its clocks,
+    /// on a believed status.
+    fn integrate(&mut self, fetched: Fetched) -> Result<bool, DeviceError> {
         // The spectrum first, though its errors are said after the status
         // is worked in. A fetch whose channels the mirror holds back (a new
         // length, not yet believed) is set aside whole: status, clocks and
@@ -654,7 +710,7 @@ impl RemoteMcb {
                     self.spectrum.total_counts(),
                 ));
             }
-            return Ok(());
+            return Ok(false);
         }
         self.held_last = held;
 
@@ -776,7 +832,7 @@ impl RemoteMcb {
         // replaces it, so a detector slow to begin is dated when it began.
         // Both are [`Self::date_start`], called on the believed status above.
         self.freshened = true;
-        Ok(())
+        Ok(!held && self.untrusted.is_none())
     }
 
     /// Parses a `DATA <n> <count>...` reply into the scratch; the channel
@@ -1169,6 +1225,9 @@ impl Mcb for RemoteMcb {
         let read_instant = std::time::Instant::now();
         let read_at = chrono::Local::now().naive_local();
         self.reading_at = Some(read_instant);
+        if self.confirming {
+            self.confirm_reply = (!reading.active).then(|| (reply.clone(), read_at, read_instant));
+        }
         self.see_start(reading, read_at, read_instant, false);
         // An accepted START no reading has shown begin yet counts as
         // counting: the detector may be about to raise its flag.
@@ -1270,7 +1329,8 @@ impl Mcb for RemoteMcb {
             self.provisional_start = false;
         }
         if stopped? {
-            return Ok(());
+            // Stopped: the count it stopped at is what the mirror holds next.
+            return self.final_fetch();
         }
         Err(match checked(reply) {
             Err(DeviceError::Command { detail, .. }) => DeviceError::Command {
@@ -1353,7 +1413,7 @@ impl Mcb for RemoteMcb {
                     self.since_poll = 0.0;
                 }
                 match brought {
-                    Some(fetched) => self.integrate(fetched?),
+                    Some(fetched) => self.integrate(fetched?).map(|_| ()),
                     None => Ok(()),
                 }
             }
