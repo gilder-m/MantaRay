@@ -522,7 +522,7 @@ impl RemoteMcb {
             });
             match landed {
                 Ok(true) => return Ok(()),
-                Ok(false) => reason = self.untrusted.clone(),
+                Ok(false) => reason.clone_from(&self.untrusted),
                 Err(error) => reason = Some(error.to_string()),
             }
         }
