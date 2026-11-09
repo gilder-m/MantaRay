@@ -108,7 +108,12 @@ line), `$ROI`, `$PRESETS`, `$ENER_FIT`, `$MCA_CAL`, `$SHAPE_CAL`. Unknown keywor
 are ignored, so files carrying `$LATITUDE`, `$ELEVATION` or `$ENDRECORD` load
 without complaint. CRLF, blank lines, fractional seconds in `$DATE_MEA` and a
 missing units token in `$MCA_CAL` are all tolerated, because real files contain
-all of them. Channels missing from the end of `$DATA` are zero filled.
+all of them. Channels missing from the end of `$DATA` are zero filled. The range
+is the first and the last channel, both inclusive (1024 channels from channel 100
+are `100 1123`); a range that ends before it starts is refused. MantaRay 0.2.4 and
+earlier wrote `offset count-1` there, so a file of theirs saved at an offset is
+read by its count of channels instead (it names `AP# mantaray`, starts above 0 and
+holds exactly `last + 1` counts).
 
 ## `.Roi` - region table
 

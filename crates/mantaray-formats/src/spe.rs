@@ -38,15 +38,42 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
         .ok_or_else(|| FormatError::missing("$DATA: channel range"))?;
     let mut range_parts = range.split_whitespace();
     let first: usize = parse_field(range_parts.next(), "$DATA: first channel")?;
-    let last: usize = parse_field(range_parts.next(), "$DATA: last channel")?;
+    let mut last: usize = parse_field(range_parts.next(), "$DATA: last channel")?;
+    // The range is the first and the last channel, both inclusive. MantaRay
+    // 0.2.4 and earlier wrote `offset count-1` instead, so a file it saved at
+    // an offset says less than it holds (or ends before it starts) while every
+    // count is there. Such a file is read as what it holds: it names this
+    // program, starts above 0, and has exactly `last + 1` counts (the block's
+    // lines are the range line and then the counts). A file written by the
+    // spec cannot match that, because its count is `last - first + 1`.
+    if first > 0
+        && data.1.len() == last.saturating_add(2)
+        && blocks
+            .iter()
+            .filter(|(keyword, _)| keyword == "$SPEC_REM:")
+            .flat_map(|(_, lines)| lines)
+            .any(|line| line.starts_with("AP# mantaray"))
+    {
+        last = first + data.1.len() - 2;
+    }
     // The declared range sizes an allocation, so it is not taken on faith: no
     // real MCB reaches a million channels, and an otherwise ordinary file
     // saying `0 900000000` would otherwise force gigabytes and an abort.
-    let count = last
-        .checked_sub(first)
-        .and_then(|span| span.checked_add(1))
-        .filter(|count| *count <= MOST_CHANNELS)
-        .ok_or_else(|| FormatError::invalid("$DATA: channel range", format!("{first} {last}")))?;
+    if last < first {
+        return Err(FormatError::invalid(
+            "$DATA: channel range",
+            format!("{first} {last}: the last channel {last} is before the first channel {first}"),
+        ));
+    }
+    let count = last - first + 1;
+    if count > MOST_CHANNELS {
+        return Err(FormatError::invalid(
+            "$DATA: channel range",
+            format!(
+                "{first} {last} is {count} channels, more than the {MOST_CHANNELS} any MCB has"
+            ),
+        ));
+    }
 
     let mut channels = Vec::with_capacity(count);
     for line in lines.take(count) {
@@ -211,9 +238,12 @@ pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
         format_seconds(spectrum.real_time)
     ));
 
+    // First and last channel, both inclusive, as MAESTRO writes and reads
+    // them: 1024 channels from channel 100 are `100 1123`.
     out.push_str("$DATA:\n");
-    let last = spectrum.len().saturating_sub(1);
-    out.push_str(&format!("{} {}\n", spectrum.channel_offset, last));
+    let first = usize::from(spectrum.channel_offset);
+    let last = (first + spectrum.len()).saturating_sub(1);
+    out.push_str(&format!("{first} {last}\n"));
     for count in &spectrum.channels {
         out.push_str(&format!("{count}\n"));
     }
