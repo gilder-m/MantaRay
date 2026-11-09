@@ -2196,22 +2196,25 @@ fn insight_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
             .num_columns(2)
             .min_col_width(70.0)
             .show(ui, |ui| {
-                ui.label("Rise time");
-                changed |= ui
-                    .add(egui::Slider::new(&mut amplifier.rise_time_us, 0.8..=12.0).suffix(" us"))
-                    .changed();
+                let label = ui.label("Rise time").id;
+                changed |= named_slider(
+                    ui,
+                    egui::Slider::new(&mut amplifier.rise_time_us, 0.8..=12.0).suffix(" us"),
+                    label,
+                )
+                .changed();
                 ui.end_row();
-                ui.label("Flat top");
-                changed |= ui
-                    .add(egui::Slider::new(&mut amplifier.flat_top_us, 0.3..=2.4).suffix(" us"))
-                    .changed();
+                let label = ui.label("Flat top").id;
+                changed |= named_slider(
+                    ui,
+                    egui::Slider::new(&mut amplifier.flat_top_us, 0.3..=2.4).suffix(" us"),
+                    label,
+                )
+                .changed();
                 ui.end_row();
-                ui.label("Pole zero");
+                let label = ui.label("Pole zero").id;
                 let mut pole_zero = amplifier.pole_zero as i32;
-                if ui
-                    .add(egui::Slider::new(&mut pole_zero, 0..=4095))
-                    .changed()
-                {
+                if named_slider(ui, egui::Slider::new(&mut pole_zero, 0..=4095), label).changed() {
                     amplifier.pole_zero = pole_zero as u16;
                     changed = true;
                 }
@@ -5546,12 +5549,15 @@ fn dashboard_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
             let edit = |ui: &mut egui::Ui, label: &str, value: &mut Option<f64>, speed: f64| {
                 ui.horizontal(|ui| {
                     let mut enabled = value.is_some();
-                    if ui.checkbox(&mut enabled, label).changed() {
+                    let checkbox = ui.checkbox(&mut enabled, label);
+                    if checkbox.changed() {
                         *value = enabled.then_some(0.0);
                     }
                     let mut number = value.unwrap_or(0.0);
+                    // The limit is named by the checkbox that turns it on.
                     if ui
                         .add_enabled(enabled, egui::DragValue::new(&mut number).speed(speed))
+                        .labelled_by(checkbox.id)
                         .changed()
                     {
                         *value = Some(number);
@@ -5724,10 +5730,12 @@ fn qa_dialog(app: &mut App, ctx: &egui::Context) {
 fn batch_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(app, ctx, Dialog::Batch, "Batch queue", |app, ui| {
         ui.horizontal(|ui| {
-            ui.label("Sample id");
-            ui.add(egui::TextEdit::singleline(&mut app.dialogs.queue_id).desired_width(90.0));
-            ui.label("live time (s)");
-            ui.add(egui::DragValue::new(&mut app.dialogs.queue_live_time).speed(10.0));
+            let label = ui.label("Sample id").id;
+            ui.add(egui::TextEdit::singleline(&mut app.dialogs.queue_id).desired_width(90.0))
+                .labelled_by(label);
+            let label = ui.label("live time (s)").id;
+            ui.add(egui::DragValue::new(&mut app.dialogs.queue_live_time).speed(10.0))
+                .labelled_by(label);
             if ui.button("Queue").clicked() {
                 let job = SampleJob::new(&app.dialogs.queue_id, app.dialogs.queue_live_time);
                 app.queue.push(job);
@@ -6224,7 +6232,10 @@ fn open_path_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action
         "Open a file by path",
         |app, ui| {
             ui.label("Type or paste a path. Useful when no native file dialog is available.");
-            ui.add(egui::TextEdit::singleline(&mut app.dialogs.path_input).desired_width(420.0));
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut app.dialogs.path_input).desired_width(420.0));
+            // The line over it asks for a path; that is its name.
+            named(&field, "path");
             ui.horizontal(|ui| {
                 if ui.button("Open").clicked() {
                     let path = PathBuf::from(app.dialogs.path_input.trim());
