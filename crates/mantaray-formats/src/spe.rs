@@ -27,19 +27,32 @@ use crate::{FormatError, MOST_CHANNELS, ansi};
 /// Reads a `.Spe` file from its bytes, as stored on disk.
 ///
 /// MAESTRO writes the file in Windows-1252, one byte per character; text that
-/// is valid UTF-8 (pure ASCII, or what MantaRay 0.2.4 and earlier wrote) is
-/// read as UTF-8. See [`crate::ansi`].
+/// is valid UTF-8 (pure ASCII, or what mantaray 0.2.4 and earlier wrote) is
+/// read as UTF-8.
+///
+/// # Errors
+///
+/// As [`read()`].
 pub fn read_bytes(bytes: &[u8]) -> Result<Spectrum, FormatError> {
     read(&ansi::decode(bytes))
 }
 
-/// Writes a `.Spe` file as the bytes to store: [`write`] in Windows-1252, the
-/// code page MAESTRO reads it in. A character it lacks is stored as `?`.
+/// Writes a `.Spe` file as the bytes to store: [`write()`] in Windows-1252,
+/// the code page MAESTRO reads it in. A character it lacks is stored as `?`.
+///
+/// # Errors
+///
+/// As [`write()`].
 pub fn write_bytes(spectrum: &Spectrum) -> Result<Vec<u8>, FormatError> {
     Ok(ansi::text(&write(spectrum)?).bytes)
 }
 
 /// Reads a `.Spe` file already decoded to text.
+///
+/// # Errors
+///
+/// A missing `$DATA:` block, a channel range that ends before it starts or
+/// is longer than any MCB, a count or a time that is not a number.
 pub fn read(text: &str) -> Result<Spectrum, FormatError> {
     let blocks = split_blocks(text);
     let data = blocks

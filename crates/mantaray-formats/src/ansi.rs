@@ -1,11 +1,11 @@
 //! Windows-1252, the single-byte text of ORTEC's files.
 //!
-//! MAESTRO and GammaVision are Windows "ANSI" programs: the descriptions in a
-//! `.Chn` or `.Spc` and the whole of a `.Spe` are one byte per character in
-//! the Windows code page, which on the lab's (Western) PCs is Windows-1252.
-//! That is Latin-1 with printable characters in `0x80..=0x9F`, so `µ` is
-//! `0xB5` and `°` is `0xB0`. MantaRay 0.2.4 and earlier stored UTF-8 there,
-//! which MAESTRO shows as `Âµ` and `Â°`.
+//! MAESTRO is a Windows "ANSI" program, as is ORTEC's other software: the
+//! descriptions in a `.Chn` or `.Spc` and the whole of a `.Spe` are one byte
+//! per character in the Windows code page, which on the lab's (Western) PCs
+//! is Windows-1252. That is Latin-1 with printable characters in
+//! `0x80..=0x9F`, so `µ` is `0xB5` and `°` is `0xB0`. mantaray 0.2.4 and
+//! earlier stored UTF-8 there, which MAESTRO shows as `Âµ` and `Â°`.
 //!
 //! On read, text that is valid UTF-8 is taken as UTF-8 (every pure-ASCII
 //! field, and what 0.2.4 wrote); anything else is Windows-1252. Single-byte

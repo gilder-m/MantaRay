@@ -469,7 +469,7 @@ fn record_text(bytes: &[u8], record: u16) -> Option<String> {
 }
 
 /// Reads a fixed-width text field, dropping the padding ORTEC leaves behind.
-/// The text is Windows-1252, as GammaVision writes it (see [`crate::ansi`]).
+/// The text is Windows-1252, as ORTEC's software writes it (see [`crate::ansi`]).
 fn ascii(bytes: &[u8]) -> String {
     ansi::decode(bytes)
         .chars()

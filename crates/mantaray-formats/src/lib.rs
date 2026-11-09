@@ -379,6 +379,11 @@ pub fn read_as(format: SpectrumFormat, bytes: &[u8]) -> Result<Spectrum, FormatE
 ///
 /// Through [`write_atomic`]: a save that fails leaves any file already at
 /// `path` exactly as it was.
+///
+/// # Errors
+///
+/// An extension with no writer, a spectrum the format cannot hold, or the
+/// write itself failing.
 pub fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), FormatError> {
     let path = path.as_ref();
     let format = SpectrumFormat::from_path(path).ok_or_else(|| unsupported(path, "writer"))?;
@@ -410,7 +415,11 @@ pub fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), 
 /// ORTEC's formats store text in Windows-1252, as MAESTRO reads it: a
 /// character outside it is saved as `?`, and a `.Chn` or `.Spc` description
 /// longer than its field is cut. The native `.json` holds any text, so it has
-/// nothing to say. Nothing is noted when the save fails.
+/// nothing to say.
+///
+/// # Errors
+///
+/// As [`save_spectrum`]; nothing is noted when the save fails.
 pub fn save_spectrum_noting(
     spectrum: &Spectrum,
     path: impl AsRef<Path>,
@@ -424,6 +433,7 @@ pub fn save_spectrum_noting(
 
 /// What saving `spectrum` as `format` changes in its text; see
 /// [`save_spectrum_noting`].
+#[must_use]
 pub fn text_notes(spectrum: &Spectrum, format: SpectrumFormat) -> Vec<String> {
     // The widths the writers use, so a note never disagrees with the file.
     let (width, kind) = match format {
