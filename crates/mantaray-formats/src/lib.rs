@@ -26,6 +26,7 @@ pub mod nndc;
 pub mod roi;
 pub mod spc;
 pub mod spe;
+pub mod version;
 
 use std::path::Path;
 
@@ -88,6 +89,22 @@ pub enum FormatError {
     /// JSON failure.
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+    /// A file of mantaray's own, from a format version newer than this build
+    /// reads. Refused rather than read, because a changed layout read with the
+    /// old rules is a wrong answer, not an error.
+    #[error(
+        "this file is format {found}, written by {written_by}; this is {}, which reads up to \
+         {supported} - open it with a newer mantaray",
+        version::WRITER
+    )]
+    TooNew {
+        /// The file's tag, e.g. `spectrum/2`.
+        found: String,
+        /// The newest tag of that kind this build reads, e.g. `spectrum/1`.
+        supported: String,
+        /// The `written_by` stamp, or "a newer mantaray" when there is none.
+        written_by: String,
+    },
 }
 
 impl FormatError {

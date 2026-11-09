@@ -50,6 +50,10 @@ impl PhotonKind {
 }
 
 /// A single gamma line of a nuclide.
+///
+/// In a saved library the energy and yield are required and the rest default,
+/// as in the short CSV form: a line added later must default too, or older
+/// libraries stop opening.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryPeak {
     /// Line energy in keV.
@@ -57,10 +61,13 @@ pub struct LibraryPeak {
     /// Gammas per 100 disintegrations (the "percent" of equation 22).
     pub yield_percent: f64,
     /// Where the line comes from.
+    #[serde(default)]
     pub photon: PhotonKind,
     /// Key line: must be present for the nuclide to be reported.
+    #[serde(default)]
     pub key_line: bool,
     /// Excluded from the weighted mean activity.
+    #[serde(default)]
     pub not_in_average: bool,
 }
 
@@ -84,7 +91,10 @@ impl LibraryPeak {
 }
 
 /// The eight nuclide flags of the library editor, in order `T F I N P C M A`.
+///
+/// A flag missing from a saved library reads as not set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NuclideFlags {
     /// (T) produced by thermal neutron activation.
     pub thermal_neutron_activation: bool,
@@ -147,6 +157,9 @@ impl NuclideFlags {
 }
 
 /// A nuclide and its lines.
+///
+/// Name, half life and lines are required in a saved library; the rest
+/// default, and so must any field added later.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Nuclide {
     /// Name, up to eight characters (e.g. `Co-60`).
@@ -154,8 +167,10 @@ pub struct Nuclide {
     /// Half life in seconds (0 for a stable or unspecified nuclide).
     pub half_life_seconds: f64,
     /// Two-sigma uncertainty of the library data, in percent.
+    #[serde(default)]
     pub uncertainty_percent: f64,
     /// Production and reporting flags.
+    #[serde(default)]
     pub flags: NuclideFlags,
     /// Gamma lines, in library order.
     pub peaks: Vec<LibraryPeak>,

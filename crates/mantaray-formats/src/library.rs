@@ -22,18 +22,39 @@ use std::path::Path;
 use mantaray_core::{LibraryPeak, Nuclide, NuclideFlags, NuclideLibrary, PhotonKind};
 
 use crate::FormatError;
+use crate::version::{Probe, Tagged};
 
 /// CSV header row written by [`write_csv`].
 pub const CSV_HEADER: &str = "nuclide,half_life_s,uncertainty_percent,flags,energy_kev,yield_percent,photon,key_line,not_in_average";
 
+/// Format tag written into every JSON library.
+///
+/// Libraries carried no tag until this one, so an untagged file is read as
+/// `library/1`, the only layout there was (see [`crate::version`]).
+pub const JSON_FORMAT_TAG: &str = "library/1";
+
+/// The newest major version of the JSON layout this build reads.
+const JSON_NEWEST: u32 = 1;
+
 /// Serialises a library as JSON.
+///
+/// The tag and writer stamp sit beside the library's own fields, so versions
+/// that predate them still read the file.
 pub fn write_json(library: &NuclideLibrary) -> Result<String, FormatError> {
-    Ok(serde_json::to_string_pretty(library)?)
+    Ok(serde_json::to_string_pretty(&Tagged::new(
+        JSON_FORMAT_TAG,
+        library,
+    ))?)
 }
 
 /// Parses a JSON library.
 pub fn read_json(text: &str) -> Result<NuclideLibrary, FormatError> {
-    Ok(serde_json::from_str(text)?)
+    match Probe::check(text, "library", JSON_NEWEST)? {
+        1 => Ok(serde_json::from_str(text)?),
+        other => Err(FormatError::Unsupported {
+            detail: format!("library/{other}"),
+        }),
+    }
 }
 
 /// Serialises a library as CSV, one row per line.
@@ -384,7 +405,15 @@ pub fn load(path: impl AsRef<Path>) -> Result<NuclideLibrary, FormatError> {
             // Decoded once for both attempts - the fallback used to copy the
             // whole file a second time just to try it as CSV.
             let text = text();
-            read_json(&text).or_else(|_| read_csv(&text))?
+            match read_json(&text) {
+                Ok(library) => library,
+                // JSON that names itself as something else, or as a newer
+                // library, is that - not a CSV to be parsed into nonsense.
+                Err(error @ (FormatError::TooNew { .. } | FormatError::BadMagic { .. })) => {
+                    return Err(error);
+                }
+                Err(_) => read_csv(&text)?,
+            }
         }
         other => {
             return Err(FormatError::Unsupported {

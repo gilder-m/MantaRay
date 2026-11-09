@@ -36,6 +36,14 @@ impl AcquisitionMode {
 }
 
 /// A histogram plus everything saved alongside it.
+///
+/// Saved spectra outlive the version that wrote them, so every field but the
+/// measurement itself reads as its default when a file lacks it. A field
+/// added here must have `#[serde(default)]` too, or every file saved before
+/// it stops opening; `golden_files.rs` in mantaray-formats holds that line.
+/// The counts and the two times stay required: a file without them is not
+/// an old spectrum but a broken one, and reading it as zero would be a wrong
+/// answer rather than an error.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spectrum {
     /// Channel contents.
@@ -45,28 +53,40 @@ pub struct Spectrum {
     /// Real (clock) time in seconds.
     pub real_time: f64,
     /// Local wall-clock time at which acquisition started.
+    #[serde(default)]
     pub start_time: Option<NaiveDateTime>,
     /// Detector number in the detector list (0 means "buffer").
+    #[serde(default)]
     pub detector_id: u16,
     /// Detector name, e.g. `DET-01`.
+    #[serde(default)]
     pub detector_name: String,
     /// Free-form detector description saved with the spectrum.
+    #[serde(default)]
     pub detector_description: String,
     /// Sample description (63 characters in `.Chn`, 128 in `.Spc`).
+    #[serde(default)]
     pub sample_description: String,
     /// Segment number (multi-segment hardware).
+    #[serde(default)]
     pub segment: u16,
     /// Channel offset of the first stored channel.
+    #[serde(default)]
     pub channel_offset: u16,
     /// Collection mode.
+    #[serde(default)]
     pub mode: AcquisitionMode,
     /// Energy calibration, when calibrated.
+    #[serde(default)]
     pub energy_calibration: Option<EnergyCalibration>,
     /// Peak-shape calibration, when available.
+    #[serde(default)]
     pub shape_calibration: Option<ShapeCalibration>,
     /// Marked regions of interest.
+    #[serde(default)]
     pub rois: RoiSet,
     /// Where the spectrum came from (file path or device label).
+    #[serde(default)]
     pub source: Option<String>,
 }
 

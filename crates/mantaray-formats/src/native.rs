@@ -3,42 +3,66 @@
 //! Unlike `.Chn`, `.Spe` and `.Spc`, this format carries the complete in-memory
 //! model - regions, both calibrations, descriptions, acquisition mode and the
 //! source it came from - so it round trips exactly.
+//!
+//! Versioning follows [`crate::version`]: the tag is `spectrum/1` and has been
+//! since the format began; a file from a newer major version is refused.
 
 use mantaray_core::Spectrum;
 use serde::{Deserialize, Serialize};
 
 use crate::FormatError;
+use crate::version::{Probe, WRITER, check};
 
 /// Format tag written into every file.
 pub const FORMAT_TAG: &str = "spectrum/1";
 
-#[derive(Serialize, Deserialize)]
-struct Document {
+/// The newest major version of the layout this build reads.
+const NEWEST: u32 = 1;
+
+#[derive(Serialize)]
+struct DocumentOut<'a> {
     /// Format tag, e.g. `spectrum/1`.
-    mantaray: String,
+    mantaray: &'static str,
+    /// Version that wrote the file; never read back to decide anything.
+    written_by: &'static str,
+    /// The spectrum itself.
+    spectrum: &'a Spectrum,
+}
+
+#[derive(Deserialize)]
+struct Document {
     /// The spectrum itself.
     spectrum: Spectrum,
 }
 
 /// Serialises a spectrum as pretty-printed JSON.
 pub fn write(spectrum: &Spectrum) -> Result<String, FormatError> {
-    let document = Document {
-        mantaray: FORMAT_TAG.to_string(),
-        spectrum: spectrum.clone(),
+    let document = DocumentOut {
+        mantaray: FORMAT_TAG,
+        written_by: WRITER,
+        spectrum,
     };
     Ok(serde_json::to_string_pretty(&document)?)
 }
 
 /// Parses a native JSON spectrum.
+///
+/// The tag is required: every file this format has ever written carries one,
+/// so a JSON document without it is something else.
 pub fn read(text: &str) -> Result<Spectrum, FormatError> {
-    let document: Document = serde_json::from_str(text)?;
-    if !document.mantaray.starts_with("spectrum/") {
+    let probe: Probe = serde_json::from_str(text)?;
+    let Some(tag) = probe.mantaray.as_deref() else {
         return Err(FormatError::BadMagic {
             expected: FORMAT_TAG.to_string(),
-            found: document.mantaray,
+            found: "a JSON document with no format tag".to_string(),
         });
+    };
+    match check("spectrum", Some(tag), NEWEST, probe.written_by.as_deref())? {
+        1 => Ok(serde_json::from_str::<Document>(text)?.spectrum),
+        other => Err(FormatError::Unsupported {
+            detail: format!("spectrum/{other}"),
+        }),
     }
-    Ok(document.spectrum)
 }
 
 #[cfg(test)]
