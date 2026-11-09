@@ -635,6 +635,13 @@ fn wheel_zoom_factor(scroll: f32, percent: u16) -> f64 {
 }
 
 /// The window's own header: source, times, counts, mode and a maximise button.
+/// Room the header's "not updating - last good reading" mark takes, with its
+/// spacing (measured: about 185 px in the default font).
+const UNTRUSTED_FULL_WIDTH: f32 = 200.0;
+
+/// Room the short "not updating" mark takes, with its spacing.
+const UNTRUSTED_SHORT_WIDTH: f32 = 90.0;
+
 fn header_bar(
     ui: &mut Ui,
     spectrum: &Spectrum,
@@ -648,18 +655,30 @@ fn header_bar(
     // or narrow window keeps the essentials - counts, dead time, the maximise
     // button - and the rest returns as there is room.
     let width = ui.available_width();
-    let (roomy, medium) = (width >= 640.0, width >= 430.0);
+    // While a reading is not believed, the mark saying so takes its room
+    // first, and the width-gated items are judged on what is left: added on
+    // top of them it pushed the counts and the maximise button past the right
+    // edge of any window under about 850 px (Lucius, review of c449cd6). A
+    // window too narrow for the whole sentence says "not updating", and the
+    // narrowest drop "REC" for it: the flag REC reads is part of the reading
+    // that is not believed.
+    let mark = header.untrusted.map(|reason| {
+        if width >= 640.0 + UNTRUSTED_FULL_WIDTH {
+            ("not updating - last good reading", UNTRUSTED_FULL_WIDTH, reason)
+        } else {
+            ("not updating", UNTRUSTED_SHORT_WIDTH, reason)
+        }
+    });
+    let left = width - mark.map_or(0.0, |(_, room, _)| room);
+    let (roomy, medium) = (left >= 640.0, left >= 430.0);
     ui.horizontal(|ui| {
-        if header.counting {
+        if header.counting && (medium || mark.is_none()) {
             ui.label(egui::RichText::new("● REC").color(colors.alarm.to_color()));
         }
         // The status line says this once; the window says it for as long as
         // it lasts, at any width, so frozen counts never pass for live ones.
-        if let Some(reason) = header.untrusted {
-            ui.label(
-                egui::RichText::new("not updating - last good reading")
-                    .color(colors.alarm.to_color()),
-            )
+        if let Some((text, _, reason)) = mark {
+            ui.label(egui::RichText::new(text).color(colors.alarm.to_color()))
             .on_hover_text(format!(
                 "{reason}. The counts shown are the last good reading, and changes are refused \
                  until a good reading comes in."

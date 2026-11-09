@@ -139,6 +139,20 @@ impl CliSession {
         }
     }
 
+    /// Refuses to save or copy the instrument's spectrum while its reading
+    /// is not believed: the mirror then holds the last good reading, which a
+    /// SAVE with no WAIT or STOP before it wrote without a word (review of
+    /// the save-path fixes, S-2).
+    fn refuse_untrusted(&self) -> Result<(), JobError> {
+        match self.detector.as_ref().and_then(|detector| detector.reading_untrusted()) {
+            Some(reason) => Err(JobError::host(format!(
+                "the detector's reading is not believed ({reason}); the spectrum held is the \
+                 last good reading, which a job does not save"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     fn note(&self, message: &str) {
         if self.trace {
             eprintln!("      {message}");
@@ -301,6 +315,7 @@ impl JobHost for CliSession {
     }
 
     fn fill_buffer(&mut self) -> Result<(), JobError> {
+        self.refuse_untrusted()?;
         self.buffer = self.instrument()?.spectrum().clone();
         self.buffer.sample_description = self.sample_description.clone();
         self.buffer_path = None;
@@ -316,6 +331,9 @@ impl JobHost for CliSession {
                 .clone()
                 .ok_or_else(|| JobError::host("SAVE without a file name and nothing recalled"))?,
         };
+        if self.target == Target::Detector {
+            self.refuse_untrusted()?;
+        }
         let mut spectrum = self.active().clone();
         if !self.sample_description.is_empty() {
             spectrum.sample_description = self.sample_description.clone();
