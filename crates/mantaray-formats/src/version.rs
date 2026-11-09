@@ -55,7 +55,11 @@ impl<'a, T: Serialize> Tagged<'a, T> {
 #[derive(Deserialize)]
 pub struct Probe {
     /// Format tag; absent in files written before the kind had one.
-    #[serde(default)]
+    ///
+    /// Read under `ortseam` too, the program's name before 0.2.0: its native
+    /// spectra put the same `spectrum/1` tag there, over a layout 0.2.4 still
+    /// shares. Always written as `mantaray`.
+    #[serde(default, alias = "ortseam")]
     pub mantaray: Option<String>,
     /// Version that wrote the file, when it says.
     #[serde(default)]

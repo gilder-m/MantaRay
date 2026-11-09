@@ -20,6 +20,41 @@ const SPECTRUM: &str = include_str!("golden/v0.2.4/spectrum.json");
 const LIBRARY: &str = include_str!("golden/v0.2.4/library.json");
 const REGIONS: &[u8] = include_bytes!("golden/v0.2.4/regions.roi");
 
+// `golden/v0.1.0/` was written by the code at `v0.1.0-alpha`, when the program
+// was called ortseam (v0.1.1-alpha's formats are the same code). Same content
+// as the v0.2.4 files. Its spectrum's tag sits under the key `ortseam`; 0.1
+// wrote no crash snapshot.
+const SPECTRUM_0_1: &str = include_str!("golden/v0.1.0/spectrum.json");
+const LIBRARY_0_1: &str = include_str!("golden/v0.1.0/library.json");
+
+#[test]
+fn a_v0_1_spectrum_from_ortseam_reads_back_field_for_field() {
+    let old = native::read(SPECTRUM_0_1).expect("the ortseam 0.1 spectrum opens");
+    // 0.1's spectrum layout is 0.2.4's: only the tag's key differs.
+    assert_eq!(old, native::read(SPECTRUM).expect("golden"));
+    let again = json(&native::write(&old).expect("writes"));
+    assert_eq!(again["mantaray"], "spectrum/1", "written under today's key");
+    assert!(again.get("ortseam").is_none());
+    let mut expected = json(SPECTRUM_0_1);
+    object(&mut expected).remove("ortseam");
+    assert_kept(&expected, &again, "spectrum file");
+}
+
+#[test]
+fn an_ortseam_spectrum_from_a_newer_format_is_still_refused() {
+    let text = SPECTRUM_0_1.replace("\"spectrum/1\"", "\"spectrum/2\"");
+    let message = native::read(&text).expect_err("spectrum/2").to_string();
+    assert!(message.contains("spectrum/2"), "{message}");
+}
+
+#[test]
+fn a_v0_1_library_from_ortseam_reads_back_field_for_field() {
+    let old = library::read_json(LIBRARY_0_1).expect("the ortseam 0.1 library opens");
+    assert_eq!(old, library::read_json(LIBRARY).expect("golden"));
+    let again = library::write_json(&old).expect("writes");
+    assert_kept(&json(LIBRARY_0_1), &json(&again), "library file");
+}
+
 /// Every field of `old` is in `new` with the same value. `new` may carry
 /// more: a later version adds fields, but must never drop or change one.
 fn assert_kept(old: &Value, new: &Value, at: &str) {
