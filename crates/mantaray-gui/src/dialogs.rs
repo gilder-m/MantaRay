@@ -3029,31 +3029,31 @@ fn settings_dialog(app: &mut App, ctx: &egui::Context) {
         |app, ui| {
             let mut settings = app.settings;
             egui::Grid::new("calc").num_columns(2).show(ui, |ui| {
-                ui.label("\"x\" for FW(1/x)M");
+                let label = ui.label("\"x\" for FW(1/x)M").id;
                 let mut fw_x = settings.fw_x;
                 if ui
                     .add(
                         egui::DragValue::new(&mut fw_x)
                             .range(CalculationSettings::MIN_FW_X..=CalculationSettings::MAX_FW_X),
                     )
+                    .labelled_by(label)
                     .changed()
                 {
                     settings = settings.with_fw_x(fw_x);
                 }
                 ui.end_row();
-                ui.label("Sensitivity factor");
+                let label = ui.label("Sensitivity factor").id;
                 let mut sensitivity = settings.sensitivity;
-                if ui
-                    .add(egui::Slider::new(&mut sensitivity, 1..=5))
+                if named_slider(ui, egui::Slider::new(&mut sensitivity, 1..=5), label)
                     .on_hover_text("1 finds the most peaks, 5 only the strongest")
                     .changed()
                 {
                     settings = settings.with_sensitivity(sensitivity);
                 }
                 ui.end_row();
-                ui.label("Background points");
+                let label = ui.label("Background points").id;
                 let mut points = settings.background_points;
-                if ui.add(egui::Slider::new(&mut points, 1..=5)).changed() {
+                if named_slider(ui, egui::Slider::new(&mut points, 1..=5), label).changed() {
                     settings = settings.with_background_points(points);
                 }
                 ui.end_row();
@@ -3087,10 +3087,11 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
                          is used - mark the peak with a region for a better figure",
                     );
             }
-            ui.label("Calibration (Energy):");
+            let label = ui.label("Calibration (Energy):").id;
             ui.add(
                 egui::TextEdit::singleline(&mut app.dialogs.calibration_energy).desired_width(90.0),
-            );
+            )
+            .labelled_by(label);
             if ui.button("Enter").clicked() {
                 match app.dialogs.calibration_energy.trim().parse::<f64>() {
                     Ok(energy) => {
@@ -3102,10 +3103,11 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Units");
+            let label = ui.label("Units").id;
             ui.add(
                 egui::TextEdit::singleline(&mut app.dialogs.calibration_units).desired_width(60.0),
-            );
+            )
+            .labelled_by(label);
             if ui.button("Destroy Calibration").clicked() {
                 actions.push(Action::DestroyCalibration);
             }
@@ -3119,7 +3121,7 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
         ui.separator();
         // The whole procedure for a known source: pick it, press the button.
         ui.horizontal(|ui| {
-            ui.label("From peaks:");
+            let label = ui.label("From peaks:").id;
             let names: Vec<String> = app
                 .library
                 .iter()
@@ -3139,7 +3141,9 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
                             app.dialogs.auto_nuclide = name.clone();
                         }
                     }
-                });
+                })
+                .response
+                .labelled_by(label);
             if ui
                 .button("Calibrate")
                 .on_hover_text(
@@ -3199,9 +3203,16 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
                     .num_columns(4)
                     .striped(true)
                     .show(ui, |ui| {
-                        for header in ["channel", "energy", "miss", ""] {
-                            ui.label(egui::RichText::new(header).strong());
-                        }
+                        // The headers name the boxes under them. The last
+                        // is empty, over the remove buttons, and is not
+                        // selectable: there is no text in it to select.
+                        let headers = ["channel", "energy", "miss", ""].map(|header| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(header).strong())
+                                    .selectable(!header.is_empty()),
+                            )
+                            .id
+                        });
                         ui.end_row();
                         for (row, point) in points.iter().enumerate() {
                             // An untouched box shows the stored value; once it
@@ -3215,9 +3226,11 @@ fn calibration_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Acti
                                 *value_text = format!("{:.3}", point.value);
                             }
                             let channel = ui
-                                .add(egui::TextEdit::singleline(channel_text).desired_width(70.0));
-                            let value =
-                                ui.add(egui::TextEdit::singleline(value_text).desired_width(80.0));
+                                .add(egui::TextEdit::singleline(channel_text).desired_width(70.0))
+                                .labelled_by(headers[0]);
+                            let value = ui
+                                .add(egui::TextEdit::singleline(value_text).desired_width(80.0))
+                                .labelled_by(headers[1]);
                             let typed = channel.lost_focus() || value.lost_focus();
                             let parsed = (
                                 channel_text.trim().parse::<f64>(),
@@ -3332,7 +3345,12 @@ fn report_viewer(app: &mut App, ctx: &egui::Context) {
             });
             ui.separator();
             egui::ScrollArea::both().show(ui, |ui| {
-                ui.monospace(&text);
+                // Selectable only with something in it: an empty report is
+                // nothing a screen reader should stop on.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&text).monospace())
+                        .selectable(!text.is_empty()),
+                );
             });
         });
     app.dialogs.set(Dialog::Report, open);
@@ -3374,9 +3392,12 @@ pub fn export_analysis_csv(app: &mut App, path: &std::path::Path) {
 fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(app, ctx, Dialog::Analysis, "Nuclide analysis", |app, ui| {
         ui.horizontal(|ui| {
-            ui.label("Sample quantity");
-            ui.add(egui::DragValue::new(&mut app.sample.quantity).speed(0.1));
-            ui.add(egui::TextEdit::singleline(&mut app.sample.unit).desired_width(60.0));
+            // The amount and its unit are both read as "Sample quantity".
+            let label = ui.label("Sample quantity").id;
+            ui.add(egui::DragValue::new(&mut app.sample.quantity).speed(0.1))
+                .labelled_by(label);
+            ui.add(egui::TextEdit::singleline(&mut app.sample.unit).desired_width(60.0))
+                .labelled_by(label);
             ui.checkbox(
                 &mut app.dialogs.report_mda,
                 "detection limits for absent nuclides",
@@ -3498,7 +3519,7 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
                                     } else {
                                         egui::RichText::new("not detected").weak()
                                     });
-                                    ui.label("");
+                                    ui.add(egui::Label::new("").selectable(false));
                                     ui.end_row();
                                 }
                                 // A nuclide the analysis found and could not
