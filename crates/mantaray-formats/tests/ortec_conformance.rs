@@ -17,8 +17,10 @@ const REAL_FORMAT_SPC: &[u8] = include_bytes!("golden/ortec-audit-2026-11-08/G_r
 
 fn words(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
-        .map(|w| i16::from_le_bytes([w[0], w[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|w| i16::from_le_bytes(*w))
         .collect()
 }
 
@@ -71,8 +73,10 @@ fn a_two_word_header_from_0_2_4_still_reads() {
 fn chn_trailer_floats(bytes: &[u8], channels: usize) -> Vec<f32> {
     let trailer = 32 + 4 * channels;
     bytes[trailer + 4..trailer + 28]
-        .chunks_exact(4)
-        .map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| f32::from_le_bytes(*w))
         .collect()
 }
 
