@@ -325,7 +325,7 @@ impl JobHost for CliSession {
                 .as_ref()
                 .ok_or_else(|| JobError::host("no list-mode data to save"))?;
             let bytes = list_mode::write(list).map_err(io)?;
-            std::fs::write(&target, bytes).map_err(io)?;
+            mantaray_formats::write_atomic(&target, bytes).map_err(io)?;
         } else {
             save_spectrum(&spectrum, &target).map_err(io)?;
         }
@@ -442,7 +442,7 @@ impl JobHost for CliSession {
             Some(name) if name.eq_ignore_ascii_case("PRN") => print!("{text}"),
             Some(name) => {
                 let target = self.resolve(name);
-                std::fs::write(&target, text).map_err(io)?;
+                mantaray_formats::write_atomic(&target, text).map_err(io)?;
                 self.note(&format!("wrote {}", target.display()));
             }
             None => print!("{text}"),
@@ -581,7 +581,7 @@ impl JobHost for CliSession {
         // Without an external program configured, export writes ASCII.
         let target = self.resolve(path);
         let text = mantaray_formats::ascii::write(self.active(), &Default::default());
-        std::fs::write(&target, text).map_err(io)?;
+        mantaray_formats::write_atomic(&target, text).map_err(io)?;
         self.note(&format!("exported {}", target.display()));
         Ok(())
     }

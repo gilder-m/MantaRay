@@ -3343,7 +3343,7 @@ fn report_viewer(app: &mut App, ctx: &egui::Context) {
                 if ui.button("Save as...").clicked()
                     && let Some(path) = pick_save_file(&[("Report", &["rpt", "txt"])])
                 {
-                    let _ = std::fs::write(path, &text);
+                    save_report(app, &path);
                 }
             });
             ui.separator();
@@ -3375,6 +3375,17 @@ pub(crate) fn strongest_centroid(nuclide: &mantaray_core::NuclideResult) -> Opti
         .map(|line| line.centroid)
 }
 
+/// Writes the report text to `path` and says in the status line whether
+/// that worked. It used to drop the error, so a report saved into a
+/// read-only folder or onto a full disk looked saved.
+pub fn save_report(app: &mut App, path: &std::path::Path) {
+    let text = app.report_text.clone().unwrap_or_default();
+    app.status = match mantaray_formats::write_atomic(path, text) {
+        Ok(()) => format!("wrote {}", path.display()),
+        Err(error) => format!("could not write {} - {error}", path.display()),
+    };
+}
+
 /// Writes the analysis as CSV to `path` and says in the dialog, and in the
 /// status line, whether that worked. A failed write (a full disk, a read-only
 /// folder, a file open in a spreadsheet) must not look like a saved file.
@@ -3382,7 +3393,7 @@ pub fn export_analysis_csv(app: &mut App, path: &std::path::Path) {
     let Some(report) = app.analysis.as_ref() else {
         return;
     };
-    let outcome = match std::fs::write(path, mantaray_report::results_csv(report)) {
+    let outcome = match mantaray_formats::write_atomic(path, mantaray_report::results_csv(report)) {
         Ok(()) => Ok(format!("wrote {}", path.display())),
         Err(error) => Err(format!("could not write {} - {error}", path.display())),
     };
@@ -5116,7 +5127,7 @@ fn scheme_picker(app: &mut App, ui: &mut egui::Ui) {
                 pick_save_file_named(&[("Colour scheme", &["json"])], Some(&suggestion))
             {
                 let scheme = crate::theme::Scheme::styled(name, app.colors, app.style);
-                match std::fs::write(&path, scheme.to_json()) {
+                match mantaray_formats::write_atomic(&path, scheme.to_json()) {
                     Ok(()) => app.status = format!("wrote {}", path.display()),
                     Err(error) => app.status = format!("could not write it - {error}"),
                 }

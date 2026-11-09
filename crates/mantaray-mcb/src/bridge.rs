@@ -515,7 +515,8 @@ fn configure(directory: Option<&str>, arguments: &[String]) -> Result<(), String
             println!("kept the previous list at {}", backup.display());
         }
     }
-    std::fs::write(&path, &text).map_err(|error| format!("writing {}: {error}", path.display()))?;
+    mantaray_formats::write_atomic(&path, &text)
+        .map_err(|error| format!("writing {}: {error}", path.display()))?;
     println!(
         "wrote {} with {} instrument(s):",
         path.display(),
@@ -574,7 +575,8 @@ fn write_addin_list(directory: Option<&str>) -> Result<(), String> {
     text.push_str("[INSTALL]\r\nDPM=1\r\nPCI=1\r\nPP=1\r\nRUNSERVER=0\r\n");
     std::fs::create_dir_all(&home)
         .map_err(|error| format!("making {}: {error}", home.display()))?;
-    std::fs::write(&path, &text).map_err(|error| format!("writing {}: {error}", path.display()))?;
+    mantaray_formats::write_atomic(&path, &text)
+        .map_err(|error| format!("writing {}: {error}", path.display()))?;
     println!("wrote {} with {index} transport(s)", path.display());
     Ok(())
 }

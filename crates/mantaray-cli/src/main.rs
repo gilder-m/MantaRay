@@ -450,7 +450,8 @@ fn load_library(path: Option<&Path>) -> Result<NuclideLibrary> {
 fn write_out(path: Option<&Path>, text: &str) -> Result<()> {
     match path {
         Some(path) => {
-            std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+            mantaray_formats::write_atomic(path, text)
+                .with_context(|| format!("writing {}", path.display()))?;
             eprintln!("wrote {}", path.display());
         }
         None => print!("{text}"),
@@ -517,7 +518,7 @@ fn convert(
             header,
             acquisition_info: header,
         };
-        std::fs::write(output, ascii::write(&spectrum, &options))
+        mantaray_formats::write_atomic(output, ascii::write(&spectrum, &options))
             .with_context(|| format!("writing {}", output.display()))?;
     } else {
         save_spectrum(&spectrum, output)
@@ -641,7 +642,7 @@ fn analyse_command(
     let analysis = analyse(&spectrum, &library, &options);
     print!("{}", nuclide_report(&analysis));
     if let Some(path) = csv {
-        std::fs::write(path, results_csv(&analysis))
+        mantaray_formats::write_atomic(path, results_csv(&analysis))
             .with_context(|| format!("writing {}", path.display()))?;
         eprintln!("wrote {}", path.display());
     }

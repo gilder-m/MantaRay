@@ -2277,6 +2277,79 @@ fn a_failed_csv_export_is_reported_in_the_analysis_dialog() {
     assert!(written.starts_with("nuclide,"), "{written}");
 }
 
+/// A folder nobody may write into, or `None` when this user writes anywhere
+/// (root), where the failure cannot be staged.
+#[cfg(unix)]
+fn read_only_folder(test: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("mantaray-ro-{test}-{}", std::process::id()));
+    if dir.exists() {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    std::fs::create_dir_all(&dir).expect("a scratch folder");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read-only");
+    if std::fs::write(dir.join("probe"), "x").is_ok() {
+        std::fs::remove_file(dir.join("probe")).ok();
+        unlock(&dir);
+        return None;
+    }
+    Some(dir)
+}
+
+#[cfg(unix)]
+fn unlock(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).ok();
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_report_saved_into_a_read_only_folder_says_it_failed() {
+    let Some(dir) = read_only_folder("report") else {
+        return;
+    };
+    let mut app = App::headless();
+    app.report_text = Some("Cs-137  12.3 Bq".into());
+    let path = dir.join("count.rpt");
+    mantaray_gui::dialogs::save_report(&mut app, &path);
+    let status = app.status.clone();
+    let written = path.exists();
+    unlock(&dir);
+    assert!(!written);
+    assert!(status.contains("could not write"), "{status:?}");
+    assert!(status.contains("count.rpt"), "{status:?}");
+}
+
+#[test]
+fn a_report_that_saves_says_where() {
+    let mut app = App::headless();
+    app.report_text = Some("Cs-137  12.3 Bq".into());
+    let path = std::env::temp_dir().join(format!("mantaray-report-{}.rpt", std::process::id()));
+    mantaray_gui::dialogs::save_report(&mut app, &path);
+    let written = std::fs::read_to_string(&path).expect("the report was written");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(written, "Cs-137  12.3 Bq");
+    assert!(app.status.contains("wrote"), "{}", app.status);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_csv_export_into_a_read_only_folder_says_it_failed() {
+    let Some(dir) = read_only_folder("csv") else {
+        return;
+    };
+    let mut app = app_with_a_withheld_nuclide();
+    let path = dir.join("results.csv");
+    mantaray_gui::dialogs::export_analysis_csv(&mut app, &path);
+    let status = app.status.clone();
+    let written = path.exists();
+    unlock(&dir);
+    assert!(!written);
+    assert!(status.contains("could not write"), "{status:?}");
+}
+
 #[test]
 fn an_analysis_saved_before_nuclides_were_withheld_by_name_still_loads() {
     let app = app_with_a_withheld_nuclide();

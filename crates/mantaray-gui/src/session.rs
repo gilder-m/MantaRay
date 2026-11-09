@@ -125,8 +125,17 @@ pub(crate) fn carry_across(former: &Path, current: &Path) {
         }
         // A rename within one filesystem is atomic and costs nothing; the copy
         // is for the rare case the two sit on different ones.
-        if std::fs::rename(entry.path(), &destination).is_err() {
-            let _ = std::fs::copy(entry.path(), &destination);
+        if std::fs::rename(entry.path(), &destination).is_err()
+            && let Err(error) = std::fs::copy(entry.path(), &destination)
+        {
+            // There is no window yet to say it in. The old file is still in
+            // place, so nothing is lost, but a missing palette should be
+            // explainable from the terminal.
+            eprintln!(
+                "could not carry {} across to {} - {error}",
+                entry.path().display(),
+                destination.display()
+            );
         }
     }
     // The old directory is left in place rather than removed. An empty
@@ -147,9 +156,7 @@ pub fn write(session: &Session) -> std::io::Result<()> {
     }
     let text = to_text(session)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let scratch = path.with_extension("json.part");
-    std::fs::write(&scratch, text)?;
-    std::fs::rename(&scratch, &path)
+    mantaray_formats::write_atomic(&path, text)
 }
 
 /// Format tag of the snapshot; older snapshots carry none and are read as this.

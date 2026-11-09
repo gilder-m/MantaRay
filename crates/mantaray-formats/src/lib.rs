@@ -367,17 +367,20 @@ pub fn read_as(format: SpectrumFormat, bytes: &[u8]) -> Result<Spectrum, FormatE
 }
 
 /// Saves a spectrum, choosing the writer by extension.
+///
+/// Through [`write_atomic`]: a save that fails leaves any file already at
+/// `path` exactly as it was.
 pub fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), FormatError> {
     let path = path.as_ref();
     let format = SpectrumFormat::from_path(path).ok_or_else(|| unsupported(path, "writer"))?;
     match format {
-        SpectrumFormat::Chn => std::fs::write(path, chn::write(spectrum)?)?,
-        SpectrumFormat::Spc => std::fs::write(path, spc::write(spectrum)?)?,
-        SpectrumFormat::Spe => std::fs::write(path, spe::write(spectrum)?)?,
+        SpectrumFormat::Chn => write_atomic(path, chn::write(spectrum)?)?,
+        SpectrumFormat::Spc => write_atomic(path, spc::write(spectrum)?)?,
+        SpectrumFormat::Spe => write_atomic(path, spe::write(spectrum)?)?,
         SpectrumFormat::Ascii => {
-            std::fs::write(path, ascii::write(spectrum, &AsciiOptions::default()))?
+            write_atomic(path, ascii::write(spectrum, &AsciiOptions::default()))?
         }
-        SpectrumFormat::Native => std::fs::write(path, native::write(spectrum)?)?,
+        SpectrumFormat::Native => write_atomic(path, native::write(spectrum)?)?,
         SpectrumFormat::List => {
             return Err(FormatError::Unsupported {
                 detail: "writing .lis files from a histogram (list mode needs events)".into(),
@@ -403,9 +406,9 @@ fn unsupported(path: &Path, what: &str) -> FormatError {
     }
 }
 
-/// Writes a `.Roi` region file.
+/// Writes a `.Roi` region file, through [`write_atomic`].
 pub fn save_rois(rois: &RoiSet, path: impl AsRef<Path>) -> Result<(), FormatError> {
-    std::fs::write(path, roi::write(rois))?;
+    write_atomic(path, roi::write(rois))?;
     Ok(())
 }
 

@@ -49,8 +49,16 @@ pub fn install() {
         let backtrace = std::backtrace::Backtrace::force_capture().to_string();
         let path = report_path();
         let text = report_text(&message, &location, &backtrace);
-        if std::fs::write(&path, &text).is_ok() {
-            eprintln!("crash report written to {}", path.display());
+        match mantaray_formats::write_atomic(&path, &text) {
+            Ok(()) => eprintln!("crash report written to {}", path.display()),
+            // The report then exists only here, so print all of it.
+            Err(error) => {
+                eprintln!(
+                    "could not write the crash report {} - {error}",
+                    path.display()
+                );
+                eprintln!("{text}");
+            }
         }
         default_hook(info);
     }));

@@ -982,6 +982,10 @@ pub struct App {
     /// snapshot is meaning; clearing it again every twenty seconds is a
     /// directory walk and an unlink of a file that is not there, forever.
     autosaved_empty: bool,
+    /// Whether the last autosave failed, so the failure is said once on the
+    /// status line rather than over whatever the operator did every twenty
+    /// seconds.
+    autosave_failing: bool,
     /// A snapshot found at start-up, waiting to be offered back.
     pub recovered: Option<crate::session::Session>,
     /// Whether the snapshot on disk came from a newer mantaray, which this
@@ -1232,6 +1236,7 @@ impl App {
             log_decade_top: false,
             last_autosave: Instant::now(),
             autosaved_empty: false,
+            autosave_failing: false,
             recovered: None,
             snapshot_from_newer: false,
             stability: std::collections::HashMap::new(),
@@ -1399,7 +1404,19 @@ impl App {
             }
         } else {
             self.autosaved_empty = false;
-            let _ = crate::session::write(&session);
+            match crate::session::write(&session) {
+                Ok(()) => self.autosave_failing = false,
+                // The snapshot is what survives a crash; an operator who
+                // believes it is being kept must hear that it is not.
+                Err(error) if !self.autosave_failing => {
+                    self.autosave_failing = true;
+                    self.status = format!(
+                        "could not save the recovery snapshot {} - {error}",
+                        crate::session::path().display()
+                    );
+                }
+                Err(_) => {}
+            }
         }
     }
 
@@ -2935,7 +2952,7 @@ impl App {
         } else {
             mantaray_formats::ascii::write(&spectrum, &Default::default())
         };
-        match std::fs::write(&path, text) {
+        match mantaray_formats::write_atomic(&path, text) {
             Ok(()) => self.status = format!("exported {}", path.display()),
             Err(error) => self.status = format!("could not export: {error}"),
         }
@@ -2972,7 +2989,7 @@ impl App {
             1280.0,
             720.0,
         );
-        match std::fs::write(path, svg) {
+        match mantaray_formats::write_atomic(path, svg) {
             Ok(()) => self.status = format!("plot written to {}", path.display()),
             Err(error) => self.status = format!("could not write the picture: {error}"),
         }
@@ -3381,7 +3398,7 @@ impl App {
         };
         let bytes =
             mantaray_formats::clb::write(&mantaray_formats::clb::Calibration { energy, shape });
-        match std::fs::write(&path, bytes) {
+        match mantaray_formats::write_atomic(&path, bytes) {
             Ok(()) => self.status = format!("calibration saved to {}", path.display()),
             Err(error) => self.status = format!("could not save the calibration: {error}"),
         }
@@ -3836,9 +3853,14 @@ impl App {
                     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
                 }
                 let path = std::env::temp_dir().join("mantaray-demo-recall.Clb");
-                if std::fs::write(&path, &bytes).is_ok() {
-                    self.apply_calibration_from(&path);
-                    let _ = std::fs::remove_file(&path);
+                match std::fs::write(&path, &bytes) {
+                    Ok(()) => {
+                        self.apply_calibration_from(&path);
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    Err(error) => {
+                        self.status = format!("demo: could not write {} - {error}", path.display());
+                    }
                 }
                 return;
             }

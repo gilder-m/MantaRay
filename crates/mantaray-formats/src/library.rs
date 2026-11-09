@@ -373,12 +373,13 @@ pub fn read_ortec(bytes: &[u8]) -> Result<NuclideLibrary, FormatError> {
     Ok(library)
 }
 
-/// Saves a library, choosing JSON or CSV by extension.
+/// Saves a library, choosing JSON or CSV by extension, through
+/// [`crate::write_atomic`].
 pub fn save(library: &NuclideLibrary, path: impl AsRef<Path>) -> Result<(), FormatError> {
     let path = path.as_ref();
     match extension(path).as_str() {
-        "csv" | "txt" => std::fs::write(path, write_csv(library))?,
-        "json" | "lib" => std::fs::write(path, write_json(library)?)?,
+        "csv" | "txt" => crate::write_atomic(path, write_csv(library))?,
+        "json" | "lib" => crate::write_atomic(path, write_json(library)?)?,
         other => {
             return Err(FormatError::Unsupported {
                 detail: format!("library format .{other} (use .json or .csv)"),

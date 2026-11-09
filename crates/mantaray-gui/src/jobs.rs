@@ -742,7 +742,8 @@ impl JobHost for App {
             Some(name) if name.eq_ignore_ascii_case("PRN") => Ok(()),
             Some(name) => {
                 let target = self.job_path(name);
-                std::fs::write(target, text).map_err(|error| JobError::host(error.to_string()))
+                mantaray_formats::write_atomic(target, text)
+                    .map_err(|error| JobError::host(error.to_string()))
             }
             None => Ok(()),
         }
@@ -1051,7 +1052,8 @@ impl JobHost for App {
             return Err(JobError::host("nothing to export"));
         };
         let text = mantaray_formats::ascii::write(spectrum, &Default::default());
-        std::fs::write(target, text).map_err(|error| JobError::host(error.to_string()))
+        mantaray_formats::write_atomic(target, text)
+            .map_err(|error| JobError::host(error.to_string()))
     }
 
     fn import(&mut self, path: &str) -> Result<(), JobError> {
