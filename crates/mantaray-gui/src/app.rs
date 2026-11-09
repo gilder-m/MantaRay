@@ -151,6 +151,14 @@ pub fn spawn_program(command_line: &str) -> Result<std::process::Child, String> 
         .map_err(|error| format!("could not run {program}: {error}"))
 }
 
+/// A job's refusal to save or copy a detector reading that is not believed.
+pub fn not_believed(reason: &str) -> String {
+    format!(
+        "the detector's reading is not believed ({reason}); its window shows the last good \
+         reading, which a job does not save"
+    )
+}
+
 /// The status line after a spectrum save: what it changed to fit the format
 /// (a `?` for a character MAESTRO's text cannot hold, a cut description)
 /// comes with it, so it is not found out later in MAESTRO.
@@ -936,6 +944,9 @@ pub struct App {
     /// said in the status line: it is said once when it begins, not every
     /// frame over whatever the operator was told since.
     untrusted_said: std::collections::BTreeSet<u16>,
+    /// The window whose Save was refused because its reading is not
+    /// believed: the next Save of it writes the last good reading anyway.
+    stale_save_asked: Option<usize>,
     /// Quality-assurance charts.
     pub qa: Vec<QaChart>,
     /// The last analysis.
@@ -1225,6 +1236,7 @@ impl App {
             changer: cfg!(feature = "simulator").then(|| SampleChanger::new(8)),
             batch_count: None,
             untrusted_said: std::collections::BTreeSet::new(),
+            stale_save_asked: None,
             qa: Vec::new(),
             analysis: None,
             report_text: None,
@@ -1278,6 +1290,25 @@ impl App {
             Target::Buffer => window.buffer.as_ref(),
             Target::Detector(detector) => detectors.get(detector).map(|mcb| mcb.spectrum()),
         }
+    }
+
+    /// Why window `index`'s reading is not believed, when it shows a detector
+    /// whose reading is not; `None` for a believed one or a buffer.
+    fn untrusted_of(&self, index: usize) -> Option<String> {
+        match self.windows.get(index)?.target {
+            Target::Detector(detector) => self
+                .detectors
+                .get(detector)?
+                .reading_untrusted()
+                .map(str::to_string),
+            Target::Buffer => None,
+        }
+    }
+
+    /// Why the active window's reading is not believed, if it is not (see
+    /// [`Self::untrusted_of`]). A job refuses to save or copy it.
+    pub fn active_untrusted(&self) -> Option<String> {
+        self.active.and_then(|index| self.untrusted_of(index))
     }
 
     /// What the active window has on screen: zoom, marker, scale, toggles.
@@ -2918,6 +2949,23 @@ impl App {
 
     fn save(&mut self, force_dialog: bool) {
         let Some(index) = self.active else { return };
+        // A detector whose reading is not believed shows its last good
+        // reading, and Save wrote that without a word, even straight after
+        // "the final spectrum could not be read" (Lucius, review of the
+        // save-path fixes, S-2). The first Save says so and writes nothing;
+        // a second one writes it, saying what it is.
+        let untrusted = self.untrusted_of(index);
+        if let Some(reason) = &untrusted
+            && self.stale_save_asked != Some(index)
+        {
+            self.stale_save_asked = Some(index);
+            self.status = format!(
+                "not saved: this detector's reading is not believed ({reason}), so the \
+                 window shows its last good reading. Save again to save that anyway."
+            );
+            return;
+        }
+        self.stale_save_asked = None;
         let existing = self.windows[index].path.clone();
         let path = match (existing, force_dialog) {
             (Some(path), false) => Some(path),
@@ -2952,6 +3000,11 @@ impl App {
         match save_spectrum_noting(&spectrum, &path) {
             Ok(notes) => {
                 self.status = saved_status(&path, &notes);
+                if let Some(reason) = untrusted {
+                    self.status.push_str(&format!(
+                        " - the last good reading, not the detector now ({reason})"
+                    ));
+                }
                 self.windows[index].path = Some(path);
                 self.windows[index].modified = false;
             }
@@ -3571,6 +3624,11 @@ impl App {
         let Some(index) = self.active else {
             return Err("no window is active".into());
         };
+        // A job has no one to ask: a reading not believed is not saved
+        // (review of the save-path fixes, S-2).
+        if let Some(reason) = self.untrusted_of(index) {
+            return Err(not_believed(&reason));
+        }
         let Some(mut spectrum) = Self::spectrum_of(&self.windows, &self.detectors, index).cloned()
         else {
             return Err("nothing to save".into());

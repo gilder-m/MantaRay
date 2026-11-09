@@ -142,3 +142,100 @@ fn f2_a_job_stop_then_save_writes_the_count_the_detector_stopped_at() {
         (RATE * live).floor()
     );
 }
+
+/// Frames until the open detector's reading is not believed (SHOW_DATA
+/// answering ERR from now on).
+fn until_untrusted(app: &mut App, rig: &Rig, detector: usize) {
+    use mantaray_device::Mcb;
+    rig.fault(Fault::Reply {
+        verb: "SHOW_DATA".into(),
+        reply: "ERR the adapter sent 0 of 64 bytes from 0x0000".into(),
+        count: 100_000,
+        execute: true,
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while app.detectors[detector].reading_untrusted().is_none() {
+        assert!(std::time::Instant::now() < deadline, "never untrusted");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        rig.tick(0.1);
+        app.advance_by(0.5);
+    }
+}
+
+/// Review of audit/release-fix-save S-2 (Lucius): a job's SAVE with no WAIT
+/// for the count's end or STOP before it wrote a mirror that was not
+/// believed, without a word. It is refused, and the job says why.
+#[test]
+fn s2_a_job_save_of_a_reading_not_believed_is_refused() {
+    let (mut app, rig, detector) = rig_app();
+    let saved = temp("s2-job.Chn");
+    let _ = std::fs::remove_file(&saved);
+    app.apply_action(Action::Start);
+    until_untrusted(&mut app, &rig, detector);
+    run(
+        &mut app,
+        &rig,
+        "s2.job",
+        &format!("SAVE \"{}\"\n", saved.display()),
+        |_| 0.05,
+    );
+    let status = app.status.clone();
+    let wrote = saved.exists();
+    let _ = std::fs::remove_file(&saved);
+    assert!(!wrote, "a reading not believed was saved; status: {status}");
+    assert!(
+        status.contains("job stopped") && status.contains("not believed"),
+        "{status}"
+    );
+}
+
+/// The same for FILL_BUFFER, the job's other road from the mirror to a file.
+#[test]
+fn s2_a_job_fill_buffer_of_a_reading_not_believed_is_refused() {
+    let (mut app, rig, detector) = rig_app();
+    let saved = temp("s2-buffer.Chn");
+    let _ = std::fs::remove_file(&saved);
+    app.apply_action(Action::Start);
+    until_untrusted(&mut app, &rig, detector);
+    run(
+        &mut app,
+        &rig,
+        "s2-buffer.job",
+        &format!("FILL_BUFFER\nSET_BUFFER\nSAVE \"{}\"\n", saved.display()),
+        |_| 0.05,
+    );
+    let status = app.status.clone();
+    let wrote = saved.exists();
+    let _ = std::fs::remove_file(&saved);
+    assert!(!wrote, "a copy of a reading not believed was saved; status: {status}");
+    assert!(status.contains("not believed"), "{status}");
+}
+
+/// A manual Save of a window whose reading is not believed asks first: the
+/// first Save says so and writes nothing, a second Save writes the last good
+/// reading and says that is what it is.
+#[test]
+fn s2_a_manual_save_of_a_reading_not_believed_asks_first() {
+    let (mut app, rig, detector) = rig_app();
+    let saved = temp("s2-manual.Chn");
+    let _ = std::fs::remove_file(&saved);
+    let window = app.active.expect("the detector window is open");
+    app.windows[window].path = Some(saved.clone());
+    app.apply_action(Action::Start);
+    until_untrusted(&mut app, &rig, detector);
+
+    app.apply_action(Action::Save);
+    let first = app.status.clone();
+    assert!(!saved.exists(), "saved without asking; status: {first}");
+    assert!(
+        first.contains("not believed") && first.contains("Save again"),
+        "{first}"
+    );
+
+    app.apply_action(Action::Save);
+    let second = app.status.clone();
+    let wrote = saved.exists();
+    let _ = std::fs::remove_file(&saved);
+    assert!(wrote, "the confirmed save wrote nothing: {second}");
+    assert!(second.contains("last good reading"), "{second}");
+}

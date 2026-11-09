@@ -444,8 +444,12 @@ impl RemoteMcb {
     /// finishes only when the detector agrees. At most `CONFIRM_READS`
     /// reads, [`Self::confirm_step`] apart: a bound inside one command, never
     /// a wait across frames, and the same number of reads however slow the
-    /// wire. A read that fails ends it with that read's reason: the STOP was
-    /// sent, but could not be confirmed.
+    /// wire. A read that cannot tell (a failed status read, or the bridge's
+    /// ERR for a flag it could not read) uses up one of those reads and the
+    /// next one is tried: one hiccup on a stopped detector no longer fails
+    /// the STOP of a job's START / WAIT / STOP / SAVE (release review of
+    /// 4597899). Only when no read could tell is the STOP called sent, but
+    /// not confirmed, with the last read's reason.
     fn confirm_stopped(&mut self) -> Result<bool, DeviceError> {
         self.confirming = true;
         self.confirm_reply = None;
@@ -456,23 +460,27 @@ impl RemoteMcb {
 
     /// The reads behind [`Self::confirm_stopped`].
     fn confirm_reads(&mut self) -> Result<bool, DeviceError> {
+        let mut told = false;
+        let mut unknown = None;
         for read in 0..CONFIRM_READS {
             if read > 0 && !self.confirm_step.is_zero() {
                 std::thread::sleep(self.confirm_step);
             }
             match self.read_counting() {
                 Ok(false) => return Ok(true),
-                Ok(true) => {}
-                Err(DeviceError::CountingUnknown { reason }) => {
-                    return Err(DeviceError::Command {
-                        command: "STOP".into(),
-                        detail: format!("sent, but could not confirm: {reason}"),
-                    });
-                }
+                Ok(true) => told = true,
+                Err(DeviceError::CountingUnknown { reason }) => unknown = Some(reason),
                 Err(error) => return Err(error),
             }
         }
-        Ok(false)
+        // A read that told said it still counts: it did not stop.
+        match unknown {
+            Some(reason) if !told => Err(DeviceError::Command {
+                command: "STOP".into(),
+                detail: format!("sent, but could not confirm: {reason}"),
+            }),
+            _ => Ok(false),
+        }
     }
 
     /// Pulls fresh status and data from the instrument, on this thread.
@@ -498,7 +506,8 @@ impl RemoteMcb {
     /// Reads the spectrum the detector stopped at, after a confirmed STOP:
     /// one SHOW_DATA beside the confirming status read (taken after the
     /// stop, so its clocks are the final ones), tried up to
-    /// [`FINAL_FETCH_TRIES`] times.
+    /// [`FINAL_FETCH_TRIES`] times when an answer comes back but is not
+    /// believed, and once only when the line itself fails.
     ///
     /// The confirm read only the status, so the mirror kept the channels and
     /// clocks of the last regular fetch, and a SAVE straight after STOP - a
@@ -511,14 +520,26 @@ impl RemoteMcb {
             return Ok(());
         };
         let mut reason = None;
-        for _ in 0..FINAL_FETCH_TRIES {
-            let landed = self.raw("SHOW_DATA").and_then(|data| {
-                self.integrate(Fetched {
-                    status: status.clone(),
-                    data,
-                    read_at,
-                    read_instant,
-                })
+        let mut tries = 0;
+        while tries < FINAL_FETCH_TRIES {
+            tries += 1;
+            // A line error (on the bridge, its whole exchange timeout) is not
+            // tried again: three tries made a STOP to a hung instrument wait
+            // about 30 s (review of the save-path fixes, S-1). An answer that
+            // came back but was not believed - the 926's ERR for a short
+            // adapter read, a held length - is what the retry is for.
+            let data = match self.raw("SHOW_DATA") {
+                Ok(data) => data,
+                Err(error) => {
+                    reason = Some(error.to_string());
+                    break;
+                }
+            };
+            let landed = self.integrate(Fetched {
+                status: status.clone(),
+                data,
+                read_at,
+                read_instant,
             });
             match landed {
                 Ok(true) => return Ok(()),
@@ -528,12 +549,17 @@ impl RemoteMcb {
         }
         let reason = reason.unwrap_or_else(|| "its channel count did not hold still".into());
         self.untrusted = Some(format!("the final spectrum could not be read: {reason}"));
+        let tries = if tries == 1 {
+            "1 try".to_string()
+        } else {
+            format!("{tries} tries")
+        };
         Err(DeviceError::Command {
             command: "STOP".into(),
             detail: format!(
                 "the detector stopped, but its final spectrum could not be read \
-                 ({FINAL_FETCH_TRIES} tries): {reason}; the spectrum shown is from \
-                 before the stop until a reading lands"
+                 ({tries}): {reason}; the spectrum shown is from before the stop until \
+                 a reading lands"
             ),
         })
     }
@@ -742,6 +768,15 @@ impl RemoteMcb {
             Ok(count) if held => Err(format!(
                 "the spectrum's channel count does not hold still (this read {count}, \
                  the spectrum {})",
+                self.spectrum.len()
+            )),
+            // A `DATA 0` beside a spectrum of channels (the UMCBI road with a
+            // zero library length) carries no channels, and believed it kept
+            // the old counts under the new clocks: a final one let a STOP
+            // succeed on them and a SAVE write them (swarm DEV-1). It is a
+            // spectrum that could not be read.
+            Ok(0) if !self.spectrum.channels.is_empty() => Err(format!(
+                "the spectrum came back empty (DATA 0) beside a spectrum of {} channels",
                 self.spectrum.len()
             )),
             Ok(_) => parse_status(&status)

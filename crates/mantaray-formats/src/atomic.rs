@@ -14,9 +14,12 @@
 //! if that is refused with access denied it retries with
 //! `SetFileInformationByHandle(FileRenameInfoEx)` and
 //! `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` (library/std/src/sys/fs/windows.rs,
-//! `rename`, Rust 1.97). A target held open without delete sharing - a CSV
-//! open in Excel - makes the rename fail; that is reported and the target is
-//! left as it was, which is what an in-place write did there too.
+//! `rename`, Rust 1.97). A target held open without delete sharing makes the
+//! rename fail. Where the other program also denies write sharing (a CSV open
+//! in Excel) an in-place write fails there too; where it shares write (C's
+//! `fopen(..., "r")`, Python's `open`) an in-place write works, so a refused
+//! rename falls back to one (see [`write_atomic`]). Untested on Windows: the
+//! fallback is tested on Linux with the refusal injected.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -28,18 +31,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// On success the target holds exactly `bytes` and no temporary file is left
 /// behind. On failure the target is untouched (or still absent) and the
-/// temporary file has been removed.
+/// temporary file has been removed, except where the save fell back to an
+/// in-place write (below), which can fail half-way as 0.2.4's did.
 ///
 /// An existing target must be writable, as an in-place save would need it to
 /// be: a file the operator marked read-only is refused, not replaced. Its
 /// permission bits are carried over to the new file where the filesystem
 /// allows; ownership and ACLs other than those bits are not. A symbolic link
-/// is followed, so the file it points at is replaced and the link survives.
+/// is followed, so the file it points at is replaced (or made, for a link to
+/// a file not there yet) and the link survives.
 ///
 /// The temporary file goes in the target's own directory. Where that
-/// directory refuses it (permission denied) but the file itself is writable,
-/// as on some lab shares, the file is written in place instead, the way
-/// `std::fs::write` does: that save still works, but is not atomic.
+/// directory refuses it (permission denied), or takes it but refuses to let
+/// it replace the target (permission denied, or a Windows sharing
+/// violation), the file is written in place instead, the way
+/// `std::fs::write` does, and the temporary file removed: that save still
+/// works where 0.2.4's did, but is not atomic.
 ///
 /// # Errors
 ///
@@ -52,9 +59,32 @@ pub fn write_atomic(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> io::Resu
 
 /// [`write_atomic`] with the writing done by `fill`, so a test can fail it
 /// half-way through.
-fn write_atomic_with(
+fn write_atomic_with(path: &Path, fill: impl Fn(&mut File) -> io::Result<()>) -> io::Result<()> {
+    write_atomic_via(path, fill, |from, to| fs::rename(from, to))
+}
+
+/// Whether a refused rename is the kind an in-place write may still get
+/// past: permission denied (Unix EACCES/EPERM, Windows ERROR_ACCESS_DENIED),
+/// and on Windows a sharing violation, which std maps to no kind of its own.
+fn rename_refused(error: &io::Error) -> bool {
+    /// Windows' ERROR_SHARING_VIOLATION.
+    #[cfg(windows)]
+    const SHARING_VIOLATION: i32 = 32;
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(SHARING_VIOLATION) {
+        return true;
+    }
+    error.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// [`write_atomic_with`] with the rename done by `rename`, so a test can
+/// refuse it as a sticky folder or a Windows reader without delete sharing
+/// does. `fill` is called a second time when the rename is refused and the
+/// file is written in place.
+fn write_atomic_via(
     path: &Path,
-    fill: impl FnOnce(&mut File) -> io::Result<()>,
+    fill: impl Fn(&mut File) -> io::Result<()>,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let target = follow_link(path);
     let name = target.file_name().ok_or_else(|| {
@@ -91,25 +121,60 @@ fn write_atomic_with(
         }
         Err(error) => return Err(error),
     };
-    let written = (|| {
+    let filled = (|| {
         if let Some(permissions) = existing {
             // Best effort: a FAT stick or a network share may refuse to set
             // modes at all, and that must not make the save fail.
             part.set_permissions(permissions).ok();
         }
         fill(&mut part)?;
-        part.sync_all()?;
-        drop(part);
-        fs::rename(&scratch, &target)
+        part.sync_all()
     })();
-    if let Err(error) = written {
-        // Best effort: the error worth reporting is the one above, and a
-        // leftover hidden `.part` file harms nothing.
-        fs::remove_file(&scratch).ok();
-        return Err(error);
+    drop(part);
+    let written = match filled {
+        Ok(()) => rename(&scratch, &target).map_err(Failed::Renaming),
+        Err(error) => Err(Failed::Writing(error)),
+    };
+    match written {
+        Ok(()) => {
+            sync_directory(&directory);
+            Ok(())
+        }
+        // The `.part` was written but may not replace the target: a Windows
+        // reader sharing write but not delete (C's fopen "r", Python's
+        // open), a sticky folder and a target owned by someone else, a share
+        // granting Write but not Delete. 0.2.4's in-place write got past
+        // all three, so the save falls back to it rather than failing a save
+        // 0.2.4 made (Lucius, review of 3dfa038). Not atomic there.
+        Err(Failed::Renaming(error)) if rename_refused(&error) => {
+            discard(&scratch);
+            write_in_place(&target, fill)
+        }
+        Err(Failed::Renaming(error) | Failed::Writing(error)) => {
+            discard(&scratch);
+            Err(error)
+        }
     }
-    sync_directory(&directory);
-    Ok(())
+}
+
+/// Which step of an atomic save failed.
+enum Failed {
+    /// Filling or syncing the `.part`.
+    Writing(io::Error),
+    /// Renaming it over the target.
+    Renaming(io::Error),
+}
+
+/// Removes a `.part` that will not be renamed. Best effort: the error worth
+/// reporting is the save's. Where the folder refuses deletion too (a share
+/// granting Write but not Delete) it is at least emptied, so no second copy
+/// of the count is left hidden beside the file.
+fn discard(scratch: &Path) {
+    if fs::remove_file(scratch).is_err()
+        && let Ok(file) = OpenOptions::new().write(true).open(scratch)
+    {
+        file.set_len(0).ok();
+    }
 }
 
 /// The old way: truncate the target and write into it. Only for a folder
@@ -121,22 +186,61 @@ fn write_in_place(target: &Path, fill: impl FnOnce(&mut File) -> io::Result<()>)
 }
 
 /// The file a symbolic link points at, or `path` itself.
+///
+/// A link to a file not there yet cannot be canonicalized, and replacing the
+/// link's own path put a plain file where the link was (Lucius a4); 0.2.4's
+/// in-place write made the file at the link's destination. Such a link is
+/// read hop by hop instead (a relative one from its own folder), at most as
+/// many hops as Linux follows.
 fn follow_link(path: &Path) -> PathBuf {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    /// Linux's MAXSYMLINKS.
+    const HOPS: usize = 40;
+    let mut at = path.to_path_buf();
+    for _ in 0..HOPS {
+        match fs::symlink_metadata(&at) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if let Ok(real) = fs::canonicalize(&at) {
+                    return real;
+                }
+                let Ok(next) = fs::read_link(&at) else {
+                    return at;
+                };
+                at = match at.parent() {
+                    Some(folder) if next.is_relative() => folder.join(next),
+                    _ => next,
+                };
+            }
+            _ => return at,
         }
-        _ => path.to_path_buf(),
     }
+    at
 }
 
 /// A new, empty temporary file beside the target, named so it cannot be
 /// mistaken for a finished one and cannot collide with another save.
+///
+/// The name is the target's with a dot before and `.<pid>-<n>.part` after,
+/// unless that is longer than the filesystem allows for a name the target
+/// itself fits in (a 250-byte name saved on 0.2.4; Lucius a3): then it is
+/// `.mantaray-<pid>-<n>.part`.
 fn create_scratch(directory: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)> {
+    match create_scratch_named(directory, Some(name)) {
+        Err(error) if error.kind() == io::ErrorKind::InvalidFilename => {
+            create_scratch_named(directory, None)
+        }
+        other => other,
+    }
+}
+
+/// [`create_scratch`], named after `name` or, without one, after this program.
+fn create_scratch_named(
+    directory: &Path,
+    name: Option<&std::ffi::OsStr>,
+) -> io::Result<(PathBuf, File)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     loop {
         let mut scratch_name = std::ffi::OsString::from(".");
-        scratch_name.push(name);
+        scratch_name.push(name.unwrap_or_else(|| std::ffi::OsStr::new("mantaray")));
         scratch_name.push(format!(
             ".{}-{}.part",
             std::process::id(),
@@ -329,6 +433,59 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(fs::read_to_string(&real).expect("read"), "new");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A folder that takes the `.part` but refuses the rename onto the target
+    /// (Windows: the target held open by a reader that shares write but not
+    /// delete; Unix: a sticky folder and a target owned by another user)
+    /// saved on 0.2.4, so it still saves, in place, with no `.part` left
+    /// (Lucius, review of 3dfa038). The refusal is injected: neither setup
+    /// can be staged on a one-user Linux box.
+    #[test]
+    fn a_refused_rename_falls_back_to_writing_in_place() {
+        let dir = scratch_dir("rename-refused");
+        let path = dir.join("count.Spe");
+        fs::write(&path, "an old count, longer than the new one").expect("old");
+
+        let outcome = write_atomic_via(
+            &path,
+            |file| file.write_all(b"new count"),
+            |_, _| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        );
+
+        outcome.expect("a save 0.2.4 made must still work");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new count");
+        assert_eq!(names(&dir), ["count.Spe"], "no temporary file left");
+        // And a first save into such a folder.
+        let fresh = dir.join("fresh.Chn");
+        write_atomic_via(
+            &fresh,
+            |file| file.write_all(b"first"),
+            |_, _| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        )
+        .expect("a first save");
+        assert_eq!(fs::read_to_string(&fresh).expect("read"), "first");
+        assert_eq!(names(&dir), ["count.Spe", "fresh.Chn"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Any other rename failure is still reported, the old file kept.
+    #[test]
+    fn another_rename_failure_is_reported_and_keeps_the_old_file() {
+        let dir = scratch_dir("rename-failed");
+        let path = dir.join("count.Spe");
+        fs::write(&path, "old").expect("old");
+
+        let outcome = write_atomic_via(
+            &path,
+            |file| file.write_all(b"new"),
+            |_, _| Err(io::Error::other("the stick was pulled")),
+        );
+
+        assert!(outcome.is_err());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "old");
+        assert_eq!(names(&dir), ["count.Spe"], "no temporary file left");
         fs::remove_dir_all(&dir).ok();
     }
 }

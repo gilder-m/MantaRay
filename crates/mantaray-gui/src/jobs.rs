@@ -625,11 +625,22 @@ impl JobHost for App {
     }
 
     fn fill_buffer(&mut self) -> Result<(), JobError> {
+        // The buffer is the job's other road from the mirror to a file: a
+        // reading not believed is not copied either (review of the save-path
+        // fixes, S-2).
+        if let Some(reason) = self.active_untrusted() {
+            return Err(JobError::host(crate::app::not_believed(&reason)));
+        }
         self.apply_action(Action::CopyToBuffer);
         Ok(())
     }
 
     fn save(&mut self, path: Option<&str>) -> Result<(), JobError> {
+        // Refused before either road: a bare SAVE goes through the window's
+        // Save, which would only ask.
+        if let Some(reason) = self.active_untrusted() {
+            return Err(JobError::host(crate::app::not_believed(&reason)));
+        }
         match path {
             Some(path) => {
                 let target = self.job_path(path);

@@ -82,7 +82,11 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
             .flat_map(|(_, lines)| lines)
             .any(|line| line.starts_with("AP# mantaray"))
     {
-        last = first + data.1.len() - 2;
+        // Checked: a damaged or crafted first channel near `usize::MAX`
+        // panicked a test build and wrapped in a release one.
+        last = first
+            .checked_add(data.1.len() - 2)
+            .ok_or_else(|| FormatError::invalid("$DATA: channel range", format!("{first} {last}")))?;
     }
     // The declared range sizes an allocation, so it is not taken on faith: no
     // real MCB reaches a million channels, and an otherwise ordinary file
@@ -93,7 +97,15 @@ pub fn read(text: &str) -> Result<Spectrum, FormatError> {
             format!("{first} {last}: the last channel {last} is before the first channel {first}"),
         ));
     }
-    let count = last - first + 1;
+    // Checked, as 59e3230 had it: `0 18446744073709551615` overflows the
+    // `+ 1`, which a release build (no overflow checks) wrapped to 0 channels
+    // and opened as an empty spectrum without a word.
+    let count = (last - first).checked_add(1).ok_or_else(|| {
+        FormatError::invalid(
+            "$DATA: channel range",
+            format!("{first} {last} is more channels than any MCB has"),
+        )
+    })?;
     if count > MOST_CHANNELS {
         return Err(FormatError::invalid(
             "$DATA: channel range",

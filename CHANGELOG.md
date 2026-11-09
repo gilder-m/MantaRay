@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+**A failed save no longer costs the file already there (2026-11-08).** Every
+save MantaRay makes (spectra in every format, libraries, regions,
+calibrations, reports, sessions, autosave and the crash report) now writes a
+hidden temporary file beside the target (`.<name>.<pid>-<n>.part`), makes sure
+it is on the disk, and only then puts it in the target's place. A full disk, a
+pulled USB stick or a crash half-way leaves the old file whole, where 0.2.4
+left a cut one. What changes for the operator:
+- A save needs room for a second copy of the file for a moment: a nearly full
+  stick that took a save in place may now refuse it, keeping the old file.
+- Report Save as, autosave, the crash report and the copy made when moving
+  old settings used to fail silently; they now say so.
+- A replaced file keeps its permission bits, but on a shared folder it now
+  belongs to whoever saved it (owner and group, and any ACL beyond the bits,
+  are not carried over). A file one colleague made and another saved can then
+  be refused to the first; a group-shared (setgid) folder avoids it.
+- A read-only file is refused, not replaced.
+- A folder that refuses the temporary file, or takes it but refuses to let it
+  replace the target (a file another program has open for reading on
+  Windows, a shared sticky folder, a share that allows writing but not
+  deleting), is saved into in place, as 0.2.4 did: the save works, but is not
+  protected. The Windows cases are untested.
+- A symbolic link is followed (also to a file not there yet) and survives; a
+  file name too long for the temporary name still saves.
+
 **ORTEC files read the same in MAESTRO (2026-11-08).**
 - A `.Spe` of a spectrum with a channel offset writes its `$DATA:` range as
   the first and the last channel (`100 1123` for 1024 channels from 100), as
@@ -16,8 +40,11 @@
   says so in the status line or on stderr, as it does when a description is
   cut to the 63 characters a `.Chn` holds. `.Spc` used to drop such
   characters silently. MAESTRO's own files with `µ` or `°` now read them
-  right. Files 0.2.4 wrote still read as before; the native `.json` stays
-  UTF-8.
+  right. Files 0.2.4 wrote still read as before, including a `.Chn`
+  description 0.2.4 cut through a character (the cut character is dropped);
+  the native `.json` stays UTF-8.
+- A damaged `.Spe` whose `$DATA:` range runs past the largest number
+  (`0 18446744073709551615`) is refused instead of opening empty.
 - A `.Chn` of a count with no start date stores binary zeros there, as
   ORTEC's file manual has it, instead of spaces.
 
@@ -26,7 +53,18 @@
   stopped, so a SAVE straight after STOP (a job's `STOP` / `SAVE`) holds the
   whole count, not the reading from up to half a second before. If that read
   fails three times, the STOP says so ("the detector stopped, but its final
-  spectrum could not be read") and a job stops before its SAVE.
+  spectrum could not be read") and a job stops before its SAVE. A line that
+  does not answer at all is asked once, not three times, so a STOP to a hung
+  detector does not wait half a minute.
+- One status read whose counting flag cannot be read, while a STOP (or a
+  preset's stop) checks that the detector has stopped, uses up one of the
+  ten checks instead of failing the STOP; the STOP still fails if no check
+  can tell or none says stopped.
+- While a detector's reading is not believed, a job's `SAVE` and
+  `FILL_BUFFER` are refused and the job stops, saying why, and Save in the
+  window asks first ("Save again to save that anyway"); the file then says
+  in the status line that it holds the last good reading. Before, the last
+  good reading was saved without a word.
 - When the spectrum read fails (`SHOW_DATA` answers an error) the reading is
   set aside instead of ending a job's WAIT on the spectrum before it. The
   header says "not updating - last good reading" meanwhile, each poll tries
@@ -42,11 +80,13 @@
 - Regions of interest marked on the detector in MAESTRO are still not read
   into MantaRay; mark them in MantaRay (or recall a `.Roi` file).
 
-**Bias and coarse gain wait for Apply (2026-11-08).** In MCB Properties, a
-change to the high voltage or the coarse gain is no longer sent as it is made,
-as 0.2.4 did: nothing goes to the detector until Apply is pressed, and the tab
-says "not applied yet" until then. Closing the dialog without Apply sends
-nothing and drops the edit.
+**The high-voltage target and coarse gain wait for Apply (2026-11-08).** In
+MCB Properties, a change to the high-voltage target or the coarse gain is no
+longer sent as it is made, as 0.2.4 did: it goes to the detector only when
+Apply is pressed, and the tab says "not applied yet" until then. Closing the
+dialog without Apply sends nothing and drops the edit. The high voltage's
+Enabled checkbox is not part of this: switching the bias on or off is still
+sent the moment it is clicked, as in 0.2.4.
 
 **Screen fixes for 0.2.5 (2026-11-08).**
 - A constant efficiency outside 0 to 1 is refused, with the command line's
@@ -57,7 +97,9 @@ nothing and drops the edit.
   decimals, for one) says the curve is not in force, instead of that it is.
 - While a detector's readings are not believed, its window's header says "not
   updating - last good reading" (in the alarm colour, the reason on hover),
-  until a good reading comes in. The status line says it only once.
+  until a good reading comes in; a narrower window says "not updating" and
+  keeps its counts and maximise button on screen. The status line says it
+  only once.
 - The warning that a newer mantaray's crash snapshot was kept is no longer
   replaced on the second frame by the automatic look for instruments.
 - Start all and Stop all with no detectors say so ("no detectors, so no
@@ -71,8 +113,10 @@ which a JSON library cannot hold (it would not open again); save it as .csv,
 or give a stable nuclide a half-life of 0"), and any file already there is
 left as it was. A CSV library still reads an infinite or NaN half-life and
 still saves it as CSV; a CSV line energy or yield that is NaN or infinite is
-refused by row. A `.Spe` whose `$MEAS_TIM` is not finite (`NaN inf`) and a
-`.Spc` whose time words are NaN or infinite are refused on read. File layouts
+refused by row, so for those the refusal says to give the line a number or
+remove it, not to use `.csv`. A `.Spe` whose `$MEAS_TIM` is not finite
+(`NaN inf`) and a `.Spc` whose times are NaN or infinite (in the header or in
+its text copy) are refused on read. File layouts
 are unchanged, so 0.2.4 opens what is written.
 
 **A sample quantity that cannot divide is refused (2026-11-08).** A quantity
