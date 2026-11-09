@@ -14,8 +14,9 @@ use mantaray_core::{
 use mantaray_device::{AnyMcb, Mcb, Presets, advance};
 use mantaray_formats::{
     ListRange, SpectrumFormat, library, list_mode, load_rois, load_spectrum, save_rois,
-    save_spectrum,
 };
+
+use crate::save_spectrum;
 use mantaray_jobs::{BeepSpec, Job, JobError, JobHost, JobVariables, ListSlice, run};
 use mantaray_report::{ReportOptions, roi_report};
 

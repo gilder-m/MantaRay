@@ -366,3 +366,26 @@ fn a_nuclide_that_is_not_there_says_which_kind_of_not_there() {
     app.isotope.resolve(&app.library);
     assert!(app.isotope.found.is_none() && app.isotope.missing.is_none());
 }
+
+#[test]
+fn a_save_that_had_to_change_the_description_says_so() {
+    // MAESTRO reads a .Chn description as Windows-1252, which has a micro
+    // sign but no Greek beta. The beta is stored as '?', and the person
+    // saving hears it now rather than in MAESTRO later.
+    let mut app = with_source(256);
+    app.sample.description = "\u{3b2} source, 1 \u{b5}Ci".into();
+    let path = scratch("beta-description.Chn");
+    let _ = std::fs::remove_file(&path);
+    app.save_active_to(&path).expect("it should save");
+    assert!(
+        app.status.contains("'?'") && app.status.contains('\u{3b2}'),
+        "the status should name what was changed: {}",
+        app.status
+    );
+    let reopened = mantaray_formats::load_spectrum(&path).expect("it reads back");
+    assert_eq!(reopened.sample_description, "? source, 1 \u{b5}Ci");
+
+    app.sample.description = "137Cs 1 \u{b5}Ci, 22 \u{b0}C".into();
+    app.save_active_to(&path).expect("it should save");
+    assert_eq!(app.status, format!("saved {}", path.display()));
+}

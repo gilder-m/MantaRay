@@ -118,6 +118,24 @@ fn info_describes_a_spectrum() {
 }
 
 #[test]
+fn convert_warns_when_a_description_does_not_fit_ortec_text() {
+    let dir = workspace();
+    let json = dir.join("beta.json");
+    let mut spectrum = mantaray_core::Spectrum::from_counts(vec![1; 16]);
+    spectrum.sample_description = "\u{3b2} source, 1 \u{b5}Ci".into();
+    mantaray_formats::save_spectrum(&spectrum, &json).unwrap();
+    let chn = dir.join("beta.chn");
+    let (_, stderr, ok) = run(&["convert", json.to_str().unwrap(), chn.to_str().unwrap()]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("warning") && stderr.contains("'?'"),
+        "the change to the description should be named: {stderr}"
+    );
+    let back = mantaray_formats::load_spectrum(&chn).unwrap();
+    assert_eq!(back.sample_description, "? source, 1 \u{b5}Ci");
+}
+
+#[test]
 fn convert_moves_data_between_formats() {
     let dir = workspace();
     let chn = dir.join("convert.chn");

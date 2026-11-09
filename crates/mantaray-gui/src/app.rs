@@ -15,7 +15,7 @@ use mantaray_device::{
     advance,
 };
 use mantaray_formats::{
-    ListModeFile, SpectrumFormat, load_rois, load_spectrum, save_rois, save_spectrum,
+    ListModeFile, SpectrumFormat, load_rois, load_spectrum, save_rois, save_spectrum_noting,
 };
 use mantaray_report::{ReportOptions, nuclide_report, print_spectrum, roi_report};
 
@@ -149,6 +149,17 @@ pub fn spawn_program(command_line: &str) -> Result<std::process::Child, String> 
         .args(arguments)
         .spawn()
         .map_err(|error| format!("could not run {program}: {error}"))
+}
+
+/// The status line after a spectrum save: what it changed to fit the format
+/// (a `?` for a character MAESTRO's text cannot hold, a cut description)
+/// comes with it, so it is not found out later in MAESTRO.
+fn saved_status(path: &std::path::Path, notes: &[String]) -> String {
+    if notes.is_empty() {
+        format!("saved {}", path.display())
+    } else {
+        format!("saved {} - {}", path.display(), notes.join("; "))
+    }
 }
 
 /// Opens a file with whatever the desktop associates with it (the browser,
@@ -2938,9 +2949,9 @@ impl App {
         if !self.sample.description.is_empty() {
             spectrum.sample_description = self.sample.description.clone();
         }
-        match save_spectrum(&spectrum, &path) {
-            Ok(()) => {
-                self.status = format!("saved {}", path.display());
+        match save_spectrum_noting(&spectrum, &path) {
+            Ok(notes) => {
+                self.status = saved_status(&path, &notes);
                 self.windows[index].path = Some(path);
                 self.windows[index].modified = false;
             }
@@ -3567,10 +3578,10 @@ impl App {
         if !self.sample.description.is_empty() {
             spectrum.sample_description = self.sample.description.clone();
         }
-        save_spectrum(&spectrum, path).map_err(|error| error.to_string())?;
+        let notes = save_spectrum_noting(&spectrum, path).map_err(|error| error.to_string())?;
         self.windows[index].path = Some(path.to_path_buf());
         self.windows[index].modified = false;
-        self.status = format!("saved {}", path.display());
+        self.status = saved_status(path, &notes);
         Ok(())
     }
 

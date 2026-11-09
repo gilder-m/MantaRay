@@ -19,7 +19,7 @@ use mantaray_core::{
 #[cfg(feature = "simulator")]
 use mantaray_device::{Mcb, Presets, SimulatedMcb, advance};
 use mantaray_formats::{
-    AsciiOptions, SpectrumFormat, ascii, library, load_spectrum, save_spectrum,
+    AsciiOptions, FormatError, SpectrumFormat, ascii, library, load_spectrum, save_spectrum_noting,
 };
 use mantaray_report::{
     ReportOptions, nuclide_report, print_spectrum, results_csv, roi_report, spectrum_csv, summary,
@@ -227,6 +227,17 @@ struct AcquireArgs {
     /// Where to save the spectrum.
     #[arg(short, long)]
     output: Option<PathBuf>,
+}
+
+/// Saves a spectrum and warns on stderr about any text the format could not
+/// hold as given (a `?` for a character outside Windows-1252, a description
+/// cut to its field). Every spectrum save of the CLI and its jobs comes here.
+fn save_spectrum(spectrum: &Spectrum, path: impl AsRef<Path>) -> Result<(), FormatError> {
+    let path = path.as_ref();
+    for note in save_spectrum_noting(spectrum, path)? {
+        eprintln!("warning: {}: {note}", path.display());
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
