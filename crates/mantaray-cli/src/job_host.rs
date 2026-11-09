@@ -933,4 +933,44 @@ mod tests {
         assert_eq!(instrument.status().total_counts, 7);
         assert_eq!(instrument.spectrum().total_counts(), 7);
     }
+
+    /// Review of audit/release-fix-save S-2 (Lucius): a job's SAVE, or its
+    /// FILL_BUFFER, of a detector whose reading is not believed (here every
+    /// SHOW_DATA answers ERR) is refused, naming why, instead of writing the
+    /// last good mirror without a word.
+    #[test]
+    fn s2_a_job_save_of_a_reading_not_believed_is_refused() {
+        let (mut session, rig) = rig_session();
+        rig.set_rate(100.0);
+        session.start().expect("start");
+        rig.fault(mantaray_device::rig::Fault::Reply {
+            verb: "SHOW_DATA".into(),
+            reply: "ERR the adapter sent 0 of 64 bytes from 0x0000".into(),
+            count: 100_000,
+            execute: true,
+        });
+        for _ in 0..10 {
+            let _ = advance(session.instrument().expect("instrument").as_mcb_mut(), 0.5);
+        }
+        assert!(
+            session
+                .instrument()
+                .expect("instrument")
+                .reading_untrusted()
+                .is_some()
+        );
+        let saved = std::env::temp_dir().join(format!("mantaray-s2-{}.Chn", std::process::id()));
+        let _ = std::fs::remove_file(&saved);
+        let refused = session
+            .save(Some(&saved.display().to_string()))
+            .expect_err("a reading not believed is not saved")
+            .to_string();
+        assert!(!saved.exists());
+        assert!(refused.contains("not believed"), "{refused}");
+        let refused = session
+            .fill_buffer()
+            .expect_err("nor copied to the buffer")
+            .to_string();
+        assert!(refused.contains("not believed"), "{refused}");
+    }
 }

@@ -331,4 +331,57 @@ mod tests {
         assert_eq!(fs::read_to_string(&real).expect("read"), "new");
         fs::remove_dir_all(&dir).ok();
     }
+
+    /// A folder that takes the `.part` but refuses the rename onto the target
+    /// (Windows: the target held open by a reader that shares write but not
+    /// delete; Unix: a sticky folder and a target owned by another user)
+    /// saved on 0.2.4, so it still saves, in place, with no `.part` left
+    /// (Lucius, review of 3dfa038). The refusal is injected: neither setup
+    /// can be staged on a one-user Linux box.
+    #[test]
+    fn a_refused_rename_falls_back_to_writing_in_place() {
+        let dir = scratch_dir("rename-refused");
+        let path = dir.join("count.Spe");
+        fs::write(&path, "an old count, longer than the new one").expect("old");
+
+        let outcome = write_atomic_via(
+            &path,
+            |file| file.write_all(b"new count"),
+            |_, _| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        );
+
+        outcome.expect("a save 0.2.4 made must still work");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new count");
+        assert_eq!(names(&dir), ["count.Spe"], "no temporary file left");
+        // And a first save into such a folder.
+        let fresh = dir.join("fresh.Chn");
+        write_atomic_via(
+            &fresh,
+            |file| file.write_all(b"first"),
+            |_, _| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        )
+        .expect("a first save");
+        assert_eq!(fs::read_to_string(&fresh).expect("read"), "first");
+        assert_eq!(names(&dir), ["count.Spe", "fresh.Chn"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Any other rename failure is still reported, the old file kept.
+    #[test]
+    fn another_rename_failure_is_reported_and_keeps_the_old_file() {
+        let dir = scratch_dir("rename-failed");
+        let path = dir.join("count.Spe");
+        fs::write(&path, "old").expect("old");
+
+        let outcome = write_atomic_via(
+            &path,
+            |file| file.write_all(b"new"),
+            |_, _| Err(io::Error::other("the stick was pulled")),
+        );
+
+        assert!(outcome.is_err());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "old");
+        assert_eq!(names(&dir), ["count.Spe"], "no temporary file left");
+        fs::remove_dir_all(&dir).ok();
+    }
 }
