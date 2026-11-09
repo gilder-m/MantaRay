@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+**Bias and coarse gain wait for Apply (2026-11-08).** In MCB Properties, a
+change to the high voltage or the coarse gain is no longer sent as it is made,
+as 0.2.4 did: nothing goes to the detector until Apply is pressed, and the tab
+says "not applied yet" until then. Closing the dialog without Apply sends
+nothing and drops the edit.
+
+**Screen fixes for 0.2.5 (2026-11-08).**
+- A constant efficiency outside 0 to 1 is refused, with the command line's
+  words ("5 is not an efficiency: give a fraction above 0 and at most 1 (5 % is
+  0.05)"). A 5 typed for 5 % used to be cut to 1 and put in force, making every
+  activity 20 times too small for a 5 % detector.
+- Interpolate through points with no point that reads as two numbers (comma
+  decimals, for one) says the curve is not in force, instead of that it is.
+- While a detector's readings are not believed, its window's header says "not
+  updating - last good reading" (in the alarm colour, the reason on hover),
+  until a good reading comes in. The status line says it only once.
+- The warning that a newer mantaray's crash snapshot was kept is no longer
+  replaced on the second frame by the automatic look for instruments.
+- Start all and Stop all with no detectors say so ("no detectors, so no
+  acquisition was started") instead of "acquisition started on every detector".
+
 **Saved files keep opening (2026-11-08).** Native spectra (`spectrum/1`), JSON
 libraries (now tagged `library/1`; untagged ones read as before) and the crash
 snapshot (now `session/1`) carry a format tag and the version that wrote them
