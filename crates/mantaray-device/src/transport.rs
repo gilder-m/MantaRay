@@ -188,6 +188,11 @@ impl RecordingTransport {
 
     /// A remote instrument on a recording line, with the handshake cleared
     /// from the log so it holds only what the caller causes.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`RemoteMcb::connect`] refuses; the canned handshake itself
+    /// is always accepted.
     pub fn connect(number: u16, name: &str) -> Result<(RemoteMcb, CommandLog), DeviceError> {
         let (line, log) = Self::new();
         let remote = RemoteMcb::connect(Box::new(line), number, name)?;
