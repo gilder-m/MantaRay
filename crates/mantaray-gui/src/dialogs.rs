@@ -390,9 +390,12 @@ impl Dialogs {
             // Half-typed calibration texts must not greet the next opening -
             // the table would show the old typing over different points.
             Dialog::Calibration => self.calibration_edits.clear(),
-            // A half-finished preset or bias edit dies with its dialog.
+            // A half-finished bias or gain edit dies with its dialog. A preset
+            // edit does not: closing the dialog was how a typed live time got
+            // lost, and the count then ran with no limit (flow review S2).
+            // It stays, Start refuses while it is not applied, and reopening
+            // the dialog shows it as "not applied yet".
             Dialog::McbProperties => {
-                self.presets_edit.clear();
                 self.hv_edit.clear();
                 self.coarse_edit.clear();
             }
@@ -2880,7 +2883,29 @@ fn mcb_properties(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                                     Err(error) => actions.push(Action::Status(error.to_string())),
                                 }
                             }
+                            // Back to what the instrument holds, sending
+                            // nothing: the other answer Start asks for.
+                            let held = app.detectors[detector].properties().presets;
+                            if ui
+                                .add_enabled(
+                                    held.differ(&presets),
+                                    egui::Button::new("Discard preset changes"),
+                                )
+                                .clicked()
+                            {
+                                presets = held;
+                                actions.push(Action::Status("preset changes discarded".into()));
+                            }
                         });
+                        // As on the bias and gain tabs: a typed preset is a
+                        // draft until Apply, and Start refuses while it is.
+                        if app.detectors[detector]
+                            .properties()
+                            .presets
+                            .differ(&presets)
+                        {
+                            ui.label(egui::RichText::new("not applied yet").weak());
+                        }
                     });
                     // Whatever has been typed so far survives to the next
                     // frame; only Apply sends it to the instrument. While the
@@ -4547,6 +4572,11 @@ fn sample_dialog(app: &mut App, ctx: &egui::Context) {
         );
         // No label of its own: it is what the window's title names.
         named(&description, "Sample Description");
+        // The text goes into the next save of the active window, so a change
+        // to it is unsaved there, and closing asks (flow review S3).
+        if description.changed() {
+            app.mark_modified();
+        }
         ui.horizontal(|ui| {
             // The amount and its unit are both read as "Quantity".
             let label = ui.label("Quantity").id;
@@ -4595,6 +4625,7 @@ fn sample_dialog(app: &mut App, ctx: &egui::Context) {
             let description = app.sample.description.clone();
             if let Some(spectrum) = app.active_spectrum_mut() {
                 spectrum.sample_description = description;
+                app.mark_modified();
             }
         }
     });
@@ -5485,7 +5516,7 @@ fn other_preferences(app: &mut App, ui: &mut egui::Ui) {
         egui::ComboBox::from_id_salt("default-save-format")
             .selected_text(format!(".{}", crate::app::dotted(&app.default_format)))
             .show_ui(ui, |ui| {
-                for extension in ["chn", "spe", "json", "txt", "csv"] {
+                for extension in crate::app::SAVE_FORMATS.iter().copied() {
                     if ui
                         .selectable_label(
                             app.default_format == extension,

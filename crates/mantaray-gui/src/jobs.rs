@@ -646,9 +646,18 @@ impl JobHost for App {
                 let target = self.job_path(path);
                 self.save_active_to(&target).map_err(JobError::host)
             }
+            // The file the window was last saved to or recalled from, as in
+            // the CLI. With none, Save would ask for a name, which a job
+            // cannot answer: it said Ok and wrote nothing, and the job went
+            // on to "job finished" (test gaps GUI-2).
             None => {
-                self.apply_action(Action::Save);
-                Ok(())
+                let target = self
+                    .active
+                    .and_then(|index| self.windows[index].path.clone())
+                    .ok_or_else(|| {
+                        JobError::host("SAVE without a file name and nothing saved or recalled")
+                    })?;
+                self.save_active_to(&target).map_err(JobError::host)
             }
         }
     }
