@@ -542,3 +542,75 @@ fn controls_answer_to_the_words_beside_them() {
     detector.get_by_role_and_label(Role::CheckBox, "Real time (s)");
     detector.get_by_role_and_label(Role::SpinButton, "Real time (s)");
 }
+
+/// The app with no instrument at all, in a harness, the given dialog open.
+fn bare_harness(dialog: mantaray_gui::dialogs::Dialog) -> Harness<'static, App> {
+    let mut app = App::headless();
+    while !app.detectors.is_empty() {
+        app.apply_action(Action::RemoveDetector(0));
+    }
+    app.dialogs.open(dialog);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+    harness
+        .ctx
+        .all_styles_mut(|style| style.animation_time = 0.0);
+    harness.run();
+    harness
+}
+
+#[test]
+fn a_constant_efficiency_typed_as_a_percent_is_refused() {
+    // Typed 5, meaning 5 %: the field clamped it to 1 and Use put 100 % in
+    // force, so every activity came out 20 times too small for a 5 %
+    // detector. The command line refuses the same value with the same words.
+    let mut harness = bare_harness(mantaray_gui::dialogs::Dialog::Efficiency);
+    let label = "Constant efficiency";
+    harness
+        .get_by_role_and_label(Role::SpinButton, label)
+        .click();
+    harness.run();
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::SpinButton, label)
+        .type_text("5");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    harness.get_by_label("Use").click();
+    harness.run();
+    let app = harness.state();
+    assert_eq!(app.efficiency, None, "typing 5 put a curve in force");
+    assert!(!app.status.contains("in force"), "{}", app.status);
+    assert!(
+        app.status.contains(
+            "5 is not an efficiency: give a fraction above 0 and at most 1 (5 % is 0.05)"
+        ),
+        "{}",
+        app.status
+    );
+
+    // The fraction itself is taken.
+    harness
+        .get_by_role_and_label(Role::SpinButton, label)
+        .click();
+    harness.run();
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::SpinButton, label)
+        .type_text("0.05");
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    harness.get_by_label("Use").click();
+    harness.run();
+    let app = harness.state();
+    assert_eq!(
+        app.efficiency,
+        Some(mantaray_core::EfficiencyCalibration::constant(0.05))
+    );
+    assert!(app.status.contains("in force"), "{}", app.status);
+}

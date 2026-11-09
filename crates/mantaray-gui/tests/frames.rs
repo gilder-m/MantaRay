@@ -566,7 +566,11 @@ fn a_constant_efficiency_of_zero_is_refused() {
     app.dialogs.efficiency_constant = 0.0;
     click_text(&mut app, &ctx, "Use");
     assert_eq!(app.efficiency, None);
-    assert!(app.status.contains("efficiency of 0"), "{}", app.status);
+    assert!(
+        app.status.contains("0 is not an efficiency"),
+        "{}",
+        app.status
+    );
 
     app.dialogs.efficiency_constant = 0.05;
     click_text(&mut app, &ctx, "Use");

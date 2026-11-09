@@ -3597,6 +3597,21 @@ fn analysis_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>
     });
 }
 
+/// Why a constant efficiency cannot be used, or `None` when it can.
+///
+/// The command line's `--efficiency` rule and words: a fraction above 0 and
+/// at most 1. Zero reported every nuclide found at 0 Bq, and a percentage
+/// typed as one - 5 for 5 % - made every activity far too small.
+fn efficiency_refusal(value: f64) -> Option<String> {
+    if value.is_finite() && value > 0.0 && value <= 1.0 {
+        None
+    } else {
+        Some(format!(
+            "{value} is not an efficiency: give a fraction above 0 and at most 1 (5 % is 0.05)"
+        ))
+    }
+}
+
 fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>) {
     dialog_window(
         app,
@@ -3609,12 +3624,11 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
             );
             ui.horizontal(|ui| {
                 let label = ui.label("Constant efficiency").id;
-                ui.add(
-                    egui::DragValue::new(&mut app.dialogs.efficiency_constant)
-                        .speed(0.001)
-                        .range(0.0..=1.0),
-                )
-                .labelled_by(label);
+                // No range on the field: a range clamped a typed 5 (meant as
+                // 5 %) to 1, which Use then put in force. The value is checked
+                // as typed, below.
+                ui.add(egui::DragValue::new(&mut app.dialogs.efficiency_constant).speed(0.001))
+                    .labelled_by(label);
                 if ui.button("Use").clicked() {
                     // Zero is no efficiency: it reported every nuclide found
                     // at 0 Bq.
