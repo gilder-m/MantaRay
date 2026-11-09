@@ -284,6 +284,7 @@ impl Spectrum {
 /// zero, is 0 %. Used for the instrument's own reading as well as for
 /// [`Spectrum::dead_time_percent`]. NaN stays NaN, so a reading that is broken
 /// is never shown as a healthy 0 %.
+#[must_use]
 pub fn shown_dead_time(percent: f64) -> f64 {
     if percent <= 0.0 { 0.0 } else { percent }
 }

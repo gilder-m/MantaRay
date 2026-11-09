@@ -47,7 +47,7 @@ const JSON_NEWEST: u32 = 1;
 /// read again) is refused, naming the nuclide and the field. CSV holds them
 /// as text, so an infinite ("stable") half-life still saves as `.csv`.
 pub fn write_json(library: &NuclideLibrary) -> Result<String, FormatError> {
-    for nuclide in library.iter() {
+    for nuclide in library {
         let mut fields = vec![
             ("half-life", nuclide.half_life_seconds, " s"),
             ("uncertainty", nuclide.uncertainty_percent, " %"),

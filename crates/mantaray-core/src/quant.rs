@@ -51,6 +51,7 @@ pub fn bq_to_uci(bq: f64) -> f64 {
 /// to be a finite number above 0. "No quantity" is 1 with no unit, which is
 /// plain Bq. The command line and the interface refuse what this names; the
 /// analysis itself reports per sample, with a note, when it is given one.
+#[must_use]
 pub fn sample_quantity_problem(quantity: f64) -> Option<String> {
     if quantity.is_finite() && quantity > 0.0 {
         None

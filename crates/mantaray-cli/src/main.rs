@@ -406,7 +406,7 @@ fn efficiency_fraction(text: &str) -> Result<f64, String> {
 /// Reads `--quantity`, which must be a number above 0.
 ///
 /// Taken as given, 0, a negative number or NaN became 1 while the report still
-/// read Bq/<unit>: per-sample figures under a per-unit label.
+/// read `Bq/<unit>`: per-sample figures under a per-unit label.
 fn sample_quantity(text: &str) -> Result<f64, String> {
     let hint = "leave out --quantity for activity in plain Bq";
     let value: f64 = text.trim().parse().map_err(|_| {
