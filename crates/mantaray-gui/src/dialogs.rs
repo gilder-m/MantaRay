@@ -3594,12 +3594,13 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 "Without an efficiency curve, results are count rates rather than activities.",
             );
             ui.horizontal(|ui| {
-                ui.label("Constant efficiency");
+                let label = ui.label("Constant efficiency").id;
                 ui.add(
                     egui::DragValue::new(&mut app.dialogs.efficiency_constant)
                         .speed(0.001)
                         .range(0.0..=1.0),
-                );
+                )
+                .labelled_by(label);
                 if ui.button("Use").clicked() {
                     // Zero is no efficiency: it reported every nuclide found
                     // at 0 Bq.
@@ -3638,7 +3639,7 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 if app.dialogs.source_nuclide.is_empty() {
                     app.dialogs.source_nuclide = names.first().cloned().unwrap_or_default();
                 }
-                egui::ComboBox::from_id_salt("eff-source-nuclide")
+                let nuclide = egui::ComboBox::from_id_salt("eff-source-nuclide")
                     .selected_text(app.dialogs.source_nuclide.clone())
                     .show_ui(ui, |ui| {
                         for name in &names {
@@ -3650,7 +3651,9 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                             }
                         }
                     });
-                ui.add(
+                // The row has no label of its own, only the heading over it.
+                named(&nuclide.response, "source nuclide");
+                let activity = ui.add(
                     // A microcurie is 37 000 Bq and a millicurie 3.7e7, so
                     // this field spans the range where digits stop being
                     // countable by eye. Typed in either form.
@@ -3659,22 +3662,25 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                         .range(0.0..=1e12)
                         .suffix(" Bq"),
                 );
-                ui.label("±");
+                named(&activity, "source activity");
+                let label = ui.label("±").id;
                 ui.add(
                     egui::DragValue::new(&mut app.dialogs.source_uncertainty_pct)
                         .speed(0.1)
                         .range(0.0..=50.0)
                         .suffix(" %"),
-                );
+                )
+                .labelled_by(label);
             });
             ui.horizontal(|ui| {
-                ui.label("certificate age");
+                let label = ui.label("certificate age").id;
                 ui.add(
                     egui::DragValue::new(&mut app.dialogs.source_age_days)
                         .speed(1.0)
                         .range(0.0..=100_000.0)
                         .suffix(" days"),
-                );
+                )
+                .labelled_by(label);
                 if ui
                     .button("Measure")
                     .on_hover_text(
@@ -3722,8 +3728,11 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                 app.dialogs.efficiency_points.iter_mut().enumerate()
             {
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(energy).desired_width(70.0));
-                    ui.add(egui::TextEdit::singleline(efficiency).desired_width(70.0));
+                    // Named by the two words of the label over the list.
+                    let field = ui.add(egui::TextEdit::singleline(energy).desired_width(70.0));
+                    named(&field, "energy");
+                    let field = ui.add(egui::TextEdit::singleline(efficiency).desired_width(70.0));
+                    named(&field, "efficiency");
                     if ui.button("x").clicked() {
                         remove = Some(index);
                     }
@@ -3738,8 +3747,12 @@ fn efficiency_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Actio
                         .efficiency_points
                         .push((String::new(), String::new()));
                 }
-                ui.label("fit order");
-                ui.add(egui::Slider::new(&mut app.dialogs.efficiency_order, 1..=4));
+                let label = ui.label("fit order").id;
+                named_slider(
+                    ui,
+                    egui::Slider::new(&mut app.dialogs.efficiency_order, 1..=4),
+                    label,
+                );
             });
             let points: Vec<EfficiencyPoint> = app
                 .dialogs
@@ -3951,9 +3964,10 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                 }
                 let nuclide = &mut app.library.nuclides[selected];
                 ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut nuclide.name).desired_width(100.0));
-                    ui.label("Half life (s)");
+                    let label = ui.label("Name").id;
+                    ui.add(egui::TextEdit::singleline(&mut nuclide.name).desired_width(100.0))
+                        .labelled_by(label);
+                    let label = ui.label("Half life (s)").id;
                     // Half lives in seconds run from a fraction of one to
                     // 10^16, and the long ones are unreadable written out -
                     // Am-241's is 13651526177. Shown the way the line below
@@ -3961,7 +3975,8 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     // `1.365e10` and `13651526177` alike. Shortening it for
                     // the eye must not shorten the number, which is what
                     // `significant_drag` is for.
-                    ui.add(significant_drag(&mut nuclide.half_life_seconds).speed(100.0));
+                    ui.add(significant_drag(&mut nuclide.half_life_seconds).speed(100.0))
+                        .labelled_by(label);
                 });
                 ui.label(format!("= {}", nuclide.half_life_display()));
                 ui.separator();
@@ -3969,16 +3984,19 @@ fn library_dialog(app: &mut App, ctx: &egui::Context, actions: &mut Vec<Action>)
                     .num_columns(4)
                     .striped(true)
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new("energy").strong());
-                        ui.label(egui::RichText::new("yield %").strong());
-                        ui.label(egui::RichText::new("key").strong());
-                        ui.label("");
+                        // The headers name the fields under them.
+                        let energy = ui.label(egui::RichText::new("energy").strong()).id;
+                        let yield_percent = ui.label(egui::RichText::new("yield %").strong()).id;
+                        let key = ui.label(egui::RichText::new("key").strong()).id;
+                        ui.add(egui::Label::new("").selectable(false));
                         ui.end_row();
                         let mut remove = None;
                         for (index, peak) in nuclide.peaks.iter_mut().enumerate() {
-                            ui.add(egui::DragValue::new(&mut peak.energy).speed(0.1));
-                            ui.add(egui::DragValue::new(&mut peak.yield_percent).speed(0.1));
-                            ui.checkbox(&mut peak.key_line, "");
+                            ui.add(egui::DragValue::new(&mut peak.energy).speed(0.1))
+                                .labelled_by(energy);
+                            ui.add(egui::DragValue::new(&mut peak.yield_percent).speed(0.1))
+                                .labelled_by(yield_percent);
+                            bare_checkbox(ui, &mut peak.key_line, key);
                             if ui.button("x").clicked() {
                                 remove = Some(index);
                             }
