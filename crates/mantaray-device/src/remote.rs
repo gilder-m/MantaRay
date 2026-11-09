@@ -86,6 +86,12 @@ pub struct RemoteMcb {
     /// Why the last status reply was not believed, while it is not: the
     /// display keeps the last good values meanwhile.
     untrusted: Option<String>,
+    /// Whether [`Self::untrusted`] was set by a fetch (a spectrum that could
+    /// not be read, the final fetch after STOP included). Only a fetch that
+    /// lands clears such a mark: a status read for a preset change or START
+    /// reads no spectrum, and cleared it while the window still showed the
+    /// spectrum from before the failed read (swarm DEV-2).
+    untrusted_by_fetch: bool,
     /// Status readings the polls have worked in so far ([`Mcb::readings`]).
     readings: u64,
     /// An accepted START that no reading has yet shown counting.
@@ -304,6 +310,7 @@ impl RemoteMcb {
             held_last: false,
             confirm_step: CONFIRM_STEP,
             untrusted: None,
+            untrusted_by_fetch: false,
             readings: 0,
             start_unseen: None,
             provisional_start: false,
@@ -549,6 +556,7 @@ impl RemoteMcb {
         }
         let reason = reason.unwrap_or_else(|| "its channel count did not hold still".into());
         self.untrusted = Some(format!("the final spectrum could not be read: {reason}"));
+        self.untrusted_by_fetch = true;
         let tries = if tries == 1 {
             "1 try".to_string()
         } else {
@@ -792,10 +800,12 @@ impl RemoteMcb {
                 self.status.input_count_rate = number("ICR").unwrap_or(0.0);
                 self.status.total_counts = number("TOTAL").unwrap_or(0.0) as u64;
                 self.untrusted = None;
+                self.untrusted_by_fetch = false;
                 self.see_start(reading, fetched.read_at, fetched.read_instant, true);
             }
             Err(reason) => {
                 self.untrusted = Some(reason);
+                self.untrusted_by_fetch = true;
                 // An unbelievable fetch is still a fetch towards the bound
                 // on an unseen START: the hold never outlasts the wait a
                 // WAIT gives up on (UNREADABLE_READINGS, the same count).
@@ -1252,10 +1262,18 @@ impl Mcb for RemoteMcb {
             })?;
         let Some(reading) = parse_status(&reply) else {
             let reason = format!("the status reply is not a status line: {reply:.60?}");
-            self.untrusted = Some(reason.clone());
+            // A fetch's mark keeps its reason: the next fetch that lands is
+            // what clears it, whatever this read says.
+            if !self.untrusted_by_fetch {
+                self.untrusted = Some(reason.clone());
+            }
             return Err(DeviceError::CountingUnknown { reason });
         };
-        self.untrusted = None;
+        // A good status line clears only a status read's own mark; one a
+        // failed spectrum read set stays until a fetch lands (swarm DEV-2).
+        if !self.untrusted_by_fetch {
+            self.untrusted = None;
+        }
         // The reading is what the mirror now says. It is not a fetch: no
         // spectrum moves and the poll is not fresh, but the next poll fetches
         // at once.

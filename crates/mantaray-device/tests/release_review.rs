@@ -443,7 +443,6 @@ fn an_empty_final_fetch_is_not_believed() {
 /// gate's) clears the mark a failed SHOW_DATA set, though no spectrum has
 /// been read since. Only a fetch that lands may clear it.
 #[test]
-#[ignore = "DEV-2 open"]
 fn a_gate_status_read_does_not_clear_a_failed_fetch_mark() {
     let rig = Rig::new(16);
     let mut mcb = RemoteMcb::connect(rig.transport(), 1, "RIG").expect("connect");
@@ -461,5 +460,33 @@ fn a_gate_status_read_does_not_clear_a_failed_fetch_mark() {
     assert!(
         mcb.reading_untrusted().is_some(),
         "a status read is no spectrum read: the mark must stay until a fetch lands"
+    );
+}
+
+/// DEV-2, START's road: the gate's status read for START (rule 9's preset
+/// check) does not clear a failed fetch's mark either; the next fetch that
+/// lands does.
+#[test]
+fn a_start_status_read_does_not_clear_a_failed_fetch_mark() {
+    let rig = Rig::new(16);
+    let mut mcb = RemoteMcb::connect(rig.transport(), 1, "RIG").expect("connect");
+    mcb.set_confirm_step(Duration::ZERO);
+    rig.fault(Fault::Reply {
+        verb: "SHOW_DATA".into(),
+        reply: "ERR the adapter sent 0 of 64 bytes from 0x0000".into(),
+        count: 1,
+        execute: true,
+    });
+    let _ = advance(&mut mcb, 0.5);
+    assert!(mcb.reading_untrusted().is_some(), "the failed fetch marks it");
+    mcb.start().expect("start");
+    assert!(
+        mcb.reading_untrusted().is_some(),
+        "START's status read is no spectrum read: the mark must stay"
+    );
+    advance(&mut mcb, 0.5).expect("the next poll's fetch lands");
+    assert!(
+        mcb.reading_untrusted().is_none(),
+        "a fetch that lands clears the mark"
     );
 }
