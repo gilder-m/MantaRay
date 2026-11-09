@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ascii;
+mod atomic;
 pub mod chn;
 pub mod clb;
 pub mod library;
@@ -34,6 +35,7 @@ use mantaray_core::{EnergyCalibration, RoiSet, ShapeCalibration, Spectrum};
 use thiserror::Error;
 
 pub use ascii::AsciiOptions;
+pub use atomic::write_atomic;
 pub use list_mode::{ListEvent, ListModeFile, ListRange};
 
 /// The most channels any reader will size an allocation for.
