@@ -87,9 +87,10 @@ noted at the write site); `chn.rs` clamps negative i32 channel counts to 0
 - **Run the full-chain hardware test** when an instrument is idle: build
   i686 release `mantaray-mcb`, run `MANTARAY_MCB=<abs path> cargo test -p
   mantaray-device --test bridge_hardware -- --nocapture`.
-- **macOS remains a type-check only**; the libusb path is proven on Linux
-  (2026-08-05, PR #1) but has never run on a Mac. **Multiple adapters on
-  one Linux bus** are likewise untried (the bench has one).
+- **Multiple adapters on one bus** are untried on every platform (each bench
+  has one). The libusb path is proven on Linux (2026-08-05, PR #1) and on
+  macOS (2026-08-07, `docs/ortec-hardware.md`). On Windows the hub's position
+  rule and the open-time resync (2026-11-08) are unit-tested only.
 - **The exact-multiple/ZLP question** in `dpm.rs::read_in` has bench
   evidence on *both* backends: Windows read 8192-channel spectra (32768
   bytes ≡ 0 mod 4096) byte-identical with follow-up commands in sync, and

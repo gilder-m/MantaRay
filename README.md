@@ -123,7 +123,7 @@ Rust 1.92 or newer.
 cargo run -p mantaray-gui                      # the desktop application
 cargo run -p mantaray-gui -- spectrum.Spe      # open a file, or run a .JOB
 cargo run -p mantaray-cli -- --help            # the command-line workbench
-cargo run -p mantaray-cli -- serve             # a simulator as a network MCB
+cargo run -p mantaray-cli --features simulator -- serve  # a simulator as a network MCB
 cargo test                                    # the whole test suite
 ```
 
