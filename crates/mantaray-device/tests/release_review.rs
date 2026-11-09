@@ -196,7 +196,13 @@ fn a_run_of_flaps_is_set_aside_once_and_keeps_clocks_with_channels() {
     assert_eq!(mcb.spectrum().len(), 16);
     assert!((mcb.spectrum().live_time - landed).abs() < 1e-9);
     assert_whole(&mcb, 1000.0);
-    // The status says where the instrument is; the spectrum, where its
-    // counts were read.
-    assert!(mcb.status().live_time > landed);
+    // Re-pinned for deep review N1: the later flaps are readings that are
+    // not believed, status and all, so the status stays with the spectrum
+    // (an idle status beside old channels ended a WAIT on them) and the
+    // reading is marked until a fetch lands.
+    assert!((mcb.status().live_time - landed).abs() < 1e-9);
+    assert!(
+        mcb.reading_untrusted()
+            .is_some_and(|reason| reason.contains("channel count"))
+    );
 }

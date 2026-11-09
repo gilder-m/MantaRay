@@ -693,8 +693,12 @@ impl RemoteMcb {
         // idle status ended a WAIT on exactly that spectrum, which a job then
         // saved (release review S2). The next fetch decides. Only the first
         // of a run of them, though: lengths that never agree twice must not
-        // stop the readings, so the rest are worked in with the channels and
-        // the spectrum's clocks both kept from the last fetch that landed.
+        // stop the readings. The rest count as readings that are not
+        // believed (below), status and all: worked in, the idle status of a
+        // second held fetch in a row ended a WAIT on the channels and clocks
+        // of the fetch before, which a job saved as the finished count (deep
+        // review N1). Lengths that never settle end a WAIT as unreadable
+        // after UNREADABLE_READINGS fetches, never as over.
         let parsed = self.parse_data(&fetched.data);
         let held = matches!(parsed, Ok(count)
             if count > 0 && self.spectrum.len() != count && !self.believes(count));
@@ -735,6 +739,11 @@ impl RemoteMcb {
         self.reading_at = Some(fetched.read_instant);
         let reading = match &parsed {
             Err(error) => Err(format!("the spectrum could not be read: {error}")),
+            Ok(count) if held => Err(format!(
+                "the spectrum's channel count does not hold still (this read {count}, \
+                 the spectrum {})",
+                self.spectrum.len()
+            )),
             Ok(_) => parse_status(&status).ok_or_else(|| {
                 format!("the status reply is not a status line: {status:.60?}")
             }),
