@@ -54,7 +54,9 @@ fn a_chn_at_an_offset_saved_as_spe_opens_again() {
 #[test]
 fn a_spe_range_ending_before_it_starts_is_refused_saying_so() {
     let text = "$SPEC_ID:\nx\n$DATA:\n60 49\n1\n2\n";
-    let error = spe::read(text).expect_err("an impossible range").to_string();
+    let error = spe::read(text)
+        .expect_err("an impossible range")
+        .to_string();
     assert!(
         error.contains("60") && error.contains("49") && error.contains("before"),
         "{error}"
@@ -123,7 +125,9 @@ fn through(name: &str) -> (Vec<u8>, Spectrum) {
 fn windows_1252(text: &str) -> Vec<u8> {
     // Every character of LAB_TEXT is ASCII or Latin-1, where Windows-1252 is
     // the code point itself.
-    text.chars().map(|c| u8::try_from(u32::from(c)).expect("Latin-1")).collect()
+    text.chars()
+        .map(|c| u8::try_from(u32::from(c)).expect("Latin-1"))
+        .collect()
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -133,7 +137,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[test]
 fn a_chn_description_is_stored_as_windows_1252_and_reads_back() {
     let (bytes, back) = through("lab.Chn");
-    assert!(contains(&bytes, &windows_1252(LAB_TEXT)), "not Windows-1252");
+    assert!(
+        contains(&bytes, &windows_1252(LAB_TEXT)),
+        "not Windows-1252"
+    );
     assert!(!contains(&bytes, "\u{b5}".as_bytes()), "UTF-8 in a .Chn");
     assert_eq!(back.sample_description, LAB_TEXT);
     assert_eq!(back.detector_description, format!("GEM {LAB_TEXT}"));
@@ -142,7 +149,10 @@ fn a_chn_description_is_stored_as_windows_1252_and_reads_back() {
 #[test]
 fn a_spe_is_stored_as_windows_1252_and_reads_back() {
     let (bytes, back) = through("lab.Spe");
-    assert!(contains(&bytes, &windows_1252(LAB_TEXT)), "not Windows-1252");
+    assert!(
+        contains(&bytes, &windows_1252(LAB_TEXT)),
+        "not Windows-1252"
+    );
     assert!(!contains(&bytes, "\u{b5}".as_bytes()), "UTF-8 in a .Spe");
     assert_eq!(back.sample_description, LAB_TEXT);
     assert_eq!(back.detector_description, format!("GEM {LAB_TEXT}"));
@@ -151,7 +161,10 @@ fn a_spe_is_stored_as_windows_1252_and_reads_back() {
 #[test]
 fn a_spc_description_is_stored_as_windows_1252_and_reads_back() {
     let (bytes, back) = through("lab.Spc");
-    assert!(contains(&bytes, &windows_1252(LAB_TEXT)), "not Windows-1252");
+    assert!(
+        contains(&bytes, &windows_1252(LAB_TEXT)),
+        "not Windows-1252"
+    );
     assert_eq!(back.sample_description, LAB_TEXT);
     assert_eq!(back.detector_description, format!("GEM {LAB_TEXT}"));
 }
@@ -211,7 +224,10 @@ fn a_chn_with_a_utf_8_description_from_0_2_4_still_reads() {
     let text = LAB_TEXT.as_bytes();
     bytes[at] = u8::try_from(text.len()).expect("short");
     bytes[at + 1..at + 1 + text.len()].copy_from_slice(text);
-    assert_eq!(chn::read(&bytes).expect("read").sample_description, LAB_TEXT);
+    assert_eq!(
+        chn::read(&bytes).expect("read").sample_description,
+        LAB_TEXT
+    );
 }
 
 // --- N-2: no start date is binary zeros ------------------------------------

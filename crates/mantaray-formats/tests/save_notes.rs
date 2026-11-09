@@ -33,9 +33,15 @@ fn a_character_replaced_by_a_question_mark_is_named() {
         let notes = notes_for(&s, name);
         assert_eq!(notes.len(), 1, "{name}: {notes:?}");
         assert!(notes[0].contains("sample description"), "{notes:?}");
-        assert!(notes[0].contains('\u{3b2}') && notes[0].contains("'?'"), "{notes:?}");
+        assert!(
+            notes[0].contains('\u{3b2}') && notes[0].contains("'?'"),
+            "{notes:?}"
+        );
     }
-    assert!(notes_for(&s, "beta.json").is_empty(), "native holds any text");
+    assert!(
+        notes_for(&s, "beta.json").is_empty(),
+        "native holds any text"
+    );
 }
 
 #[test]
@@ -44,6 +50,9 @@ fn a_description_cut_to_the_field_is_named() {
     s.detector_description = "y".repeat(80);
     let notes = notes_for(&s, "long.Chn");
     assert_eq!(notes.len(), 1, "{notes:?}");
-    assert!(notes[0].contains("detector description") && notes[0].contains("63"), "{notes:?}");
+    assert!(
+        notes[0].contains("detector description") && notes[0].contains("63"),
+        "{notes:?}"
+    );
     assert!(notes_for(&s, "long.Spe").is_empty(), ".Spe has no limit");
 }
