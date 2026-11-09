@@ -444,8 +444,12 @@ impl RemoteMcb {
     /// finishes only when the detector agrees. At most `CONFIRM_READS`
     /// reads, [`Self::confirm_step`] apart: a bound inside one command, never
     /// a wait across frames, and the same number of reads however slow the
-    /// wire. A read that fails ends it with that read's reason: the STOP was
-    /// sent, but could not be confirmed.
+    /// wire. A read that cannot tell (a failed status read, or the bridge's
+    /// ERR for a flag it could not read) uses up one of those reads and the
+    /// next one is tried: one hiccup on a stopped detector no longer fails
+    /// the STOP of a job's START / WAIT / STOP / SAVE (release review of
+    /// 4597899). Only when no read could tell is the STOP called sent, but
+    /// not confirmed, with the last read's reason.
     fn confirm_stopped(&mut self) -> Result<bool, DeviceError> {
         self.confirming = true;
         self.confirm_reply = None;
@@ -456,23 +460,27 @@ impl RemoteMcb {
 
     /// The reads behind [`Self::confirm_stopped`].
     fn confirm_reads(&mut self) -> Result<bool, DeviceError> {
+        let mut told = false;
+        let mut unknown = None;
         for read in 0..CONFIRM_READS {
             if read > 0 && !self.confirm_step.is_zero() {
                 std::thread::sleep(self.confirm_step);
             }
             match self.read_counting() {
                 Ok(false) => return Ok(true),
-                Ok(true) => {}
-                Err(DeviceError::CountingUnknown { reason }) => {
-                    return Err(DeviceError::Command {
-                        command: "STOP".into(),
-                        detail: format!("sent, but could not confirm: {reason}"),
-                    });
-                }
+                Ok(true) => told = true,
+                Err(DeviceError::CountingUnknown { reason }) => unknown = Some(reason),
                 Err(error) => return Err(error),
             }
         }
-        Ok(false)
+        // A read that told said it still counts: it did not stop.
+        match unknown {
+            Some(reason) if !told => Err(DeviceError::Command {
+                command: "STOP".into(),
+                detail: format!("sent, but could not confirm: {reason}"),
+            }),
+            _ => Ok(false),
+        }
     }
 
     /// Pulls fresh status and data from the instrument, on this thread.
