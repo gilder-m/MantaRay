@@ -159,6 +159,25 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 then replug the adapter and press **Scan** on the opening screen. No driver is
 needed; see [docs/ortec-hardware.md](docs/ortec-hardware.md).
 
+A Model 927 has its own product number, so it takes its own rule:
+
+```sh
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0a2d", ATTR{idProduct}=="0019", TAG+="uaccess", MODE="0660"' \
+    | sudo tee /etc/udev/rules.d/71-ortec-927.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+It also needs ORTEC's FPGA image, `M927.rbf`, after every power-up. MantaRay
+does not ship that file. The helper looks for your own copy in three places,
+in this order: `--firmware /path/to/M927.rbf`, then
+`MANTARAY_M927_RBF=/path/to/M927.rbf` in the environment, then a file named
+`M927.rbf` in MantaRay's settings directory (`~/.local/share/mantaray/`, or
+`$XDG_DATA_HOME/mantaray/` when that is set). The last is the one to use when
+MantaRay is started from a desktop launcher, whose environment holds no
+variable. Each of its two inputs
+shows up as a detector of its own. The helper (`mantaray-mcb`) is tested against
+a real 927; the application window is not yet.
+
 ### Windows and macOS
 
 `cargo run -p mantaray-gui` is enough; no extra packages.

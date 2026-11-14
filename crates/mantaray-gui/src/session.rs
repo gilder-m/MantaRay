@@ -220,6 +220,20 @@ pub fn clear() {
 mod tests {
     use super::*;
 
+    /// The helper finds the 927's FPGA image in the settings directory
+    /// without eframe, so its idea of that directory must be the window's.
+    #[test]
+    fn the_helper_and_the_window_agree_on_the_settings_directory() {
+        assert_eq!(
+            mantaray_core::storage::directory(),
+            eframe::storage_dir(crate::APPLICATION_ID)
+        );
+        assert_eq!(
+            mantaray_core::storage::storage_dir(FORMER_NAME),
+            eframe::storage_dir(FORMER_NAME)
+        );
+    }
+
     fn a_window(title: &str) -> SavedWindow {
         let mut spectrum = Spectrum::new(8);
         spectrum.channels[3] = 42;

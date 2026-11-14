@@ -30,6 +30,7 @@ pub mod quant;
 pub mod roi;
 pub mod settings;
 pub mod spectrum;
+pub mod storage;
 pub mod undo;
 
 pub use analysis::{

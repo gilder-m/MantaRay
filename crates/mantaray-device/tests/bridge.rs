@@ -29,6 +29,7 @@ fn helper(name: &str) -> PathBuf {
                 ("stalls-once", STALLS_ONCE),
                 ("echoes", ECHOES),
                 ("dies", DIES),
+                ("says-how-started", SAYS_HOW_STARTED),
             ] {
                 let path = directory.join(name);
                 let mut file = std::fs::File::create(&path).expect("the helper is written");
@@ -60,6 +61,14 @@ const ECHOES: &str = "while IFS= read -r line; do echo \"REPLY-TO $line\"; done\
 
 /// A helper that is gone before the first command reaches it.
 const DIES: &str = "exit 0\n";
+
+/// A helper that answers every command with its own command line and the
+/// FPGA image the environment named for it.
+const SAYS_HOW_STARTED: &str = "\
+while IFS= read -r line; do
+    echo \"ARGS $* RBF=${MANTARAY_M927_RBF-unset}\"
+done
+";
 
 #[test]
 fn a_late_reply_is_never_handed_to_the_command_after_it() {
@@ -132,4 +141,41 @@ fn parking_waits_for_the_helper_to_leave() {
         outcome.is_err(),
         "a parked bridge cannot answer: {outcome:?}"
     );
+}
+
+/// Opening the second input of a 927 starts the helper on that entry.
+///
+/// The scan numbers the bus `9049204-1`, `9049204-2`, `08134079`, and the
+/// application opens entry 2 with `serve 2` while it has no serial for it,
+/// and with `--device 9049204-2` once it has learned one - never entry 1 and
+/// never the 926.
+#[test]
+fn a_pinned_bridge_starts_the_helper_on_the_entry_it_was_given() {
+    let mut first_open = BridgeTransport::start_pinned(&helper("says-how-started"), 2, None, None)
+        .expect("the helper starts");
+    let said = first_open.exchange("SHOW_CONFIGURATION").unwrap();
+    assert!(said.starts_with("ARGS serve 2 RBF="), "{said}");
+
+    let mut pinned =
+        BridgeTransport::start_pinned(&helper("says-how-started"), 2, Some("9049204-2"), None)
+            .expect("the helper starts");
+    let said = pinned.exchange("SHOW_CONFIGURATION").unwrap();
+    assert!(
+        said.starts_with("ARGS serve 2 --device 9049204-2 RBF="),
+        "{said}"
+    );
+}
+
+/// The 927's FPGA image reaches the helper the way the bench gave it: in
+/// the environment the application was started with, inherited as is.
+#[test]
+fn the_helper_inherits_the_fpga_image_named_in_the_environment() {
+    // SAFETY: nothing else in this binary reads this variable or writes the
+    // environment.
+    unsafe { std::env::set_var("MANTARAY_M927_RBF", "/opt/ortec/M927.rbf") };
+    let mut bridge =
+        BridgeTransport::start_pinned(&helper("says-how-started"), 1, Some("9049204-1"), None)
+            .expect("the helper starts");
+    let said = bridge.exchange("SHOW_STATUS").unwrap();
+    assert!(said.ends_with(" RBF=/opt/ortec/M927.rbf"), "{said}");
 }

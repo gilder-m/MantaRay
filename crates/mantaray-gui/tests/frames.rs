@@ -2079,6 +2079,25 @@ fn removing_a_detector_drops_its_pending_edits() {
 }
 
 #[test]
+fn a_number_given_to_another_instrument_drops_the_old_ones_pending_edits() {
+    // Adding under a number already in use gives the number to the new
+    // instrument; what was typed for the old one must not wait for it.
+    let mut app = App::headless();
+    assert_eq!(mantaray_device::Mcb::identity(&app.detectors[0]).number, 1);
+    app.dialogs.coarse_edit.insert(1, 64.0);
+    app.dialogs.hv_edit.insert(1, 1200.0);
+    app.dialogs
+        .presets_edit
+        .insert(1, mantaray_device::Presets::default());
+    app.dialogs.coarse_edit.insert(2, 65.0);
+    app.add_detector(simulated_entry(1));
+    assert!(app.dialogs.hv_edit.is_empty());
+    assert!(app.dialogs.presets_edit.is_empty());
+    assert_eq!(app.dialogs.coarse_edit.get(&2), Some(&65.0));
+    assert_eq!(app.dialogs.coarse_edit.len(), 1);
+}
+
+#[test]
 fn the_not_applied_note_is_under_the_table_not_a_cell_of_the_coarse_gain_row() {
     let ctx = still_context();
     let mut app = App::headless();

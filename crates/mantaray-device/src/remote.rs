@@ -215,7 +215,10 @@ impl RemoteMcb {
         // journal of the connected life cannot see: everything here runs
         // before the mirror exists to write fetch lines.
         let started = std::time::Instant::now();
-        let configuration = checked(transport.exchange("SHOW_CONFIGURATION")?)?;
+        let configuration = checked(
+            "SHOW_CONFIGURATION",
+            transport.exchange("SHOW_CONFIGURATION")?,
+        )?;
         if crate::journal::on() {
             crate::journal::line(&format!(
                 "connect d{number}: SHOW_CONFIGURATION answered in {:.2}s",
@@ -424,7 +427,7 @@ impl RemoteMcb {
 
     /// One command out, one checked line back.
     fn command(&mut self, command: &str) -> Result<String, DeviceError> {
-        checked(self.raw(command)?)
+        checked(command, self.raw(command)?)
     }
 
     /// Sends `steps` in order. The mirror follows each step the moment the
@@ -891,7 +894,7 @@ impl RemoteMcb {
     /// Parses a `DATA <n> <count>...` reply into the scratch; the channel
     /// count it declares.
     fn parse_data(&mut self, data: &str) -> Result<usize, DeviceError> {
-        let data = checked(data.to_string())?;
+        let data = checked("SHOW_DATA", data.to_string())?;
         let mut words = data.split_whitespace();
         if words.next() != Some("DATA") {
             return Err(DeviceError::Communication {
@@ -980,11 +983,12 @@ fn status_number(status: &str, key: &str) -> Option<f64> {
     })
 }
 
-/// Turns an `ERR reason` line into the error it is.
-fn checked(response: String) -> Result<String, DeviceError> {
+/// Turns an `ERR reason` line, the answer to `command`, into the error it
+/// is, naming the verb that was refused.
+fn checked(command: &str, response: String) -> Result<String, DeviceError> {
     match response.strip_prefix("ERR") {
         Some(reason) => Err(DeviceError::Command {
-            command: String::new(),
+            command: command.split_whitespace().next().unwrap_or("").to_string(),
             detail: reason.trim().to_string(),
         }),
         None => Ok(response),
@@ -1393,7 +1397,7 @@ impl Mcb for RemoteMcb {
             // Stopped: the count it stopped at is what the mirror holds next.
             return self.final_fetch();
         }
-        Err(match checked(reply) {
+        Err(match checked("STOP", reply) {
             Err(DeviceError::Command { detail, .. }) => DeviceError::Command {
                 command: "STOP".into(),
                 detail,

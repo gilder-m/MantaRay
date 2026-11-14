@@ -1970,6 +1970,46 @@ fn a_scan_reads_the_direct_probe_the_same_as_the_windows_one() {
     assert!(scan.problem.is_none());
 }
 
+/// The bench's bus away from Windows: a Model 927 is two entries, one per
+/// input, ahead of a 926 behind its DPM-USB adapter. The text is what
+/// `mantaray-mcb probe` prints for them (`probe_block`), with the line its
+/// FPGA load leaves on standard error after it, as the scan collects both.
+const BENCH_927_PROBE_OUTPUT: &str = "\
+3 adapter(s) on the bus
+
+  1: 927 9049204-1
+      model    927
+      channels 16384
+      state    idle
+  2: 927 9049204-2
+      model    927
+      channels 16384
+      state    idle
+  3: 0926-001 08134079
+      model    0926-001
+      channels 8192
+      state    idle
+loaded the 927's FPGA (85828 bytes) and set both inputs' discriminators to 40 and 16383
+";
+
+#[test]
+fn a_scan_lists_each_input_of_a_927_as_its_own_detector() {
+    use mantaray_gui::app::InstrumentScan;
+    let scan = InstrumentScan::parse(BENCH_927_PROBE_OUTPUT);
+    // The number is what the open hands to `serve`, so input 2 is opened as
+    // entry 2 and not as entry 1 or the 926.
+    assert_eq!(
+        scan.reachable,
+        vec![
+            (1, "927 9049204-1".to_string()),
+            (2, "927 9049204-2".to_string()),
+            (3, "0926-001 08134079".to_string()),
+        ]
+    );
+    assert!(scan.missing.is_empty());
+    assert_eq!(scan.summary(), "3 instrument(s) answered");
+}
+
 #[test]
 fn a_scan_that_could_not_run_says_so_rather_than_reporting_nothing() {
     use mantaray_gui::app::InstrumentScan;

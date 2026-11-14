@@ -4634,6 +4634,10 @@ impl App {
                 return;
             }
         };
+        // The number may have been another instrument's until now, and its
+        // pending edits would greet this one - a bias typed for a 926 shown
+        // on a 927, which has none.
+        self.dialogs.forget_detector(entry.number);
         self.detector_list.push(entry);
         self.detectors.push(mcb);
         // "connected to ..." and "opened MODEL (N channels)" say more than

@@ -38,6 +38,11 @@ pub trait Instrument {
     fn channels(&self) -> usize;
     /// Reads channel counts.
     fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String>;
+    /// Reads every channel the instrument is set to use. An instrument whose
+    /// channel count can move between two calls reads both in one.
+    fn read_all(&self) -> Result<Vec<u64>, String> {
+        self.read(0, self.channels())
+    }
     /// Whether the ADC is acquiring, or why that cannot be told. A failed
     /// read is never "not acquiring": one false idle mid-count ended a job's
     /// wait and saved a partial spectrum (release review S1).
@@ -425,12 +430,11 @@ impl Session<'_> {
 
     fn data(&mut self) -> Result<String, String> {
         use std::fmt::Write as _;
-        let channels = self.instrument.channels();
-        let counts = self.instrument.read(0, channels)?;
+        let counts = self.instrument.read_all()?;
         self.total = counts.iter().sum();
         if crate::journal::on() {
             crate::journal::line(&format!(
-                "read: asked={channels} returned={} sum={}",
+                "read: returned={} sum={}",
                 counts.len(),
                 self.total
             ));
@@ -653,6 +657,230 @@ impl Instrument for ViaDirect {
             self.device.serial()
         )
     }
+}
+
+/// One input of a Model 927, reached over libusb.
+///
+/// A 927 has no ASCII dialect on the wire - ORTEC's own library turns the
+/// commands into register operations on the host - so this does the same for
+/// the handful of commands [`Session`] sends, and answers them in the record
+/// format `Session` reads. Every other command is refused by name. That is
+/// deliberate: a 926 answers a command it does not know with the same empty
+/// reply as one it obeyed, and an `OK` for a high voltage this box does not
+/// have would be a lie the operator could not see.
+///
+/// The box is held for one of these calls at a time and let go in between,
+/// which is what lets a second process serve the other input.
+#[cfg(not(windows))]
+pub struct Via927<B: crate::mcb927::Shared> {
+    device: B,
+    serial: String,
+    input: crate::mcb927::Input,
+    /// The gain as found at start-up; only the answer of last resort.
+    channels: usize,
+}
+
+#[cfg(not(windows))]
+impl<B: crate::mcb927::Shared> Via927<B> {
+    /// Opens one input, loading the FPGA first if it has no configuration.
+    ///
+    /// `image` is asked for only when a load is needed, so a box that is
+    /// already configured needs no image at all - and is left exactly as it
+    /// was found, discriminators included. The check and the load happen
+    /// under one hold, so two processes opening the two inputs of a box just
+    /// powered up load it once between them.
+    pub fn open(
+        device: B,
+        serial: &str,
+        input: crate::mcb927::Input,
+        image: &dyn Fn() -> Result<Vec<u8>, String>,
+    ) -> Result<Self, String> {
+        use crate::mcb927::{Fpga, Mcb927, OPEN_PATIENCE};
+        let channels = device.hold(OPEN_PATIENCE, |wire| {
+            let mcb = Mcb927::new(wire);
+            if mcb.fpga_status()? == Fpga::NeedsConfiguration {
+                let image = image()?;
+                mcb.configure(&image)?;
+                eprintln!(
+                    "loaded the 927's FPGA ({} bytes) and set both inputs' discriminators to \
+                     {} and {}",
+                    image.len(),
+                    crate::mcb927::DEFAULT_LOWER_DISCRIMINATOR,
+                    crate::mcb927::DEFAULT_UPPER_DISCRIMINATOR,
+                );
+            }
+            Ok(mcb.channels(input)?)
+        })?;
+        Ok(Self {
+            device,
+            serial: serial.to_string(),
+            input,
+            channels,
+        })
+    }
+
+    /// Runs one operation with the box held.
+    fn held<T>(
+        &self,
+        operation: impl FnOnce(&crate::mcb927::Mcb927<'_>) -> Result<T, crate::mcb927::Error>,
+    ) -> Result<T, String> {
+        self.device.hold(crate::mcb927::PATIENCE, |wire| {
+            operation(&crate::mcb927::Mcb927::new(wire)).map_err(String::from)
+        })
+    }
+}
+
+/// The preset an ORTEC preset verb is about.
+#[cfg(not(windows))]
+fn preset_of(verb: &str) -> Option<crate::mcb927::Preset> {
+    use crate::mcb927::Preset;
+    match verb.split_once('_')?.1 {
+        "TRUE_PRESET" => Some(Preset::Real),
+        "LIVE_PRESET" => Some(Preset::Live),
+        "PEAK_PRESET" => Some(Preset::RoiPeak),
+        "INTEGRAL_PRESET" => Some(Preset::RoiIntegral),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+impl<B: crate::mcb927::Shared> Instrument for Via927<B> {
+    fn command(&self, text: &str) -> Result<String, String> {
+        let (verb, argument) = match text.trim().split_once(' ') {
+            Some((verb, rest)) => (verb, rest.trim()),
+            None => (text.trim(), ""),
+        };
+        let input = self.input;
+        let bare = || {
+            if argument.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{verb} takes no argument on a Model 927, and was given {argument:?}"
+                ))
+            }
+        };
+        match verb {
+            "SHOW_VERSION" => {
+                bare()?;
+                let version = self.held(|mcb| mcb.firmware_version())?;
+                Ok(format!("$F{version}"))
+            }
+            "SHOW_LIVE" => {
+                bare()?;
+                Ok(record('G', self.held(|mcb| mcb.live_ticks(input))?))
+            }
+            "SHOW_TRUE" => {
+                bare()?;
+                Ok(record('G', self.held(|mcb| mcb.real_ticks(input))?))
+            }
+            "SHOW_TRUE_PRESET"
+            | "SHOW_LIVE_PRESET"
+            | "SHOW_PEAK_PRESET"
+            | "SHOW_INTEGRAL_PRESET" => {
+                bare()?;
+                let preset = preset_of(verb).expect("matched above");
+                Ok(record('G', self.held(|mcb| mcb.preset(input, preset))?))
+            }
+            "SET_TRUE_PRESET" | "SET_LIVE_PRESET" | "SET_PEAK_PRESET" | "SET_INTEGRAL_PRESET" => {
+                let preset = preset_of(verb).expect("matched above");
+                let value: u32 = argument.parse().map_err(|_| {
+                    format!(
+                        "{verb} wants a whole number from 0 to {}, not {argument:?}",
+                        u32::MAX
+                    )
+                })?;
+                self.held(|mcb| mcb.set_preset(input, preset, value))?;
+                Ok(String::new())
+            }
+            "START" => {
+                bare()?;
+                self.held(|mcb| mcb.start(input))?;
+                Ok(String::new())
+            }
+            "STOP" => {
+                bare()?;
+                self.held(|mcb| mcb.stop(input))?;
+                Ok(String::new())
+            }
+            // Counts and clocks both, as the 926's CLEAR does and as the
+            // application expects of it. Not quite all the counts: ORCA's
+            // frame stops one word short, so channel 16383 may survive -
+            // see `Mcb927::clear`.
+            "CLEAR" => {
+                bare()?;
+                self.held(|mcb| {
+                    mcb.clear(input)?;
+                    mcb.clear_clocks(input)
+                })?;
+                Ok(String::new())
+            }
+            other => Err(format!(
+                "{other} is not a command this bridge can carry out on a Model 927"
+            )),
+        }
+    }
+    fn channels(&self) -> usize {
+        // The gain can move under us (another process, a reloaded FPGA), so
+        // it is asked again; the value from opening stands in if the box
+        // cannot be asked.
+        let input = self.input;
+        self.held(|mcb| mcb.channels(input))
+            .unwrap_or(self.channels)
+    }
+    fn read(&self, start: usize, count: usize) -> Result<Vec<u64>, String> {
+        // The whole spectrum from channel zero, which is the read ORCA does
+        // and the bench has seen; a partial read is a slice of it.
+        Ok(self
+            .read_all()?
+            .into_iter()
+            .skip(start)
+            .take(count)
+            .collect())
+    }
+    fn read_all(&self) -> Result<Vec<u64>, String> {
+        // The length comes from the same hold as the counts, so a gain moved
+        // in between cannot cut the spectrum to the old one.
+        let input = self.input;
+        let counts = self.held(|mcb| {
+            let channels = mcb.channels(input)?;
+            mcb.read_spectrum(input, 0, channels)
+        })?;
+        Ok(counts.into_iter().map(u64::from).collect())
+    }
+    fn is_counting(&self) -> Result<bool, String> {
+        let input = self.input;
+        self.held(|mcb| mcb.is_counting(input))
+    }
+    fn model(&self) -> String {
+        "927".into()
+    }
+    fn identity(&self) -> String {
+        format!("{}-{}", self.serial, self.input.number())
+    }
+    fn calibration(&self) -> Option<(f64, f64, f64)> {
+        // There is no MAESTRO on this machine to have stored one.
+        None
+    }
+    fn route(&self) -> String {
+        format!(
+            "input {} of Model 927 {} over libusb, with no vendor driver",
+            self.input.number(),
+            self.serial
+        )
+    }
+}
+
+/// A `$G` or `$C` record carrying one number, checksum and all.
+///
+/// The inverse of [`record_number`]: the width is the letter's, and the
+/// checksum is the sum of every byte before it, modulo 256, in three digits.
+#[cfg(not(windows))]
+fn record(letter: char, value: u32) -> String {
+    let width = if letter == 'C' { 5 } else { 10 };
+    let body = format!("${letter}{value:0width$}");
+    let sum = body.bytes().map(u32::from).sum::<u32>() % 256;
+    format!("{body}{sum:03}")
 }
 
 /// The energy calibration MAESTRO stores for an instrument.
@@ -1413,5 +1641,343 @@ mod tests {
         assert!(!is_version_record("$F"));
         assert!(!is_version_record("$C04096087"));
         assert!(is_version_record("$F0926-001\r"));
+    }
+}
+
+/// The 927 behind the same `Session` the 926 is served through.
+#[cfg(all(test, not(windows)))]
+mod tests_927 {
+    use super::*;
+    use crate::mcb927::double::Fake927;
+    use crate::mcb927::{Input, Register};
+
+    /// A made-up image: not ORTEC's.
+    const IMAGE: [u8; 120] = [0x5A; 120];
+
+    fn no_image() -> Result<Vec<u8>, String> {
+        panic!("a configured 927 must not ask for an image");
+    }
+
+    /// Input 2 of a configured box, which is the one whose addresses differ.
+    fn second_input(fake: &Fake927) -> Via927<&Fake927> {
+        Via927::open(fake, "9049204", Input::Two, &no_image).expect("open")
+    }
+
+    fn session<'a>(instrument: &'a dyn Instrument) -> Session<'a> {
+        Session {
+            instrument,
+            total: 0,
+        }
+    }
+
+    impl crate::mcb927::Shared for &Fake927 {
+        fn hold<T>(
+            &self,
+            patience: std::time::Duration,
+            operation: impl FnOnce(&dyn crate::dpm::BulkDevice) -> Result<T, String>,
+        ) -> Result<T, String> {
+            (**self).hold(patience, operation)
+        }
+    }
+
+    #[test]
+    fn a_record_is_built_the_way_the_926_builds_them() {
+        // The two records the 926 itself gave, checksums included.
+        assert_eq!(record('G', 7_892_556), "$G0007892556117");
+        assert_eq!(record('C', 8192), "$C08192107");
+        assert_eq!(
+            record_number(&record('G', u32::MAX), 'G').unwrap(),
+            f64::from(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn a_configuration_names_the_input_and_reads_its_gain() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::ConversionGain, 2);
+        let instrument = second_input(&fake);
+        assert_eq!(
+            session(&instrument).handle("SHOW_CONFIGURATION"),
+            "MODEL=927 SERIAL=9049204-2 FIRMWARE=2 CHANNELS=4096"
+        );
+        assert_eq!(
+            instrument.route(),
+            "input 2 of Model 927 9049204 over libusb, with no vendor driver"
+        );
+    }
+
+    #[test]
+    fn a_gain_changed_after_opening_is_the_gain_read() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::ConversionGain, 2);
+        let instrument = second_input(&fake);
+        // Another process, or a reloaded FPGA, moves the gain under us.
+        fake.set(Input::Two, Register::ConversionGain, 1);
+        assert_eq!(instrument.channels(), 8192);
+        assert_eq!(instrument.read(0, 16_384).unwrap().len(), 8192);
+        assert_eq!(
+            session(&instrument).handle("SHOW_CONFIGURATION"),
+            "MODEL=927 SERIAL=9049204-2 FIRMWARE=2 CHANNELS=8192"
+        );
+    }
+
+    #[test]
+    fn a_data_read_takes_its_length_and_its_counts_under_one_hold() {
+        // Between two holds the other process, or a reloaded FPGA, can move
+        // the gain, and the spectrum would be cut to the old length.
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::ConversionGain, 2);
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+        let before = fake.holds.get();
+        assert!(session.handle("SHOW_DATA").starts_with("DATA 4096 "));
+        assert_eq!(fake.holds.get() - before, 1);
+    }
+
+    #[test]
+    fn a_status_reads_this_inputs_flag_and_clocks() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::AcquisitionStatus, 1);
+        fake.set(Input::Two, Register::LiveTime, 500);
+        fake.set(Input::Two, Register::RealTime, 600);
+        // Input 1 holds other numbers, which must not be the ones reported.
+        fake.set(Input::One, Register::LiveTime, 9999);
+        let instrument = second_input(&fake);
+        assert_eq!(
+            session(&instrument).handle("SHOW_STATUS"),
+            "RT=12.00 LT=10.00 DT=16.67% ICR=0 ACTIVE=1 TOTAL=0"
+        );
+        let first = Via927::open(&fake, "9049204", Input::One, &no_image).unwrap();
+        assert_eq!(
+            session(&first).handle("SHOW_STATUS"),
+            "RT=0.00 LT=199.98 DT=0.00% ICR=0 ACTIVE=0 TOTAL=0"
+        );
+    }
+
+    #[test]
+    fn a_data_read_is_this_inputs_memory_as_plain_counts() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::ConversionGain, 6);
+        fake.memory.borrow_mut()[0x8000] = 3;
+        fake.memory.borrow_mut()[0x8000 + 255] = 4;
+        fake.memory.borrow_mut()[0] = 1000;
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+        let data = session.handle("SHOW_DATA");
+        assert!(data.starts_with("DATA 256 3 0 0 "), "{data}");
+        assert!(data.ends_with(" 0 4"), "{data}");
+        assert!(session.handle("SHOW_STATUS").ends_with("TOTAL=7"));
+        // And the read after a spectrum is still in step.
+        assert!(session.handle("SHOW_STATUS").starts_with("RT="));
+    }
+
+    #[test]
+    fn a_preset_in_seconds_lands_in_the_register_in_ticks_and_is_armed() {
+        let fake = Fake927::configured();
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+        assert_eq!(session.handle("SET_PRESET_LIVE 300"), "OK");
+        assert_eq!(fake.get(Input::Two, Register::LivePreset), 15_000);
+        assert_eq!(fake.get(Input::Two, Register::PresetControl), 1 << 3);
+        assert_eq!(session.handle("SET_PRESET_COUNT 100"), "OK");
+        assert_eq!(session.handle("SET_PRESET_INTEG 5000"), "OK");
+        assert_eq!(session.handle("SET_PRESET_REAL 2"), "OK");
+        assert_eq!(
+            session.handle("SHOW_PRESETS"),
+            "PRESETS REAL=2.00 LIVE=300.00 PEAK=100 INTEG=5000"
+        );
+        assert_eq!(session.handle("SET_PRESET_CLEAR"), "OK");
+        assert_eq!(
+            session.handle("SHOW_PRESETS"),
+            "PRESETS REAL=0.00 LIVE=0.00 PEAK=0 INTEG=0"
+        );
+        assert_eq!(fake.get(Input::Two, Register::PresetControl), 0);
+        assert_eq!(fake.get(Input::One, Register::LivePreset), 0, "input 1");
+    }
+
+    #[test]
+    fn a_start_and_a_stop_touch_nothing_but_the_run() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::ConversionGain, 1);
+        fake.set(Input::Two, Register::LivePreset, 15_000);
+        fake.set(Input::Two, Register::PresetControl, 1 << 3);
+        fake.set(Input::Two, Register::Control, 0x20);
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+
+        assert_eq!(session.handle("START"), "OK");
+        assert!(session.handle("SHOW_STATUS").contains("ACTIVE=1"));
+        assert_eq!(*fake.slow_ops.borrow(), [0x06, 0x10], "one reset MDA");
+        assert_eq!(session.handle("STOP"), "OK");
+        assert!(session.handle("SHOW_STATUS").contains("ACTIVE=0"));
+
+        // Only the control and stop registers of input 2 were written.
+        let writes = fake.writes.borrow();
+        assert_eq!(
+            *writes,
+            [
+                (0x20, 0x20),
+                (0x20, 0x21),
+                (0x3F, 1),
+                (0x3F, 0),
+                (0x20, 0x20)
+            ]
+        );
+        assert_eq!(fake.get(Input::Two, Register::ConversionGain), 1);
+        assert_eq!(fake.get(Input::Two, Register::LivePreset), 15_000);
+        assert_eq!(fake.get(Input::Two, Register::PresetControl), 1 << 3);
+        assert!(fake.discriminators.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_clear_zeroes_this_inputs_counts_and_clocks_and_not_the_others() {
+        let fake = Fake927::configured();
+        for (channel, count) in [(10, 55), (16_382, 8), (16_383, 9)] {
+            fake.memory.borrow_mut()[0x8000 + channel] = count;
+        }
+        fake.memory.borrow_mut()[10] = 66;
+        fake.set(Input::Two, Register::LiveTime, 500);
+        fake.set(Input::Two, Register::RealTime, 600);
+        fake.set(Input::One, Register::RealTime, 700);
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+        session.handle("SHOW_DATA");
+        assert_eq!(session.handle("CLEAR"), "OK");
+        // Up to the last channel the frame reaches.
+        assert_eq!(fake.memory.borrow()[0x8000 + 10], 0);
+        assert_eq!(fake.memory.borrow()[0x8000 + 16_382], 0);
+        assert_eq!(fake.memory.borrow()[10], 66);
+        assert_eq!(fake.get(Input::Two, Register::LiveTime), 0);
+        assert_eq!(fake.get(Input::Two, Register::RealTime), 0);
+        assert_eq!(fake.get(Input::One, Register::RealTime), 700);
+        // `Session` zeroes its own total on a clear, whatever the box did.
+        assert!(session.handle("SHOW_STATUS").ends_with("TOTAL=0"));
+        // ORCA's frame is 16383 words, so channel 16383 is left as it was,
+        // and a read of the box after the clear says so. Whether the real
+        // box clears it anyway is not yet measured; the fake does what the
+        // frame says.
+        assert_eq!(fake.memory.borrow()[0x8000 + 16_383], 9);
+        assert!(session.handle("SHOW_DATA").ends_with(" 0 9"));
+        assert!(session.handle("SHOW_STATUS").ends_with("TOTAL=9"));
+    }
+
+    #[test]
+    fn every_other_verb_is_refused_by_name_and_never_reaches_the_box() {
+        let fake = Fake927::configured();
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+        let holds = fake.holds.get();
+        for command in [
+            "SET_HV 1000",
+            "SET_GAIN_COARSE 2",
+            "SET_GAIN_CONVERSION 8192",
+            "SHOW_ACTIVE",
+            "ENABLE_HV",
+            "$X",
+            "SHOW_LIVE now",
+        ] {
+            let verb = command.split(' ').next().unwrap();
+            let reply = session.handle(command);
+            assert!(reply.starts_with("ERR "), "{command}: {reply}");
+            assert!(reply.contains(verb), "{command}: {reply}");
+        }
+        // `Session` sends START bare whatever came after it; asked directly,
+        // an argument this layer would have to ignore is refused instead.
+        let error = instrument.command("START 1").unwrap_err();
+        assert!(error.contains("START takes no argument"), "{error}");
+        assert_eq!(session.handle("SET_LIVE_PRESET many"), {
+            "ERR SET_LIVE_PRESET wants a whole number from 0 to 4294967295, not \"many\""
+        });
+        assert_eq!(fake.holds.get(), holds, "the box was never asked");
+        assert!(fake.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_real_dialects_own_verbs_pass_through_to_the_same_registers() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::RealTime, 7_892_556);
+        let instrument = second_input(&fake);
+        let mut session = session(&instrument);
+        assert_eq!(session.handle("SHOW_TRUE"), "$G0007892556117");
+        assert_eq!(session.handle("SET_LIVE_PRESET 15000"), "OK");
+        assert_eq!(session.handle("SHOW_LIVE_PRESET"), "$G0000015000081");
+    }
+
+    #[test]
+    fn the_box_is_held_once_for_each_thing_asked_of_it() {
+        let fake = Fake927::configured();
+        let instrument = second_input(&fake);
+        assert_eq!(fake.holds.get(), 1, "opening");
+        instrument.is_counting().unwrap();
+        instrument.command("START").unwrap();
+        instrument.read(0, 16_384).unwrap();
+        assert_eq!(fake.holds.get(), 4);
+    }
+
+    #[test]
+    fn a_box_held_elsewhere_is_an_err_and_never_idle() {
+        let fake = Fake927::configured();
+        fake.set(Input::Two, Register::AcquisitionStatus, 1);
+        let instrument = second_input(&fake);
+        fake.busy.set(true);
+        let reply = session(&instrument).handle("SHOW_STATUS");
+        assert!(reply.starts_with("ERR "), "{reply}");
+        assert!(!reply.contains("ACTIVE="), "{reply}");
+        assert!(session(&instrument).handle("START").starts_with("ERR "));
+        fake.busy.set(false);
+        assert!(
+            session(&instrument)
+                .handle("SHOW_STATUS")
+                .contains("ACTIVE=1")
+        );
+    }
+
+    #[test]
+    fn a_box_that_needs_its_fpga_is_loaded_when_an_image_is_given() {
+        let fake = Fake927::unconfigured();
+        let instrument =
+            Via927::open(&fake, "9049204", Input::One, &|| Ok(IMAGE.to_vec())).expect("open");
+        assert!(fake.configured.get());
+        assert_eq!(*fake.loaded.borrow(), IMAGE);
+        // Both inputs' discriminators, since the load reset the whole box
+        // and the process serving the other input will not set them.
+        assert_eq!(
+            *fake.discriminators.borrow(),
+            [(1, 164), (0, 16_383), (3, 164), (2, 16_383)]
+        );
+        assert_eq!(fake.holds.get(), 1, "checked and loaded under one hold");
+        assert_eq!(instrument.channels(), 16_384);
+    }
+
+    #[test]
+    fn a_box_already_configured_is_left_exactly_as_found() {
+        let fake = Fake927::configured();
+        let _ = second_input(&fake);
+        assert_eq!(*fake.slow_ops.borrow(), [0x06], "the test and nothing else");
+        assert!(fake.discriminators.borrow().is_empty());
+        assert!(fake.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_box_that_needs_its_fpga_and_has_no_image_says_how_to_give_one() {
+        let fake = Fake927::unconfigured();
+        let error = Via927::open(&fake, "9049204", Input::One, &|| {
+            crate::mcb927::firmware_image(None)
+        })
+        .err()
+        .expect("must refuse");
+        assert!(error.contains("--firmware PATH"), "{error}");
+        assert!(error.contains("MANTARAY_M927_RBF"), "{error}");
+        // Asking is all that happened: nothing was sent that changes it.
+        assert_eq!(*fake.slow_ops.borrow(), [0x06]);
+    }
+
+    #[test]
+    fn a_load_the_box_refuses_fails_the_open() {
+        let fake = Fake927::unconfigured();
+        let error = Via927::open(&fake, "9049204", Input::One, &|| Ok(Vec::new()))
+            .err()
+            .expect("must refuse");
+        assert!(error.contains("empty"), "{error}");
     }
 }
