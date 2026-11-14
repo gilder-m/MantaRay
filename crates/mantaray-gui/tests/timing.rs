@@ -21,8 +21,8 @@ fn realistic(channels: usize) -> Spectrum {
     spectrum.live_time = 3600.0;
     spectrum.real_time = 3660.0;
     spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 0.36));
-    for channel in 0..channels {
-        spectrum.channels[channel] = 2000 - (1800 * channel as u64 / channels as u64);
+    for (channel, count) in spectrum.channels[..channels].iter_mut().enumerate() {
+        *count = 2000 - (1800 * channel as u64 / channels as u64);
     }
     // Two hundred peaks, which is what a real background spectrum gives.
     for index in 0..200 {

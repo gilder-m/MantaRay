@@ -21,9 +21,7 @@ fn spectrum(channels: usize) -> Spectrum {
     let mut spectrum = Spectrum::new(channels);
     spectrum.live_time = 100.0;
     spectrum.real_time = 100.0;
-    for channel in 0..channels {
-        spectrum.channels[channel] = 100;
-    }
+    spectrum.channels[..channels].fill(100);
     for offset in -6i64..=6 {
         let centre = channels as i64 / 2;
         spectrum.channels[(centre + offset) as usize] += 5_000;

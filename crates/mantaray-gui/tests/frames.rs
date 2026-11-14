@@ -284,9 +284,9 @@ fn realistic(channels: usize) -> Spectrum {
     spectrum.live_time = 300.0;
     spectrum.real_time = 315.0;
     spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 0.36));
-    for channel in 0..channels {
+    for (channel, count) in spectrum.channels[..channels].iter_mut().enumerate() {
         // A falling continuum, so the log scale has something to show.
-        spectrum.channels[channel] = 500 - (400 * channel as u64 / channels as u64).min(400);
+        *count = 500 - (400 * channel as u64 / channels as u64).min(400);
     }
     for centre in [channels / 4, channels / 2, 3 * channels / 4] {
         for offset in -12i64..=12 {

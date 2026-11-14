@@ -2215,9 +2215,7 @@ fn an_empty_region_reports_zero_plus_or_minus_zero_and_is_not_withheld() {
     // measured zeros. The limit is the Currie constant alone:
     // 2.71 / (0.05 * 0.50 * 1000 s) = 0.1084 Bq.
     let mut s = boxed(&[]);
-    for channel in 84..=116 {
-        s.channels[channel] = 0;
-    }
+    s.channels[84..=116].fill(0);
     s.rois.mark(Roi::new(90, 110));
     let report = analyse(
         &s,

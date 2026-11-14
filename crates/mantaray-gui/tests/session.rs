@@ -22,9 +22,7 @@ fn with_spectrum(channels: usize) -> App {
     let mut spectrum = Spectrum::new(channels);
     spectrum.live_time = 100.0;
     spectrum.real_time = 105.0;
-    for channel in 0..channels {
-        spectrum.channels[channel] = 30;
-    }
+    spectrum.channels[..channels].fill(30);
     let centre = channels / 2;
     for offset in -10i64..=10 {
         let value = (5000.0 * (-0.5 * (offset as f64 / 3.5).powi(2)).exp()) as u64;
@@ -254,9 +252,9 @@ fn peak_info_on_a_broad_uncalibrated_peak_takes_the_whole_peak() {
     spectrum.live_time = 100.0;
     spectrum.real_time = 105.0;
     let sigma = 17.0;
-    for channel in 0..1024 {
+    for (channel, count) in spectrum.channels[..1024].iter_mut().enumerate() {
         let offset = channel as f64 - 600.0;
-        spectrum.channels[channel] = 30 + (5000.0 * (-0.5 * (offset / sigma).powi(2)).exp()) as u64;
+        *count = 30 + (5000.0 * (-0.5 * (offset / sigma).powi(2)).exp()) as u64;
     }
     let mut app = App::headless();
     app.open_buffer("NaI".into(), spectrum, None);
@@ -1691,9 +1689,7 @@ fn decay_corrections_change_the_reported_activity_when_asked() {
     spectrum.live_time = 3600.0;
     spectrum.real_time = 3600.0;
     spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.0, 1.0));
-    for channel in 0..512 {
-        spectrum.channels[channel] = 20;
-    }
+    spectrum.channels[..512].fill(20);
     for offset in -5i64..=5 {
         spectrum.channels[(140 + offset) as usize] += 2000;
     }
