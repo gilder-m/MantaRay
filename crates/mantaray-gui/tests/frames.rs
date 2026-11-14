@@ -284,9 +284,9 @@ fn realistic(channels: usize) -> Spectrum {
     spectrum.live_time = 300.0;
     spectrum.real_time = 315.0;
     spectrum.energy_calibration = Some(mantaray_core::EnergyCalibration::linear(0.5, 0.36));
-    for channel in 0..channels {
+    for (channel, count) in spectrum.channels[..channels].iter_mut().enumerate() {
         // A falling continuum, so the log scale has something to show.
-        spectrum.channels[channel] = 500 - (400 * channel as u64 / channels as u64).min(400);
+        *count = 500 - (400 * channel as u64 / channels as u64).min(400);
     }
     for centre in [channels / 4, channels / 2, 3 * channels / 4] {
         for offset in -12i64..=12 {
@@ -2072,6 +2072,25 @@ fn removing_a_detector_drops_its_pending_edits() {
         .insert(1, mantaray_device::Presets::default());
     app.dialogs.coarse_edit.insert(2, 65.0);
     app.apply_action(Action::RemoveDetector(0));
+    assert!(app.dialogs.hv_edit.is_empty());
+    assert!(app.dialogs.presets_edit.is_empty());
+    assert_eq!(app.dialogs.coarse_edit.get(&2), Some(&65.0));
+    assert_eq!(app.dialogs.coarse_edit.len(), 1);
+}
+
+#[test]
+fn a_number_given_to_another_instrument_drops_the_old_ones_pending_edits() {
+    // Adding under a number already in use gives the number to the new
+    // instrument; what was typed for the old one must not wait for it.
+    let mut app = App::headless();
+    assert_eq!(mantaray_device::Mcb::identity(&app.detectors[0]).number, 1);
+    app.dialogs.coarse_edit.insert(1, 64.0);
+    app.dialogs.hv_edit.insert(1, 1200.0);
+    app.dialogs
+        .presets_edit
+        .insert(1, mantaray_device::Presets::default());
+    app.dialogs.coarse_edit.insert(2, 65.0);
+    app.add_detector(simulated_entry(1));
     assert!(app.dialogs.hv_edit.is_empty());
     assert!(app.dialogs.presets_edit.is_empty());
     assert_eq!(app.dialogs.coarse_edit.get(&2), Some(&65.0));

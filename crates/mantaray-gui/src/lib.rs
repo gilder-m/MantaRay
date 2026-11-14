@@ -22,7 +22,7 @@ pub const DISPLAY_NAME: &str = "MantaRay";
 ///
 /// The directory settings and the crash snapshot live in, and the key they are
 /// stored under. Lower case and without spaces, because it becomes a path.
-pub const APPLICATION_ID: &str = "mantaray";
+pub const APPLICATION_ID: &str = mantaray_core::storage::APPLICATION_ID;
 
 pub mod app;
 pub mod assoc;

@@ -30,8 +30,8 @@ fn source(channels: usize) -> Spectrum {
     let mut spectrum = Spectrum::new(channels);
     spectrum.live_time = 600.0;
     spectrum.real_time = 620.0;
-    for channel in 0..channels {
-        spectrum.channels[channel] = 800 - (600 * channel as u64 / channels as u64);
+    for (channel, count) in spectrum.channels[..channels].iter_mut().enumerate() {
+        *count = 800 - (600 * channel as u64 / channels as u64);
     }
     for centre in [channels / 4, channels / 2, 3 * channels / 4] {
         for offset in -12i64..=12 {

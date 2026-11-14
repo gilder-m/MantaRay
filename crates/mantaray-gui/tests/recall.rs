@@ -24,9 +24,7 @@ fn written_spectrum(name: &str, channels: usize) -> PathBuf {
     let mut spectrum = Spectrum::new(channels);
     spectrum.live_time = 300.0;
     spectrum.real_time = 310.0;
-    for channel in 0..channels {
-        spectrum.channels[channel] = 20;
-    }
+    spectrum.channels[..channels].fill(20);
     // A Gaussian-ish peak, so peak search and peak info have something to find.
     let centre = channels / 2;
     for offset in -8i64..=8 {

@@ -9,9 +9,7 @@ fn with_peak(channels: usize, centre: usize) -> App {
     let mut spectrum = Spectrum::new(channels);
     spectrum.live_time = 100.0;
     spectrum.real_time = 105.0;
-    for channel in 0..channels {
-        spectrum.channels[channel] = 30;
-    }
+    spectrum.channels[..channels].fill(30);
     for offset in -10i64..=10 {
         let value = (5000.0 * (-0.5 * (offset as f64 / 3.5).powi(2)).exp()) as u64;
         spectrum.channels[(centre as i64 + offset) as usize] += value;

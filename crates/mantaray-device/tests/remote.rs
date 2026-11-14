@@ -415,6 +415,34 @@ fn a_rejection_comes_back_as_the_error_it_is() {
 }
 
 #[test]
+fn a_rejection_names_the_verb_that_was_refused() {
+    let script = vec![
+        (
+            "SHOW_CONFIGURATION",
+            "MODEL=M SERIAL=S FIRMWARE=F CHANNELS=8",
+        ),
+        ("SHOW_STATUS", "RT=0 LT=0 DT=0% ICR=0 ACTIVE=0 TOTAL=0"),
+        ("SHOW_DATA", "DATA 2 0 0"),
+        IDLE,
+        ("START", "ERR the detector is locked by operator"),
+        ("SET_HV 1000", "ERR no bias supply"),
+    ];
+    let mut remote = connect_scripted(&script);
+    let error = remote.start().expect_err("the refusal should surface");
+    assert_eq!(
+        error.to_string(),
+        "command \"START\" failed: the detector is locked by operator"
+    );
+    let error = remote
+        .set_high_voltage(1000.0)
+        .expect_err("the refusal should surface");
+    assert_eq!(
+        error.to_string(),
+        "command \"SET_HV\" failed: no bias supply"
+    );
+}
+
+#[test]
 fn polling_refreshes_the_data_at_a_civilised_rate() {
     let mut remote = connect_scripted(&[
         (

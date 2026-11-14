@@ -835,11 +835,235 @@ The permission prediction below also held exactly - the first open failed with
 
 ```
 SUBSYSTEM=="usb", ATTR{idVendor}=="0a2d", ATTR{idProduct}=="0016", TAG+="uaccess", MODE="0660"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0a2d", ATTR{idProduct}=="0019", TAG+="uaccess", MODE="0660"
 ```
 
 in `/etc/udev/rules.d/70-ortec-dpm-usb.rules`, then reload, trigger and replug.
 If opening the adapter fails on Linux it is almost always this rather than
-anything missing - permission, not a driver.
+anything missing - permission, not a driver. The first line is the DPM-USB
+adapter in front of a 926; the second is the Model 927 below, which needs the
+same permission and nothing more.
+
+### Model 927
+
+A 927 is two multichannel buffers in one NIM module with USB of its own:
+`0a2d:0019`, high speed, one interface, and four bulk endpoints in this order -
+`0x81` in (64 bytes), `0x01` out (64), `0x82` in (512), `0x08` out (64). It is
+not a 926 with a different adapter. No ASCII goes down its wire at all;
+ORTEC's host library turns the commands of the dialect above into binary
+packets, and so the bridge has to do the same.
+
+**Where the protocol comes from.** ORTEC documents none of it. It is taken
+from ORCA's open-source driver for exactly this instrument
+(`ORMCA927Model.m`, UNC/CENPA), which drove real 927s, and a first part of it
+was then measured on a 927 here (serial `9049204`) on 2026-11-13, with a
+stand-alone probe that sent the same bytes. `crates/mantaray-mcb/src/mcb927.rs`
+is the protocol, `Via927` in `serve.rs` is the translation, and each claim
+below is marked with which of the two it rests on. **The bridge's own code has
+not yet driven the instrument**: it was written and tested against doubles
+that answer as the measurements say the box does.
+
+**The slow channel** is out `0x01`, in `0x81`, and reaches the USB controller.
+A command is `op 00 n 00` and sometimes a payload; every answer starts with a
+status pair, `00 00` for success. The numbers in the pair are the macro and
+micro error codes of ORTEC's ASCII dialect sent in binary: `04 80` is an FPGA
+that needs configuration, `81 84` an invalid command, and a micro code of 2 a
+preset already exceeded.
+
+| Op | Packet | What it does | Rests on |
+|---|---|---|---|
+| `06` | `06 00 04 00` | tests the FPGA | measured: `04 80 43 DF` before a load, `00 00 00 00` after |
+| `12` | `12 00 06 00` | firmware version, 4 bytes big-endian after the status | measured: `00 00 00 00 00 02`, with the FPGA unloaded |
+| `08` / `09` | `08 00 02 00`, `09 00 02 00` | firmware loop off / on, around a load | measured: `00 00` |
+| `04` | `04 00 02 00` | puts the FPGA into configuration, **dropping the one it had** | measured: `00 00` |
+| `05` | `05 00 02 00` + 50 bytes | one piece of the FPGA image | measured: `00 00` to each of 1717 |
+| `11` | `11 00 02 00` | resets the FPGA after a load | measured: `00 00` |
+| `10` | `10 00 02 00` | "reset MDA", sent before a start | measured: `00 00` |
+| `07` | `07 00 0C 00 00 00 00 ii 00 00 hi lo` | sets one discriminator, 0 to 16383 big-endian; `ii` is 1 / 0 for input 1's lower / upper, 3 / 2 for input 2's | measured: `00 00`, and the inputs then counted |
+
+The third byte of the header is the length of the answer: asked for four
+bytes the box sent four, asked for six it sent six. The two bytes after
+`04 80` in the first row are not understood.
+
+**The FPGA has no configuration after a power-up**, and nothing on the fast
+channel answers until it is given one. The load is ORCA's `startFPGA` in
+order - `08`, `04`, the image in 50-byte pieces under `05` with the answer
+read after each, `06`, `11`, `09` - and on the bench every one of the 1722
+answers began `00 00` and the whole load took under a second. The image is ORTEC's
+`M927.rbf` (85,828 bytes). **It is ORTEC's file and is not part of MantaRay**:
+it is never in this repository, a fixture or a release. The bridge looks for
+it in three places, the first that names one winning: `--firmware PATH`, then
+`MANTARAY_M927_RBF` in the environment, then a file named `M927.rbf` in the
+application's settings directory (on Linux `$XDG_DATA_HOME/mantaray/`, by
+default `~/.local/share/mantaray/`; on macOS
+`~/Library/Application Support/mantaray/`). The last is for an application
+started from a desktop launcher, whose environment holds no variable. The
+tests load a made-up byte array.
+
+**A freshly loaded FPGA counts nothing until its discriminators are set.**
+ORCA does not say so; the bench did. After a load a ten-second count gave
+zero counts on both inputs with live time equal to real time, and after
+command `07` had set lower = 164 and upper = 16383 on each, both counted.
+The discriminators cannot be read back. So the bridge writes those two
+defaults to both inputs straight after a load it did itself, and never to an
+FPGA it finds already configured, whose discriminators somebody else may have
+chosen.
+
+**The fast channel** is out `0x08`, in `0x82`, and reaches the FPGA. A command
+is little-endian 32-bit words: an opcode and address, a count, then data for
+a write.
+
+| Operation | Words out | Answer | Rests on |
+|---|---|---|---|
+| read a register | `0x00040000 \| addr`, `1` | exactly 4 bytes | measured |
+| write a register | `0x01040000 \| addr`, `1`, value | one zero-length packet | measured |
+| read a spectrum | `0x0000` (input 1) or `0x8000` (input 2), channel count | count x 4 bytes of plain counts, then one zero-length packet | measured at 16384 channels: 65,536 bytes and the packet |
+| clear a spectrum | `0x04000000` or `0x04008000`, `0x3FFF`, then `0x3FFF` zero words | one zero-length packet | measured |
+
+Input 2's registers are `0x20` above input 1's (measured on the version
+register) and its memory `0x8000` above. The zero-length packet after a
+spectrum has to be consumed before the next command, or the next register
+read is answered with nothing; the bridge reads a spectrum into a buffer one
+packet larger than the data so that the transfer ends on that packet and
+takes it along. The registers, by offset:
+
+| Offset | Register | Notes |
+|---|---|---|
+| `0x00` | control | bit 0 start; bits 4, 5, 28, 29 are trigger, upper discriminator and gate settings |
+| `0x03` | conversion gain | 0 = 16384 channels, each step halves it, 6 = 256 |
+| `0x04` | ZDT mode | |
+| `0x05` | preset control | bit 2 real time, bit 3 live time, bit 4 ROI integral, bit 5 ROI peak |
+| `0x06`, `0x07` | live and real preset | 20 ms ticks |
+| `0x08`, `0x09` | ROI peak and ROI integral preset | counts |
+| `0x0A` | acquisition status | bit 0 acquiring |
+| `0x0B`, `0x0C` | live and real time | 20 ms ticks; writable |
+| `0x11` | version | read 2 on both inputs |
+| `0x1F` | stop | written 1 then 0 |
+
+After a fresh load every one of these read zero on both inputs except the
+version, so a 927 just loaded is at 16384 channels with no presets. The
+clocks are in the same twenty-millisecond ticks as the 926's: on an input
+busy enough to show dead time, ten seconds of counting read 500 ticks of real
+time and 222 of live.
+
+**Start, stop and clear**, as measured: writing the control register with bit
+0 set started an input (acquisition status went to 1); writing stop = 1,
+stop = 0 and then the control register with bit 0 clear stopped it; ORCA's
+clear frame zeroed the spectrum (all but, perhaps, its last channel: see
+below); and writing zero to the two clock registers
+zeroed the clocks. `10 00 02 00` was sent once before starting both inputs.
+
+Measured 2026-11-13 on serial 9049204: starting and stopping input 2 while
+input 1 counts (the start includes ORCA's reset-MDA command 0x10) leaves
+input 1 untouched: its real and live clocks run on without a step, and a 12 s
+run collected 996 pulser counts, the pulser's own rate of 83 per second. The
+reverse order holds too: starting and stopping input 1 inside a 12 s run of
+input 2 left input 2's clocks without a step.
+
+A busy input shows it in its live clock. With an unpowered preamplifier's noise
+on input 2 and the lower discriminator at 10 % of full scale, 5 s of real time
+took 206,094 counts and 2.50 s of live time; with the discriminator near half
+scale the same 5 s took 422 counts and 4.94 s of live time.
+
+**Where the bridge departs from ORCA, on purpose:**
+
+- *Starting changes nothing but the run.* ORCA's start first rewrites every
+  setting it keeps - discriminators, gain, presets, clocks. The bridge sends
+  the reset-MDA command, reads the control register, and writes it back with
+  the start bit clear and then set, leaving the other bits as found. The
+  clear-then-set pair is ORCA's own last two writes, and it makes an edge even
+  if a preset ended the last count with the start bit still standing. Gain,
+  presets and discriminators are never touched by a start.
+- *Stopping reads the control register* from the instrument rather than from
+  a remembered copy, for the same reason.
+- *`CLEAR` clears the clocks too*, as it does on a 926 and as the application
+  expects: ORCA's clear frame, then zero to the real and live clocks.
+  **Channel 16383 may survive a clear.** ORCA's frame writes 16383 zero
+  words, one short of a 16384-channel spectrum, and the bridge sends it
+  unchanged because it is the frame the bench saw work. If the box does what
+  the frame says, the top channel keeps its counts across a `CLEAR` and the
+  next read shows them. Whether it does is item 8 below.
+- *A preset of zero is "none"*: setting one writes the value and then its
+  enable bit; setting zero clears the bit and then the value; and a value
+  whose bit is clear reads back as zero, which is how the dialect says none.
+- *Answers are checked for size.* ORCA ignores what a write answers; the
+  bridge requires the zero-length packet, and exactly four bytes from a
+  register, so an answer out of step is an error rather than a wrong number.
+
+**Two inputs, two instruments.** The 927 is listed twice, as `<serial>-1`
+and `<serial>-2`, by `usb`, `probe` and `serve N`, and
+`serve --device 9049204-2` serves input 2. The bare serial names the box,
+which `927status` and `927load` take and `serve` refuses, naming both inputs;
+a part of a serial that fits more than one instrument is refused with the
+list. The application runs one bridge
+process per detector and a USB interface has one claimant, so for a 927 the
+bridge claims the interface for one operation - one status flag, one clock,
+one spectrum, one start, or the whole FPGA load - and releases it, retrying a
+busy claim for up to two seconds (ten when opening, in case the other
+process is mid-load). The device stays open in between; claiming and
+releasing are one ioctl each. The check for an unconfigured FPGA and the load
+that follows are under one claim, so two processes opening the two inputs of
+a box just powered up load it once between them. The 926's adapter is
+claimed once and kept, as before.
+
+**A known limit.** A process killed between a command and its answer can
+leave that answer queued in the box, and the next reader, in either process,
+then reads it as its own. The recovery is not built yet.
+
+**What the application can ask of it.** `Via927` answers exactly the commands
+`Session` sends: `SHOW_VERSION` (the firmware version, as `$F2`), `SHOW_LIVE`
+and `SHOW_TRUE`, the four `SHOW_..._PRESET` and `SET_..._PRESET` verbs,
+`START`, `STOP` and `CLEAR`. **Everything else is refused by name** -
+`SET_HV`, `SET_GAIN_COARSE`, `SET_GAIN_CONVERSION`, anything typed into a
+raw-command box - so the application shows `ERR` and never an `OK` for
+something that did not happen. A 926 cannot tell an unknown command from an
+obeyed one; here the bridge is the one deciding, so it can.
+
+```
+mantaray-mcb usb                                   both inputs, by name
+mantaray-mcb 927status                             read-only: FPGA, versions, both inputs' registers
+mantaray-mcb 927load --firmware /path/to/M927.rbf  load the FPGA, set the default discriminators
+mantaray-mcb serve --device 9049204-1              input 1, for mantaray
+mantaray-mcb serve --device 9049204-2              input 2, in a second process
+```
+
+`serve` and `probe` load the FPGA themselves when it needs it and an image
+was named; `927load` refuses an FPGA that is already configured unless
+`--force` is added, because a load drops both inputs' settings and whatever
+either is counting.
+
+**Not yet bench-tested**, in the order it would be worth doing:
+
+1. The bridge's own code against the instrument at all: `927status`, then
+   `927load`, then `serve` for each input.
+2. Two processes sharing the box: that releasing and re-claiming the
+   interface between operations leaves the reply stream in step (Linux keeps
+   the endpoints' data toggles across a release of an interface in its
+   default setting; macOS is unknown), and that two seconds of patience is
+   enough.
+3. The one-transfer spectrum read through `nusb`: a 66,048-byte request that
+   ends on the zero-length packet, and the 65,540-byte clear going out whole.
+4. A spectrum at a conversion gain below 16384 channels, and whether it too
+   ends in a zero-length packet.
+5. The preset registers and their enable bits: that an armed live preset
+   stops the input by itself, what a start then answers (a status with micro
+   code 2 is expected from the reset-MDA command), and whether the start bit
+   is left standing.
+6. Start as the bridge does it (control register read, written clear, written
+   set) on an input whose control register is not zero.
+7. `10 00 02 00` sent while the other input is counting, which is what
+   starting one input beside a running one does.
+8. A clear while counting, and whether channel 16383 survives ORCA's
+   16383-word clear frame.
+9. Presets written while counting, which the bridge does not refuse.
+10. `06 00 04 00` while counting: it is the open check, and nothing but its
+    name says it is harmless then.
+11. Whether a channel word ever carries a region-of-interest flag in its top
+    bit, as a 926's does. None was seen, and the bridge does not mask one.
+
+Not attempted at all: setting the conversion gain, the gate and ZDT modes,
+regions of interest, and reading the discriminators back, which the
+instrument has no way to do.
 
 ### What is left
 

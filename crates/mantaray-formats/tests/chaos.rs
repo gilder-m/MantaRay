@@ -40,8 +40,8 @@ fn every_reader_survives_truncations_of_a_valid_file() {
     let mut spectrum = mantaray_core::Spectrum::new(256);
     spectrum.live_time = 10.0;
     spectrum.real_time = 11.0;
-    for channel in 0..256 {
-        spectrum.channels[channel] = channel as u64;
+    for (channel, count) in spectrum.channels.iter_mut().enumerate() {
+        *count = channel as u64;
     }
     let whole: Vec<(SpectrumFormat, Vec<u8>)> = vec![
         (

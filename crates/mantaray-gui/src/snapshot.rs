@@ -278,8 +278,8 @@ mod tests {
         spectrum.live_time = 300.0;
         spectrum.real_time = 320.0;
         spectrum.energy_calibration = Some(EnergyCalibration::linear(0.0, 0.5));
-        for channel in 0..2048 {
-            spectrum.channels[channel] = 50 + (channel as u64 % 7);
+        for (channel, count) in spectrum.channels[..2048].iter_mut().enumerate() {
+            *count = 50 + (channel as u64 % 7);
         }
         for offset in -8i64..=8 {
             spectrum.channels[(1000 + offset) as usize] += 20_000;
